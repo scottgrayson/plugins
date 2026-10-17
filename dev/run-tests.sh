@@ -131,6 +131,11 @@ with poller.lock:
 assert poller.looks_like_poll(path, base + 3 * 29.0) is True
 assert poller.should_count("GET", path) == (False, "poll")
 
+# Steady /ping is intentional keep-alive in the example; do not auto-ignore it.
+pinger = Tracker([])
+for j in range(6):
+    assert pinger.should_count("GET", "/ping") == (True, "user")
+
 human = Tracker([])
 with human.lock:
     human.history["/dash"].extend([base, base + 5, base + 40])

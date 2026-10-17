@@ -58,7 +58,16 @@ class CountTracker:
             return True
         return False
 
+    @staticmethod
+    def poll_path_heuristic(path: str) -> bool:
+        # Best-effort only. ignorePaths is the guaranteed override for custom poll routes.
+        lower = path.lower()
+        needles = ("poll", "livewire", "heartbeat", "healthz", "health-check", "wire/")
+        return any(n in lower for n in needles)
+
     def looks_like_poll(self, path: str, now: float) -> bool:
+        if not self.poll_path_heuristic(path):
+            return False
         with self.lock:
             hist = self.history[path]
             if path in self.poll_paths:
@@ -86,6 +95,9 @@ class CountTracker:
             return False, "static"
         if method.upper() in {"GET", "HEAD", "POST"} and self.looks_like_poll(clean, now):
             return False, "poll"
+        if method.upper() in {"GET", "HEAD", "POST"} and self.poll_path_heuristic(clean):
+            with self.lock:
+                self.history[clean].append(now)
         return True, "user"
 
 
