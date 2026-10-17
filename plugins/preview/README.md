@@ -1,21 +1,23 @@
 # preview
 
-Temporary public previews of a repo app on any branch or PR, through a free Cloudflare quick tunnel (`*.trycloudflare.com`).
+Temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`).
 
 Two modes share the same scripts:
 
-1. **GitHub Actions** — tick a one-line checkbox at the top of the PR description.
-2. **Agent** — run `preview up --agent` on the agent's own VM; stay in-session until the total cap or stop. Agents must not trigger the Actions workflow.
+1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel using repository secrets (no AI).
+2. **Agent mode** — install this plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
 
-## Install
+Full marketplace install guide: [root README](../../README.md). This page matches that guide and adds plugin-local notes.
 
-- **Cursor:** add this repo as a marketplace (`.cursor-plugin/marketplace.json`) and install `preview`.
-- **Claude Code:** add this repo as a marketplace (`.claude-plugin/marketplace.json`) and install `preview`.
-- **CLI only:** run `plugins/preview/bin/preview` from a checkout.
+---
 
-## Repo setup
+## Actions mode (no AI, uses repo secrets)
 
-Commit a `.preview.json` next to your app (plain values only):
+### 1. Repo setup
+
+Commit next to your app (plain values only — no secrets in git):
+
+**`.preview.json`** (all fields optional; defaults shown):
 
 ```json
 {
@@ -30,17 +32,30 @@ Commit a `.preview.json` next to your app (plain values only):
 }
 ```
 
-Defaults when omitted: idle **5 minutes** (`300`), total max **15 minutes** (`900`). The total cap always wins.
+| Field | Meaning |
+| --- | --- |
+| `type` | `static` (built-in file server) or any label; non-static requires `start` |
+| `start` | Shell command to boot the app (receives `PORT`) |
+| `port` | App listen port |
+| `idleSeconds` | Idle timeout after READY (Actions/CLI). Ignored in agent mode |
+| `totalCapSeconds` | Hard max lifetime; **always wins** over idle |
+| `defaultSteps` | Step names to run when the PR has no `preview:<step>` labels |
+| `ignorePaths` | Extra fnmatch patterns never counted as usage (merged with built-in `*poll*` + static assets) |
+| `root` | Doc root for `type: static` when `start` is empty |
 
-Built-in ignore (always on): path wildcard `*poll*` plus static assets. Add repo-specific patterns with `ignorePaths` (fnmatch wildcards, e.g. `/healthz*`, `*/heartbeat`).
+**Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
 
-Named steps are scripts at `.preview/steps/<name>.sh` — never commands embedded in JSON. Optional `PREVIEW.md` for human check notes. Secrets never live in the repo; list names in `.env.example`.
+**`.env.example`**: secret *names* only. Optional **`PREVIEW.md`**: human check notes.
 
-PR labels `preview:<step>` select extra steps. Unknown steps fail with the valid list. With no labels, `defaultSteps` run. Non-PR branches work; PR-only checkbox/comment steps are skipped.
+### 2. Secrets
 
-## Actions (consumer)
+1. Create GitHub repository secrets matching `.env.example`.
+2. Step scripts and `start` read them as environment variables.
+3. Use `secrets: inherit` on the reusable workflow call. To expose a custom secret into the preview process, map it with `env:` on the composite-action step (see below).
 
-The shipped workflow listens only for the PR description checkbox (`pull_request` edited / opened / reopened). There is no `onDemand` flag and no triggers list in the plugin.
+### 3. Workflow
+
+Add `.github/workflows/preview.yml`. Pin `@v1` when released; until then `@main`:
 
 ```yaml
 name: Preview
@@ -59,43 +74,121 @@ jobs:
       config: .preview.json
 ```
 
-Or call the composite action at `scottgrayson/plugins/plugins/preview@main` (see this repo's `.github/workflows/preview.yml`).
+| Event | Job | Effect |
+| --- | --- | --- |
+| PR `opened` / `reopened` | `ensure-checkbox` | Inserts `- [ ] Check to generate preview` as line 1 if missing |
+| PR `edited` with box ticked | `mark-loading` → `preview` → `finalize` | Loading line → public URL → idle checkbox restored |
 
-### Custom triggers
+You can add the checkbox yourself as PR body line 1; the ensure job is a convenience. The shipped workflow’s only start trigger is ticking that box.
 
-Repos that want other triggers (comment commands, labels, schedule, etc.) write their own workflow that calls the reusable workflow or composite action. Example sketch:
+### 4. Use it
 
-```yaml
-name: Preview on comment
-on:
-  issue_comment:
-    types: [created]
-jobs:
-  preview:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, '/preview')
-    uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
-    secrets: inherit
-    with:
-      working-directory: .
-```
-
-(You would still need a small job to mark the PR body control line / set `start=yes` the same way the shipped checkbox path does.)
+Open a PR → confirm line 1 is `- [ ] Check to generate preview` → tick the box → wait for `[Preview Website](<url>) · created … · expires after 5m idle`. Finalize restores the idle checkbox. Stop reason is in the job log only.
 
 PR description line 1 is exactly one of:
 
 - `- [ ] Check to generate preview` (idle)
-- `Preview deploy started at 11:52 AM ET` or `… (estimate 29s)` (loading; no checkbox)
-- `[Preview Website](<url>) · created 11:52 AM ET · expires after 5m idle` (running; no checkbox)
+- `Preview deploy started at 11:52 AM ET` or `… (estimate 29s)` (loading; estimate only when `<!-- preview:last-deploy=… -->` exists)
+- `[Preview Website](<url>) · created 11:52 AM ET · expires after 5m idle` (running)
 
-Ticking the idle box starts a tiny `mark-loading` job (inline PATCH only). The estimate comes from `<!-- preview:last-deploy=29s -->` in the description when present; with no history there is no estimate text. At READY the running line is written once and the hidden last-deploy comment is updated. A separate `finalize` job resets to idle so the open PR page updates live. Stop reason goes to the job log only (no PR comments). GitHub strips `target=_blank` from PR bodies, so the Preview Website link is plain markdown (Cmd/Ctrl-click for a new tab).
+GitHub strips `target=_blank` from PR bodies; use Cmd/Ctrl-click for a new tab.
 
-## Agent
+### Exposing secrets to your app
 
-See [`skills/preview/SKILL.md`](skills/preview/SKILL.md). Agents run `preview up --agent` locally on their VM (no idle timer; total cap only) and must never tick the Actions checkbox. Stay in the turn until the preview stops, then report the reason.
+`secrets: inherit` alone does not export custom secrets into `start` / `.preview/steps/*.sh`. Map them on the composite action (pattern in this repo’s [`.github/workflows/preview.yml`](../../.github/workflows/preview.yml)):
 
-## Keep-alive
+```yaml
+- uses: scottgrayson/plugins/plugins/preview@main
+  env:
+    DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  with:
+    mode: run
+    working-directory: .
+    config: .preview.json
+```
 
-A small reverse proxy sits between the tunnel and the app and logs each request. In Actions/CLI mode a single idle timer starts at READY and resets on counted traffic only. Never counted: default `*poll*`, `ignorePaths`, and static assets. No first-visit / grace-period logic. Agent mode disables idle entirely. The total cap always wins.
+### Custom triggers
+
+No `onDemand` flag and no triggers list. For comment commands, labels, schedule, etc., write your own workflow that calls the reusable workflow or composite action.
+
+---
+
+## Agent mode (plugin)
+
+Agents run the tunnel on their own VM and **must not** tick the Actions checkbox.
+
+### Install — Claude Code
+
+Marketplace name: `scottgrayson-plugins`.
+
+```text
+/plugin marketplace add scottgrayson/plugins
+/plugin install preview@scottgrayson-plugins
+```
+
+```bash
+claude plugin marketplace add scottgrayson/plugins
+claude plugin install preview@scottgrayson-plugins
+```
+
+```text
+/plugin install preview --marketplace scottgrayson/plugins
+```
+
+### Install — Cursor
+
+Per [Cursor plugins docs](https://cursor.com/docs/plugins):
+
+1. **Dashboard → Plugins & MCPs → Team Marketplaces → Add Marketplace → Import from Repo**
+2. Paste `https://github.com/scottgrayson/plugins` (Teams/Enterprise)
+3. **Customize** → find **preview** → **Install**
+
+Local smoke-test: copy this plugin to `~/.cursor/plugins/local/preview` and reload. `/add-plugin` only works for plugins on [cursor.com/marketplace](https://cursor.com/marketplace).
+
+### Run in a consumer repo
+
+```bash
+export DATABASE_URL="…"   # names from .env.example
+preview up --agent --config .preview.json --workdir .
+```
+
+From a checkout of this marketplace:
+
+```bash
+bin/preview up --agent --config /path/to/app/.preview.json --workdir /path/to/app
+```
+
+`--agent` disables idle; only `totalCapSeconds` applies. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
+
+---
+
+## Defaults
+
+| | Actions / CLI | Agent (`--agent`) |
+| --- | --- | --- |
+| Idle after READY | **5 minutes** (`300`) | **Off** |
+| Total max | **15 minutes** (`900`) | Same — safety net |
+| Cap vs idle | Cap always wins | Cap only |
+
+Built-in ignore: `*poll*` + static assets. Single idle timer from READY; resets on counted requests only.
+
+---
+
+## Config reference
+
+```json
+{
+  "type": "server",
+  "start": "npm run start",
+  "port": 3000,
+  "idleSeconds": 300,
+  "totalCapSeconds": 900,
+  "defaultSteps": ["seed"],
+  "ignorePaths": ["/healthz*", "*/heartbeat"]
+}
+```
+
+CLI only (no plugin install): run `bin/preview` from this package. Workflow ref: prefer `@v1` once released; `@main` until then.
 
 ## v2
 
