@@ -9,6 +9,8 @@ Share the same scripts Actions mode uses. No AI is required to keep the tunnel u
 
 ## Agents: local only — never trigger Actions
 
+**Only start a preview when the human asks** (or when the consumer repo’s own agent rules say to). Do not start one on your own initiative.
+
 **Run previews on your own VM in agent mode.** Start the tunnel locally with `preview up --agent` so you can hit the site, debug, and edit in place.
 
 **Do not tick the PR checkbox, edit the PR body to start a preview, or otherwise trigger the GitHub Actions preview workflow.** Actions mode is for humans reviewing a PR in the browser. Agents must use local agent mode so they can inspect the live site on the same machine.

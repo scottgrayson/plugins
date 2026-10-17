@@ -142,6 +142,16 @@ bin/preview up --agent --config /path/to/app/.preview/config.json --workdir /pat
 
 `--agent` disables idle; only `totalCapSeconds` applies. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
 
+### Optional: repo agent rules
+
+A consumer repo can point its own agent rules at the plugin with a neutral one-liner in `AGENTS.md`, `CLAUDE.md`, or `.cursor/rules` — for example:
+
+```text
+To deploy a preview for testing, use the preview plugin (`preview up --agent`).
+```
+
+The skill does not tell agents to start previews on their own; the human (or the repo’s rules) decides when to ask.
+
 ---
 
 ## Defaults
