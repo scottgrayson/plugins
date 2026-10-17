@@ -53,7 +53,7 @@ Commit these next to your app:
 
 ### 2. Workflow
 
-Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`:
+Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`. This marketplace dogfoods the same shape in [`.github/workflows/preview.yml`](.github/workflows/preview.yml) (relative `uses`, `working-directory: examples/hello-world`):
 
 ```yaml
 name: Preview

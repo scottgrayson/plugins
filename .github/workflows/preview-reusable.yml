@@ -27,11 +27,14 @@ jobs:
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
+          # Dogfood PR branch of this marketplace; consumers get @main.
+          ref: ${{ github.repository == 'scottgrayson/plugins' && github.event.pull_request.head.sha || 'main' }}
       - uses: ./_preview_plugin/plugins/preview
         with:
           mode: ensure-checkbox
           pr-number: ${{ github.event.pull_request.number }}
 
+  # Fast path: gate + loading line only. No checkout, cache, or script fetch.
   mark-loading:
     if: github.event_name == 'pull_request' && github.event.action == 'edited'
     runs-on: ubuntu-latest
@@ -41,6 +44,7 @@ jobs:
       job_start: ${{ steps.go.outputs.job_start }}
       created_et: ${{ steps.go.outputs.created_et }}
       head_sha: ${{ steps.go.outputs.head_sha }}
+      tick_at: ${{ steps.go.outputs.tick_at }}
     steps:
       - name: Mark loading
         id: go
@@ -49,7 +53,6 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          FORCE_START: "no"
           TICK_AT: ${{ github.event.pull_request.updated_at }}
         run: |
           set -euo pipefail
@@ -61,6 +64,7 @@ jobs:
             echo "head_sha=$HEAD_SHA"
             echo "tick_at=$TICK_AT"
           } >> "$GITHUB_OUTPUT"
+
           python3 - <<'PY'
           import json, os, re, urllib.request
           from datetime import datetime
@@ -69,9 +73,9 @@ jobs:
           token = os.environ["GH_TOKEN"]
           repo = os.environ["REPO"]
           pr = os.environ["PR_NUMBER"]
-          force = os.environ.get("FORCE_START", "no") == "yes"
           job_start = int(os.environ["JOB_START"])
           out_path = os.environ["GITHUB_OUTPUT"]
+
           IDLE = "- [ ] Check to generate preview"
           TICKED = "- [x] Check to generate preview"
 
@@ -96,7 +100,9 @@ jobs:
               return bool(
                   re.match(r"^Preview deploy started at ", line)
                   or re.match(r"^\[Preview Website\]\(", line)
-                  or re.match(r"^- \[[xX]\] ", line)
+                  or re.match(r"^- \[[xX]\] Link to preview will be available soon", line)
+                  or re.match(r"^- \[[xX]\] \[Preview\]\(", line)
+                  or re.match(r"^- \[[xX]\] https://", line)
               )
 
           def control_line(body: str) -> str:
@@ -104,7 +110,7 @@ jobs:
               for line in body.splitlines():
                   if re.match(r"^\[Preview Website\]\(", line) or re.match(r"^- \[[xX]\] \[Preview\]\(", line) or re.match(r"^- \[[xX]\] https://", line):
                       rank = 4
-                  elif line.startswith("Preview deploy started at "):
+                  elif line.startswith("Preview deploy started at ") or re.match(r"^- \[[xX]\] Link to preview will be available soon", line):
                       rank = 3
                   elif line == TICKED:
                       rank = 2
@@ -137,7 +143,7 @@ jobs:
 
           body = (api("GET", f"pulls/{pr}").get("body") or "")
           current = control_line(body)
-          should = force or current == TICKED
+          should = current == TICKED
           created_et = format_et(job_start)
           with open(out_path, "a", encoding="utf-8") as fh:
               fh.write(f"start={'yes' if should else 'no'}\n")
@@ -145,8 +151,12 @@ jobs:
           if not should:
               print("Skipping preview (control line is not newly ticked).")
               raise SystemExit(0)
+
           last = last_deploy(body)
-          loading = f"Preview deploy started at {created_et} (estimate {last})" if last else f"Preview deploy started at {created_et}"
+          if last:
+              loading = f"Preview deploy started at {created_et} (estimate {last})"
+          else:
+              loading = f"Preview deploy started at {created_et}"
           api("PATCH", f"pulls/{pr}", {"body": set_control(body, loading)})
           print(f"[preview] loading: {loading}")
           PY
@@ -194,6 +204,7 @@ jobs:
           created-et: ${{ needs.mark-loading.outputs.created_et }}
           skip-idle-reset: "true"
 
+  # Short dedicated job so Idle appears live (same pattern as mark-loading).
   finalize:
     needs: [mark-loading, preview]
     if: always() && needs.mark-loading.outputs.start == 'yes'
@@ -209,7 +220,10 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os, re, urllib.request
-          token = os.environ["GH_TOKEN"]; repo = os.environ["REPO"]; pr = os.environ["PR_NUMBER"]
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          pr = os.environ["PR_NUMBER"]
           reason = os.environ.get("REASON") or "stopped"
           IDLE = "- [ ] Check to generate preview"
 
@@ -217,8 +231,12 @@ jobs:
               req = urllib.request.Request(
                   f"https://api.github.com/repos/{repo}/{path}",
                   data=None if data is None else json.dumps(data).encode(),
-                  headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                           "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "preview-plugin"},
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "preview-plugin",
+                  },
                   method=method,
               )
               with urllib.request.urlopen(req) as resp:
@@ -227,7 +245,11 @@ jobs:
           def is_control(line: str) -> bool:
               if line in (IDLE, "- [x] Check to generate preview"):
                   return True
-              return bool(re.match(r"^Preview deploy started at ", line) or re.match(r"^\[Preview Website\]\(", line) or re.match(r"^- \[[xX]\] ", line))
+              return bool(
+                  re.match(r"^Preview deploy started at ", line)
+                  or re.match(r"^\[Preview Website\]\(", line)
+                  or re.match(r"^- \[[xX]\] ", line)
+              )
 
           def set_control(body: str, new_line: str) -> str:
               lines = [ln for ln in body.splitlines() if not is_control(ln)]
@@ -240,7 +262,8 @@ jobs:
               return text
 
           body = (api("GET", f"pulls/{pr}").get("body") or "")
-          api("PATCH", f"pulls/{pr}", {"body": set_control(body, IDLE)})
+          new_body = set_control(body, IDLE)
+          api("PATCH", f"pulls/{pr}", {"body": new_body})
           got = (api("GET", f"pulls/{pr}").get("body") or "").splitlines()[:1]
           print(f"[preview] stop reason: {reason}")
           print(f"[preview] idle line: {got[0] if got else ''}")
