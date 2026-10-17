@@ -72,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"hello-world on 127.0.0.1:{PORT} :: {greeting()}", flush=True)
+    print(f"preview on 127.0.0.1:{PORT} :: {greeting()}", flush=True)
     server.serve_forever()
 
 

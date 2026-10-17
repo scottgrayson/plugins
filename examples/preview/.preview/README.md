@@ -1,4 +1,4 @@
-# hello-world preview notes
+# preview example notes
 
 - Confirm the greeting shows the PR number (or branch name).
 - Click **Ping** — that hits `/ping` and counts as real usage (resets the idle timer).

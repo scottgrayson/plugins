@@ -132,7 +132,7 @@ explicit = Tracker(["/poll"])
 assert explicit.should_count("GET", "/poll") == (False, "ignorePaths")
 assert explicit.should_count("GET", "/ping") == (True, "user")
 
-# /ping must always count (intentional keep-alive in hello-world).
+# /ping must always count (intentional keep-alive in the example app).
 pinger = Tracker([])
 for _ in range(6):
     assert pinger.should_count("GET", "/ping") == (True, "user")

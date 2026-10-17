@@ -7,7 +7,7 @@ Two modes share the same scripts:
 1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
 2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
 
-Plugin package: [`plugins/preview/`](plugins/preview/) · Example: [`examples/hello-world/`](examples/hello-world/)
+Plugin package: [`plugins/preview/`](plugins/preview/) · Example: [`examples/preview/`](examples/preview/)
 
 Secrets are not supported in v1; previews work for apps that need no secrets.
 
@@ -53,7 +53,7 @@ Commit these next to your app:
 
 ### 2. Workflow
 
-Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`. This marketplace dogfoods the same shape in [`.github/workflows/preview.yml`](.github/workflows/preview.yml) (relative `uses`, `working-directory: examples/hello-world`):
+Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`. This marketplace dogfoods the same shape in [`.github/workflows/preview.yml`](.github/workflows/preview.yml) (relative `uses`, `working-directory: examples/preview`):
 
 ```yaml
 name: Preview

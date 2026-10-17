@@ -5,5 +5,5 @@
 __pycache__/
 *.pyc
 *.pyo
-examples/hello-world/greeting.txt
+examples/preview/greeting.txt
 

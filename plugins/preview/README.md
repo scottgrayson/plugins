@@ -53,7 +53,7 @@ Commit next to your app:
 
 ### 2. Workflow
 
-Add `.github/workflows/preview.yml`. Pin `@v1` when released; until then `@main`. This marketplace dogfoods the same shape (relative `uses`, `working-directory: examples/hello-world`):
+Add `.github/workflows/preview.yml`. Pin `@v1` when released; until then `@main`. This marketplace dogfoods the same shape (relative `uses`, `working-directory: examples/preview`):
 
 ```yaml
 name: Preview

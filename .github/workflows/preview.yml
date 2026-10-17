@@ -12,5 +12,5 @@ jobs:
   preview:
     uses: ./.github/workflows/preview-reusable.yml
     with:
-      working-directory: examples/hello-world
+      working-directory: examples/preview
       config: .preview/config.json

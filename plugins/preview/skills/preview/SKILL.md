@@ -77,7 +77,7 @@ Live edits on static / file-served apps appear on the same URL after refresh. Pr
 ## Previewing a PR (local agent mode)
 
 1. Check out the PR head (or work in the already-checked-out PR branch).
-2. `cd` to the app directory that has `.preview/config.json` (for this repo: `examples/hello-world`).
+2. `cd` to the app directory that has `.preview/config.json` (for this repo: `examples/preview`).
 3. Set `PREVIEW_PR_NUMBER` from the PR.
 4. Pass PR labels via `--labels` if present (`preview:<step>` only). Unknown steps must fail with the valid list — do not invent commands.
 5. Run `up --agent`, report the URL, stay until stopped, then report the stop reason.
