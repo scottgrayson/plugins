@@ -58,10 +58,10 @@ Or call the composite action at `scottgrayson/plugins/plugins/preview@main` (see
 PR description line 1 is exactly one of:
 
 - `- [ ] Check to generate preview` (idle)
-- `- [x] Link to preview will be available soon (avg deploy time 1m1s)` (loading)
-- `- [x] [Preview](<url>)` (running)
+- `Preview deploy started at 11:52 AM ET` or `… (estimate 29s)` (loading; no checkbox)
+- `[Preview Website](<url>) · created 11:52 AM ET · expires after 30s idle` (running; no checkbox)
 
-Ticking the idle box starts the job. The loading line is written before checkout/install; the average comes from a cached EMA of past job-start→READY times (default `1m1s`). Concurrency is per PR. On any shutdown the line resets to idle; the stop reason is written to the job log only (no PR comments). `GITHUB_TOKEN` description edits do not re-trigger workflows.
+Ticking the idle box starts a tiny `mark-loading` job (inline PATCH only). The estimate comes from `<!-- preview:last-deploy=29s -->` in the description when present; with no history there is no estimate text. At READY the running line is written once and the hidden last-deploy comment is updated. A separate `finalize` job resets to idle so the open PR page updates live. Stop reason goes to the job log only (no PR comments). GitHub strips `target=_blank` from PR bodies, so the Preview Website link is plain markdown (Cmd/Ctrl-click for a new tab).
 
 ## Agent
 

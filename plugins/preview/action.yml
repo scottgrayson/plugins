@@ -18,24 +18,25 @@ inputs:
     required: false
     default: ''
   mode:
-    description: ensure-checkbox | gate | mark-loading | run
+    description: ensure-checkbox | run
     required: false
     default: run
-  metrics-dir:
-    description: Directory for cached avg-ready metrics
-    required: false
-    default: .preview-metrics
   job-start-epoch:
-    description: Epoch seconds when the job started (for READY timing)
+    description: Epoch seconds when the deploy started (for READY timing + created ET)
     required: false
     default: ''
+  created-et:
+    description: Preformatted America/New_York created timestamp with ET label
+    required: false
+    default: ''
+  skip-idle-reset:
+    description: If true, leave Idle reset to the finalize job (for live UI updates)
+    required: false
+    default: 'false'
 outputs:
-  should_start:
-    description: Whether the PR checkbox gate says to start a preview
-    value: ${{ steps.gate.outputs.should_start }}
-  avg_seconds:
-    description: Avg ready seconds used for the loading line
-    value: ${{ steps.loading.outputs.avg_seconds }}
+  stop_reason:
+    description: Why the preview stopped
+    value: ${{ steps.run.outputs.stop_reason }}
 runs:
   using: composite
   steps:
@@ -52,49 +53,6 @@ runs:
         source "$PLUGIN_ROOT/lib/actions_pr.sh"
         preview_actions_ensure_checkbox
 
-    - name: Gate start
-      id: gate
-      shell: bash
-      env:
-        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
-        GH_TOKEN: ${{ github.token }}
-        PREVIEW_MODE: ${{ inputs.mode }}
-      run: |
-        set -euo pipefail
-        if [[ "$PREVIEW_MODE" != "gate" && "$PREVIEW_MODE" != "mark-loading" ]]; then
-          echo "should_start=yes" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        PLUGIN_ROOT="${{ github.action_path }}"
-        # shellcheck source=/dev/null
-        source "$PLUGIN_ROOT/lib/actions_pr.sh"
-        should="$(preview_actions_should_start)"
-        echo "should_start=$should" >> "$GITHUB_OUTPUT"
-        if [[ "$should" != "yes" ]]; then
-          echo "Skipping preview (control line is not the ticked idle checkbox)."
-        fi
-
-    - name: Mark loading
-      id: loading
-      if: inputs.mode == 'mark-loading'
-      shell: bash
-      env:
-        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
-        GH_TOKEN: ${{ github.token }}
-        PREVIEW_METRICS_DIR: ${{ inputs.metrics-dir }}
-        SHOULD_START: ${{ steps.gate.outputs.should_start }}
-      run: |
-        set -euo pipefail
-        PLUGIN_ROOT="${{ github.action_path }}"
-        # shellcheck source=/dev/null
-        source "$PLUGIN_ROOT/lib/actions_pr.sh"
-        avg="$(preview_actions_read_avg_seconds)"
-        echo "avg_seconds=$avg" >> "$GITHUB_OUTPUT"
-        if [[ "$SHOULD_START" != "yes" ]]; then
-          exit 0
-        fi
-        preview_actions_mark_loading "$avg"
-
     - name: Install tools
       if: inputs.mode == 'run'
       shell: bash
@@ -105,6 +63,7 @@ runs:
 
     - name: Run preview
       if: inputs.mode == 'run'
+      id: run
       shell: bash
       env:
         PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
@@ -112,8 +71,9 @@ runs:
         PREVIEW_LABELS: ${{ inputs.labels }}
         PREVIEW_WORKDIR: ${{ inputs.working-directory }}
         PREVIEW_CONFIG_INPUT: ${{ inputs.config }}
-        PREVIEW_METRICS_DIR: ${{ inputs.metrics-dir }}
         PREVIEW_JOB_START_EPOCH: ${{ inputs.job-start-epoch }}
+        PREVIEW_CREATED_ET: ${{ inputs.created-et }}
+        PREVIEW_SKIP_IDLE_RESET: ${{ inputs.skip-idle-reset }}
         GH_TOKEN: ${{ github.token }}
         GITHUB_TOKEN: ${{ github.token }}
       run: |
@@ -126,21 +86,33 @@ runs:
         mkdir -p "$PREVIEW_STATE_DIR"
         # shellcheck source=/dev/null
         source "$PLUGIN_ROOT/lib/actions_pr.sh"
+        # shellcheck source=/dev/null
+        source "$PLUGIN_ROOT/lib/config.sh"
 
         labels="${PREVIEW_LABELS:-}"
         config="$PREVIEW_CONFIG_INPUT"
         job_start="${PREVIEW_JOB_START_EPOCH:-$(date +%s)}"
+        created_et="${PREVIEW_CREATED_ET:-}"
+        if [[ -z "$created_et" ]]; then
+          created_et="$(preview_pr_format_et "$job_start")"
+        fi
 
         cleanup() {
           local reason
           reason="$(cat "$PREVIEW_STATE_DIR/reason" 2>/dev/null || echo cancelled)"
+          echo "stop_reason=$reason" >> "$GITHUB_OUTPUT"
           "$PLUGIN_ROOT/bin/preview" stop "$reason" >/dev/null 2>&1 || true
-          if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
+          echo "[preview] stop reason: $reason" >&2
+          # Idle body reset is owned by the short finalize job when skip-idle-reset=true,
+          # so the open PR page gets a live update (same pattern as mark-loading).
+          if [[ "${PREVIEW_SKIP_IDLE_RESET}" != "true" && -n "${PREVIEW_PR_NUMBER:-}" ]]; then
             preview_actions_mark_stopped "$reason" || true
           fi
-          echo "[preview] stop reason: $reason" >&2
         }
         trap cleanup EXIT
+
+        preview_load_config "$config"
+        idle_seconds="${PREVIEW_IDLE_SECONDS:-900}"
 
         LOG_DIR="$(mktemp -d)"
         setsid "$PLUGIN_ROOT/bin/preview" up --config "$config" --labels "$labels" >"$LOG_DIR/up.stdout" 2>"$LOG_DIR/up.stderr" &
@@ -176,16 +148,16 @@ runs:
         ready_at="$(date +%s)"
         elapsed=$((ready_at - job_start))
         if (( elapsed < 1 )); then elapsed=1; fi
-        preview_actions_write_avg_seconds "$elapsed"
 
         if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
-          preview_actions_mark_ready "$url"
+          preview_actions_mark_ready "$url" "$job_start" "$idle_seconds" "$elapsed"
         fi
 
         wait "$UP_PID" || true
         trap - EXIT
         reason="$(cat "$PREVIEW_STATE_DIR/reason" 2>/dev/null || echo stopped)"
+        echo "stop_reason=$reason" >> "$GITHUB_OUTPUT"
         echo "[preview] stop reason: $reason" >&2
-        if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
+        if [[ "${PREVIEW_SKIP_IDLE_RESET}" != "true" && -n "${PREVIEW_PR_NUMBER:-}" ]]; then
           preview_actions_mark_stopped "$reason"
         fi
