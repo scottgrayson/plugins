@@ -1,0 +1,9 @@
+.preview/run/
+**/.preview/run/
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+examples/preview/greeting.txt
+

@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PREVIEW_BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREVIEW_PLUGIN_ROOT="$(cd "$PREVIEW_BIN_DIR/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/common.sh"
+# shellcheck source=../lib/config.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/config.sh"
+# shellcheck source=../lib/port.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/port.sh"
+# shellcheck source=../lib/tunnel.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/tunnel.sh"
+# shellcheck source=../lib/ready.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/ready.sh"
+# shellcheck source=../lib/watchdog.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/watchdog.sh"
+# shellcheck source=../lib/cleanup.sh
+source "$PREVIEW_PLUGIN_ROOT/lib/cleanup.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: preview <command>
+
+  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent] [--share]
+  share [--config PATH] [--labels CSV] [--workdir DIR]
+  url
+  status
+  stop [reason]
+  wait
+
+  --agent  Agent mode: no idle timer; only totalCapSeconds applies.
+           Default: app + local proxy only (localhost URL, no tunnel).
+  --share  Open a Cloudflare quick tunnel and print the public URL.
+           Implied for Actions/CLI (non-agent). With --agent, opt-in only.
+  share    Same as: up --agent --share
+EOF
+}
+
+cmd_up() {
+  local config="" labels="" workdir="" agent=0 share=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config) config="$2"; shift 2 ;;
+      --labels) labels="$2"; shift 2 ;;
+      --workdir) workdir="$2"; shift 2 ;;
+      --agent) agent=1; shift ;;
+      --share) share=1; shift ;;
+      *) preview_die "unknown argument: $1" ;;
+    esac
+  done
+
+  if [[ -n "$workdir" ]]; then
+    cd "$workdir"
+  fi
+
+  if (( agent )); then
+    export PREVIEW_AGENT_MODE=1
+  fi
+
+  # Actions / human CLI always tunnel. Agent mode stays local unless --share.
+  local use_tunnel=1
+  if (( agent )) && (( ! share )); then
+    use_tunnel=0
+  fi
+
+  export PREVIEW_STATE_DIR="${PREVIEW_STATE_DIR:-$PWD/.preview/run}"
+  if [[ -f "$(preview_state_dir)/status" ]]; then
+    local st
+    st="$(preview_read status)"
+    if [[ "$st" == "ready" || "$st" == "watching" || "$st" == "starting" ]]; then
+      preview_die "preview already running in $(preview_state_dir) (status=$st)"
+    fi
+  fi
+
+  # Preserve nothing from a prior run except we recreate the state dir cleanly.
+  local state
+  state="$(preview_state_dir)"
+  mkdir -p "$state"
+  find "$state" -mindepth 1 -maxdepth 1 ! -name bin -exec rm -rf {} +
+  preview_ensure_state
+  preview_write status starting
+  preview_write started_at "$(date +%s)"
+  preview_write pgid "$$"
+  if [[ "${PREVIEW_AGENT_MODE:-}" == "1" || "${PREVIEW_AGENT_MODE:-}" == "true" ]]; then
+    preview_write agent_mode "1"
+  fi
+  if (( use_tunnel )); then
+    preview_write share "1"
+  else
+    preview_write share "0"
+  fi
+
+  preview_load_config "${config:-$(preview_default_config_path)}"
+
+  preview_run_steps "$labels" "$PWD/.preview/steps"
+
+  local app_port proxy_port
+  app_port="$PREVIEW_PORT"
+  proxy_port="$(preview_free_port)"
+  preview_write app_port "$app_port"
+  preview_write proxy_port "$proxy_port"
+
+  local req_log
+  req_log="$(preview_state_dir)/requests.log"
+  : >"$req_log"
+
+  export PORT="$app_port"
+  export PREVIEW_PR_NUMBER="${PREVIEW_PR_NUMBER:-${GITHUB_PR_NUMBER:-}}"
+  export PREVIEW_BRANCH="${PREVIEW_BRANCH:-${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}}"
+
+  preview_log "starting app on :$app_port (type=$PREVIEW_TYPE)"
+  if [[ -n "$PREVIEW_START" ]]; then
+    bash -c "$PREVIEW_START" >"$(preview_state_dir)/app.log" 2>&1 &
+  elif [[ "$PREVIEW_TYPE" == "static" ]]; then
+    python3 "$PREVIEW_PLUGIN_ROOT/lib/static_server.py" \
+      --root "$PREVIEW_ROOT" \
+      --port "$app_port" \
+      >"$(preview_state_dir)/app.log" 2>&1 &
+  else
+    preview_die "type '$PREVIEW_TYPE' requires a start command"
+  fi
+  local app_pid=$!
+  preview_write app_pid "$app_pid"
+  preview_wait_port 127.0.0.1 "$app_port" || preview_die "app did not open port $app_port"
+
+  python3 "$PREVIEW_PLUGIN_ROOT/lib/proxy.py" \
+    --listen-port "$proxy_port" \
+    --upstream-port "$app_port" \
+    --log "$req_log" \
+    --ignore-paths "$PREVIEW_IGNORE_PATHS" \
+    >"$(preview_state_dir)/proxy.log" 2>&1 &
+  local proxy_pid=$!
+  preview_write proxy_pid "$proxy_pid"
+  preview_wait_port 127.0.0.1 "$proxy_port" || preview_die "proxy did not open port $proxy_port"
+
+  local url
+  if (( use_tunnel )); then
+    url="$(preview_start_tunnel "http://127.0.0.1:$proxy_port")"
+  else
+    url="http://127.0.0.1:$proxy_port"
+    preview_write url "$url"
+    preview_log "agent mode: local only (no tunnel); pass --share for a public URL"
+  fi
+  preview_wait_ready "$url" >/dev/null
+
+  # Seed idle clock: READY itself is not user traffic.
+  preview_write status watching
+  printf '%s\n' "$url"
+
+  preview_watchdog
+  local reason
+  reason="$(preview_read reason)"
+  [[ -n "$reason" ]] || reason="watchdog"
+  preview_cleanup "$reason"
+  echo "preview stopped: $reason" >&2
+}
+
+cmd_share() {
+  # Human-facing public link: agent mode + Cloudflare quick tunnel.
+  cmd_up --agent --share "$@"
+}
+
+cmd_url() {
+  local url
+  url="$(preview_read url)"
+  [[ -n "$url" ]] || preview_die "no preview URL (is preview running?)"
+  printf '%s\n' "$url"
+}
+
+cmd_status() {
+  local st reason url
+  st="$(preview_read status)"
+  reason="$(preview_read reason)"
+  url="$(preview_read url)"
+  printf 'status=%s\n' "${st:-unknown}"
+  [[ -n "$url" ]] && printf 'url=%s\n' "$url"
+  [[ -n "$reason" ]] && printf 'reason=%s\n' "$reason"
+}
+
+cmd_stop() {
+  local reason="${1:-stop}"
+  preview_write reason "$reason"
+  preview_write stop "1"
+  if [[ "$(preview_read status)" == "stopped" ]]; then
+    echo "already stopped"
+    return 0
+  fi
+  preview_cleanup "$reason"
+}
+
+cmd_wait() {
+  # Block until status is stopped (for agents that started preview in background).
+  local st
+  while true; do
+    st="$(preview_read status)"
+    if [[ "$st" == "stopped" ]]; then
+      echo "preview stopped: $(preview_read reason)"
+      return 0
+    fi
+    sleep 2
+  done
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    up) cmd_up "$@" ;;
+    share) cmd_share "$@" ;;
+    url) cmd_url "$@" ;;
+    status) cmd_status "$@" ;;
+    stop) cmd_stop "$@" ;;
+    wait) cmd_wait "$@" ;;
+    -h|--help|help|"") usage; [[ -n "$cmd" ]] || exit 1 ;;
+    *) preview_die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

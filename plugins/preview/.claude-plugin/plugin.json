@@ -1,0 +1,10 @@
+{
+  "name": "preview",
+  "version": "1.0.0",
+  "description": "Temporary Cloudflare quick-tunnel previews for any branch or PR (Actions + agent).",
+  "author": {
+    "name": "Scott Grayson"
+  },
+  "license": "MIT",
+  "keywords": ["preview", "cloudflare", "tunnel", "github-actions"]
+}

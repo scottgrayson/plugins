@@ -1,0 +1,16 @@
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    uses: ./.github/workflows/preview-reusable.yml
+    with:
+      working-directory: examples/preview
+      config: .preview/config.json

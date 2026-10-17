@@ -1,0 +1,283 @@
+name: Preview (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing .preview/config.json
+        type: string
+        required: false
+        default: .
+      config:
+        description: Path to .preview/config.json relative to working-directory
+        type: string
+        required: false
+        default: .preview/config.json
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ensure-checkbox:
+    # Same-repo PRs only — fork PRs never run steps or open a tunnel.
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'reopened')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: scottgrayson/plugins
+          path: _preview_plugin
+          # Dogfood PR branch of this marketplace; consumers get the v1 moving tag.
+          ref: ${{ github.repository == 'scottgrayson/plugins' && github.event.pull_request.head.sha || 'v1' }}
+      - uses: ./_preview_plugin/plugins/preview
+        with:
+          mode: ensure-checkbox
+          pr-number: ${{ github.event.pull_request.number }}
+
+  # Fast path: gate + loading line only. No checkout, cache, or script fetch.
+  mark-loading:
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'edited'
+    runs-on: ubuntu-latest
+    outputs:
+      start: ${{ steps.go.outputs.start }}
+      pr_number: ${{ steps.go.outputs.pr_number }}
+      job_start: ${{ steps.go.outputs.job_start }}
+      created_et: ${{ steps.go.outputs.created_et }}
+      head_sha: ${{ steps.go.outputs.head_sha }}
+      tick_at: ${{ steps.go.outputs.tick_at }}
+    steps:
+      - name: Mark loading
+        id: go
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TICK_AT: ${{ github.event.pull_request.updated_at }}
+        run: |
+          set -euo pipefail
+          export JOB_START
+          JOB_START="$(date +%s)"
+          {
+            echo "job_start=$JOB_START"
+            echo "pr_number=$PR_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "tick_at=$TICK_AT"
+          } >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          pr = os.environ["PR_NUMBER"]
+          job_start = int(os.environ["JOB_START"])
+          out_path = os.environ["GITHUB_OUTPUT"]
+
+          IDLE = "- [ ] Check to generate preview"
+          TICKED = "- [x] Check to generate preview"
+
+          def api(method, path, data=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/{path}",
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "preview-plugin",
+                  },
+                  method=method,
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          def is_control(line: str) -> bool:
+              if line in (IDLE, TICKED):
+                  return True
+              return bool(
+                  re.match(r"^Preview deploy started at ", line)
+                  or re.match(r"^\[Preview Website\]\(", line)
+                  or re.match(r"^- \[[xX]\] Link to preview will be available soon", line)
+                  or re.match(r"^- \[[xX]\] \[Preview\]\(", line)
+                  or re.match(r"^- \[[xX]\] https://", line)
+              )
+
+          def control_line(body: str) -> str:
+              best, best_rank = None, -1
+              for line in body.splitlines():
+                  if re.match(r"^\[Preview Website\]\(", line) or re.match(r"^- \[[xX]\] \[Preview\]\(", line) or re.match(r"^- \[[xX]\] https://", line):
+                      rank = 4
+                  elif line.startswith("Preview deploy started at ") or re.match(r"^- \[[xX]\] Link to preview will be available soon", line):
+                      rank = 3
+                  elif line == TICKED:
+                      rank = 2
+                  elif line == IDLE:
+                      rank = 1
+                  else:
+                      continue
+                  if rank > best_rank:
+                      best, best_rank = line, rank
+              return best or ""
+
+          def set_control(body: str, new_line: str) -> str:
+              lines = [ln for ln in body.splitlines() if not is_control(ln)]
+              while lines and lines[0] == "":
+                  lines.pop(0)
+              out = [new_line, ""] + lines if lines else [new_line]
+              text = "\n".join(out)
+              if (body.endswith("\n") or not body) and not text.endswith("\n"):
+                  text += "\n"
+              return text
+
+          def format_et(epoch: int) -> str:
+              dt = datetime.fromtimestamp(epoch, tz=ZoneInfo("America/New_York"))
+              hour = dt.strftime("%I").lstrip("0") or "0"
+              return f"{hour}:{dt.strftime('%M %p')} ET"
+
+          def last_deploy(body: str) -> str:
+              m = re.search(r"<!--\s*preview:last-deploy=([0-9]+m(?:[0-9]+s)?|[0-9]+s)\s*-->", body)
+              return m.group(1) if m else ""
+
+          body = (api("GET", f"pulls/{pr}").get("body") or "")
+          current = control_line(body)
+          should = current == TICKED
+          created_et = format_et(job_start)
+          with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"start={'yes' if should else 'no'}\n")
+              fh.write(f"created_et={created_et}\n")
+          if not should:
+              print("Skipping preview (control line is not newly ticked).")
+              raise SystemExit(0)
+
+          last = last_deploy(body)
+          if last:
+              loading = f"Preview deploy started at {created_et} (estimate {last})"
+          else:
+              loading = f"Preview deploy started at {created_et}"
+          api("PATCH", f"pulls/{pr}", {"body": set_control(body, loading)})
+          print(f"[preview] loading: {loading}")
+          PY
+
+  preview:
+    needs: mark-loading
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.mark-loading.outputs.start == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: preview-${{ github.repository }}-pr-${{ needs.mark-loading.outputs.pr_number }}
+      cancel-in-progress: false
+    outputs:
+      stop_reason: ${{ steps.run.outputs.stop_reason }}
+    steps:
+      # Consumer checkout first so a later plugin checkout into _preview_plugin is not wiped.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.mark-loading.outputs.head_sha }}
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: scottgrayson/plugins
+          path: _preview_plugin
+          ref: ${{ github.repository == 'scottgrayson/plugins' && needs.mark-loading.outputs.head_sha || 'v1' }}
+
+      - name: Collect labels
+        id: labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          labels="$(gh api "repos/${{ github.repository }}/issues/${{ needs.mark-loading.outputs.pr_number }}/labels" --jq '[.[].name]|join(",")')"
+          echo "csv=$labels" >> "$GITHUB_OUTPUT"
+
+      - name: Run preview
+        id: run
+        uses: ./_preview_plugin/plugins/preview
+        with:
+          mode: run
+          working-directory: ${{ inputs.working-directory }}
+          config: ${{ inputs.config }}
+          labels: ${{ steps.labels.outputs.csv }}
+          pr-number: ${{ needs.mark-loading.outputs.pr_number }}
+          job-start-epoch: ${{ needs.mark-loading.outputs.job_start }}
+          created-et: ${{ needs.mark-loading.outputs.created_et }}
+          skip-idle-reset: "true"
+
+  # Short dedicated job so Idle appears live (same pattern as mark-loading).
+  finalize:
+    needs: [mark-loading, preview]
+    if: >
+      always() &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.mark-loading.outputs.start == 'yes'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset to idle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.mark-loading.outputs.pr_number }}
+          REASON: ${{ needs.preview.outputs.stop_reason || needs.preview.result || 'stopped' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          pr = os.environ["PR_NUMBER"]
+          reason = os.environ.get("REASON") or "stopped"
+          IDLE = "- [ ] Check to generate preview"
+
+          def api(method, path, data=None):
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/{path}",
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "preview-plugin",
+                  },
+                  method=method,
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          def is_control(line: str) -> bool:
+              if line in (IDLE, "- [x] Check to generate preview"):
+                  return True
+              return bool(
+                  re.match(r"^Preview deploy started at ", line)
+                  or re.match(r"^\[Preview Website\]\(", line)
+                  or re.match(r"^- \[[xX]\] ", line)
+              )
+
+          def set_control(body: str, new_line: str) -> str:
+              lines = [ln for ln in body.splitlines() if not is_control(ln)]
+              while lines and lines[0] == "":
+                  lines.pop(0)
+              out = [new_line, ""] + lines if lines else [new_line]
+              text = "\n".join(out)
+              if (body.endswith("\n") or not body) and not text.endswith("\n"):
+                  text += "\n"
+              return text
+
+          body = (api("GET", f"pulls/{pr}").get("body") or "")
+          new_body = set_control(body, IDLE)
+          api("PATCH", f"pulls/{pr}", {"body": new_body})
+          got = (api("GET", f"pulls/{pr}").get("body") or "").splitlines()[:1]
+          print(f"[preview] stop reason: {reason}")
+          print(f"[preview] idle line: {got[0] if got else ''}")
+          PY

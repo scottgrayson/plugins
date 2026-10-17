@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  brand-ban:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Fail if forbidden brand whole-word appears
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep >/dev/null
+          # Split so this workflow file itself does not contain the needle.
+          needle="t""app"
+          if rg -n -i --glob '!.git/**' "\\b${needle}\\b" .; then
+            echo "Forbidden whole-word brand match (case-insensitive)." >&2
+            exit 1
+          fi
+          echo "OK: no forbidden brand whole-word matches"
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run preview unit tests
+        run: bash dev/run-tests.sh

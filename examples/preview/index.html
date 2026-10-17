@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>preview example</title>
+  <style>
+    :root { color-scheme: light; --ink: #14201b; --accent: #0f6b4c; }
+    body { margin: 0; min-height: 100vh; font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 10%, #f7fff9, #d9ebe1 55%, #c5ddd1);
+      color: var(--ink); display: grid; place-items: center; }
+    main { text-align: center; padding: 2rem; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin: 0 0 1rem; letter-spacing: -0.03em; }
+    button { appearance: none; border: 0; background: var(--accent); color: white; font: inherit;
+      padding: 0.7rem 1.2rem; border-radius: 0.4rem; cursor: pointer; }
+    #ping { margin-top: 1rem; min-height: 1.5rem; color: #355246; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="greet">__GREETING__</h1>
+    <button id="ping-btn" type="button">Ping</button>
+    <p id="ping"></p>
+  </main>
+  <script>
+    setInterval(() => { fetch("/poll").catch(() => {}); }, 29000);
+    document.getElementById("ping-btn").addEventListener("click", async () => {
+      const r = await fetch("/ping");
+      const j = await r.json();
+      document.getElementById("ping").textContent = "pong " + j.t;
+    });
+  </script>
+</body>
+</html>
