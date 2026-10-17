@@ -289,8 +289,8 @@ help_out="$("$PLUGIN/bin/preview" --help 2>&1 || true)"
 assert_contains "help mentions --share" "$help_out" "--share"
 assert_contains "help mentions share command" "$help_out" "share    Same as"
 # Agent without --share must not start a tunnel (gate in bin/preview)
-if rg -n 'use_tunnel=0' "$PLUGIN/bin/preview" >/dev/null \
-  && rg -n 'cmd_share|up --agent --share' "$PLUGIN/bin/preview" >/dev/null; then
+if grep -q 'use_tunnel=0' "$PLUGIN/bin/preview" \
+  && grep -qE 'cmd_share|up --agent --share' "$PLUGIN/bin/preview"; then
   echo "PASS agent default skips tunnel; share opts in"
   PASS=$((PASS + 1))
 else
@@ -349,7 +349,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 # No trycloudflare anywhere in this run's state/logs
-if rg -n 'trycloudflare' "$PREVIEW_STATE_DIR" "$TMP/agent-local.stdout" "$TMP/agent-local.stderr" >/dev/null 2>&1; then
+if grep -R -n 'trycloudflare' "$PREVIEW_STATE_DIR" "$TMP/agent-local.stdout" "$TMP/agent-local.stderr" >/dev/null 2>&1; then
   echo "FAIL agent --agent leaked trycloudflare URL"
   FAIL=$((FAIL + 1))
 else
