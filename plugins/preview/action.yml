@@ -144,6 +144,8 @@ runs:
         mkdir -p "$PREVIEW_STATE_DIR"
         cp "$LOG_DIR/up.stdout" "$PREVIEW_STATE_DIR/up.stdout" 2>/dev/null || true
         cp "$LOG_DIR/up.stderr" "$PREVIEW_STATE_DIR/up.stderr" 2>/dev/null || true
+        # Surface pinned binary install evidence in the job log.
+        grep -E 'cloudflared|verified sha256' "$LOG_DIR/up.stderr" >&2 || true
 
         ready_at="$(date +%s)"
         elapsed=$((ready_at - job_start))
