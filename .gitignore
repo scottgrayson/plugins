@@ -1,0 +1,4 @@
+.preview/run/
+**/.preview/run/
+*.log
+.DS_Store

@@ -1,0 +1,23 @@
+{
+  "name": "scottgrayson-plugins",
+  "owner": {
+    "name": "Scott Grayson"
+  },
+  "metadata": {
+    "description": "MIT-licensed Cursor plugins by Scott Grayson",
+    "pluginRoot": "plugins"
+  },
+  "plugins": [
+    {
+      "name": "preview",
+      "source": "preview",
+      "description": "Temporary Cloudflare quick-tunnel previews for any branch or PR",
+      "version": "1.0.0",
+      "author": {
+        "name": "Scott Grayson"
+      },
+      "license": "MIT",
+      "keywords": ["preview", "cloudflare", "tunnel"]
+    }
+  ]
+}

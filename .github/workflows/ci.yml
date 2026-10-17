@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tapp-ban:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if whole-word tapp appears
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -n -i --glob '!.git/**' '\btapp\b' .; then
+            echo "Forbidden whole-word match for 'tapp' (case-insensitive)." >&2
+            exit 1
+          fi
+          echo "OK: no whole-word tapp matches"
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run preview unit tests
+        run: bash dev/run-tests.sh

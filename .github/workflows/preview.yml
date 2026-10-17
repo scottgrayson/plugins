@@ -1,0 +1,68 @@
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ensure-checkbox:
+    if: github.event.action == 'opened' || github.event.action == 'reopened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./plugins/preview
+        with:
+          mode: ensure-checkbox
+          pr-number: ${{ github.event.pull_request.number }}
+
+  preview:
+    if: github.event.action == 'edited'
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    concurrency:
+      group: preview-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./plugins/preview
+        id: gate
+        with:
+          mode: gate
+          pr-number: ${{ github.event.pull_request.number }}
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.should_start == 'yes'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Collect labels
+        if: steps.gate.outputs.should_start == 'yes'
+        id: labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          labels="$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" --jq '[.[].name]|join(",")')"
+          echo "csv=$labels" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        if: steps.gate.outputs.should_start == 'yes'
+        with:
+          path: |
+            examples/hello-world/.npm
+            ~/.cache/pip
+          key: preview-deps-${{ runner.os }}-${{ hashFiles('examples/hello-world/**') }}
+
+      - uses: ./plugins/preview
+        if: steps.gate.outputs.should_start == 'yes'
+        with:
+          mode: run
+          working-directory: examples/hello-world
+          config: .preview.json
+          labels: ${{ steps.labels.outputs.csv }}
+          pr-number: ${{ github.event.pull_request.number }}

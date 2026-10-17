@@ -1,0 +1,76 @@
+name: Preview (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing .preview.json
+        type: string
+        required: false
+        default: .
+      config:
+        description: Path to .preview.json relative to working-directory
+        type: string
+        required: false
+        default: .preview.json
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ensure-checkbox:
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: scottgrayson/plugins
+          path: _preview_plugin
+      - uses: ./_preview_plugin/plugins/preview
+        with:
+          mode: ensure-checkbox
+          pr-number: ${{ github.event.pull_request.number }}
+
+  preview:
+    if: github.event_name == 'pull_request' && github.event.action == 'edited'
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    concurrency:
+      group: preview-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: scottgrayson/plugins
+          path: _preview_plugin
+
+      - uses: ./_preview_plugin/plugins/preview
+        id: gate
+        with:
+          mode: gate
+          pr-number: ${{ github.event.pull_request.number }}
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.should_start == 'yes'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Collect labels
+        if: steps.gate.outputs.should_start == 'yes'
+        id: labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          labels="$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" --jq '[.[].name]|join(",")')"
+          echo "csv=$labels" >> "$GITHUB_OUTPUT"
+
+      - uses: ./_preview_plugin/plugins/preview
+        if: steps.gate.outputs.should_start == 'yes'
+        with:
+          mode: run
+          working-directory: ${{ inputs.working-directory }}
+          config: ${{ inputs.config }}
+          labels: ${{ steps.labels.outputs.csv }}
+          pr-number: ${{ github.event.pull_request.number }}

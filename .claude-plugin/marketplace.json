@@ -1,0 +1,22 @@
+{
+  "name": "scottgrayson-plugins",
+  "owner": {
+    "name": "Scott Grayson"
+  },
+  "metadata": {
+    "description": "MIT-licensed Claude Code plugins by Scott Grayson"
+  },
+  "plugins": [
+    {
+      "name": "preview",
+      "source": "./plugins/preview",
+      "description": "Temporary Cloudflare quick-tunnel previews for any branch or PR",
+      "version": "1.0.0",
+      "author": {
+        "name": "Scott Grayson"
+      },
+      "license": "MIT",
+      "keywords": ["preview", "cloudflare", "tunnel"]
+    }
+  ]
+}

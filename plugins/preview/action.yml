@@ -1,0 +1,140 @@
+name: Preview
+description: Spin up a temporary Cloudflare quick-tunnel preview for a repo app
+inputs:
+  working-directory:
+    description: Directory containing .preview.json
+    required: false
+    default: .
+  config:
+    description: Path to .preview.json (relative to working-directory)
+    required: false
+    default: .preview.json
+  labels:
+    description: Comma-separated PR labels (preview:<step> selection)
+    required: false
+    default: ''
+  pr-number:
+    description: Pull request number when running in Actions mode
+    required: false
+    default: ''
+  mode:
+    description: ensure-checkbox | gate | run
+    required: false
+    default: run
+outputs:
+  should_start:
+    description: Whether the PR checkbox gate says to start a preview
+    value: ${{ steps.gate.outputs.should_start }}
+runs:
+  using: composite
+  steps:
+    - name: Ensure checkbox
+      if: inputs.mode == 'ensure-checkbox'
+      shell: bash
+      env:
+        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        PLUGIN_ROOT="${{ github.action_path }}"
+        # shellcheck source=/dev/null
+        source "$PLUGIN_ROOT/lib/actions_pr.sh"
+        preview_actions_ensure_checkbox
+
+    - name: Gate start
+      id: gate
+      shell: bash
+      env:
+        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
+        GH_TOKEN: ${{ github.token }}
+        PREVIEW_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        if [[ "$PREVIEW_MODE" != "gate" ]]; then
+          echo "should_start=yes" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        PLUGIN_ROOT="${{ github.action_path }}"
+        # shellcheck source=/dev/null
+        source "$PLUGIN_ROOT/lib/actions_pr.sh"
+        should="$(preview_actions_should_start)"
+        echo "should_start=$should" >> "$GITHUB_OUTPUT"
+        if [[ "$should" != "yes" ]]; then
+          echo "Skipping preview (line 1 is not the ticked idle checkbox)."
+        fi
+
+    - name: Install tools
+      if: inputs.mode == 'run'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq curl jq python3 ca-certificates >/dev/null
+
+    - name: Run preview
+      if: inputs.mode == 'run'
+      shell: bash
+      env:
+        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
+        PREVIEW_BRANCH: ${{ github.head_ref }}
+        PREVIEW_LABELS: ${{ inputs.labels }}
+        PREVIEW_WORKDIR: ${{ inputs.working-directory }}
+        PREVIEW_CONFIG_INPUT: ${{ inputs.config }}
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        PLUGIN_ROOT="${{ github.action_path }}"
+        chmod +x "$PLUGIN_ROOT/bin/preview"
+        WORKDIR="${{ github.workspace }}/${PREVIEW_WORKDIR}"
+        cd "$WORKDIR"
+        export PREVIEW_STATE_DIR="$WORKDIR/.preview/run"
+        mkdir -p "$PREVIEW_STATE_DIR"
+        # shellcheck source=/dev/null
+        source "$PLUGIN_ROOT/lib/actions_pr.sh"
+
+        labels="${PREVIEW_LABELS:-}"
+        config="$PREVIEW_CONFIG_INPUT"
+
+        cleanup() {
+          local reason
+          reason="$(cat "$PREVIEW_STATE_DIR/reason" 2>/dev/null || echo cancelled)"
+          "$PLUGIN_ROOT/bin/preview" stop "$reason" >/dev/null 2>&1 || true
+          if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
+            preview_actions_mark_stopped "$reason" || true
+          fi
+        }
+        trap cleanup EXIT
+
+        setsid "$PLUGIN_ROOT/bin/preview" up --config "$config" --labels "$labels" >"$PREVIEW_STATE_DIR/up.stdout" 2>"$PREVIEW_STATE_DIR/up.stderr" &
+        UP_PID=$!
+        echo "$UP_PID" >"$PREVIEW_STATE_DIR/up_pid"
+
+        url=""
+        for i in $(seq 1 120); do
+          if [[ -f "$PREVIEW_STATE_DIR/status" ]]; then
+            st="$(cat "$PREVIEW_STATE_DIR/status")"
+            if [[ "$st" == "watching" || "$st" == "ready" ]]; then
+              url="$(cat "$PREVIEW_STATE_DIR/url")"
+              break
+            fi
+          fi
+          if ! kill -0 "$UP_PID" 2>/dev/null; then
+            echo "preview up exited early:" >&2
+            cat "$PREVIEW_STATE_DIR/up.stderr" >&2 || true
+            exit 1
+          fi
+          sleep 1
+        done
+        [[ -n "$url" ]] || { echo "timed out waiting for READY"; exit 1; }
+
+        if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
+          preview_actions_mark_ready "$url"
+        fi
+
+        wait "$UP_PID" || true
+        trap - EXIT
+        reason="$(cat "$PREVIEW_STATE_DIR/reason" 2>/dev/null || echo stopped)"
+        if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
+          preview_actions_mark_stopped "$reason"
+        fi
