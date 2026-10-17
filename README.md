@@ -4,18 +4,20 @@ MIT-licensed plugins by Scott Grayson. This marketplace currently ships **previe
 
 Two modes share the same scripts:
 
-1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel using repository secrets (no AI).
+1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
 2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
 
 Plugin package: [`plugins/preview/`](plugins/preview/) · Example: [`examples/hello-world/`](examples/hello-world/)
 
+Secrets are not supported in v1; previews work for apps that need no secrets.
+
 ---
 
-## Actions mode (no AI, uses repo secrets)
+## Actions mode (no AI)
 
 ### 1. Repo setup
 
-Commit these next to your app (plain values only — no secrets in git):
+Commit these next to your app:
 
 **`.preview.json`** (all fields optional; defaults shown):
 
@@ -45,17 +47,9 @@ Commit these next to your app (plain values only — no secrets in git):
 
 **Steps** (optional): scripts at `.preview/steps/<name>.sh`. JSON never embeds commands — only step names. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
 
-**`.env.example`**: list secret *names* only (e.g. `# DATABASE_URL=`). Never commit values.
-
 **Optional `PREVIEW.md`**: human check notes for the preview.
 
-### 2. Secrets
-
-1. Create GitHub repository secrets whose names match `.env.example`.
-2. Step scripts and your `start` command read them as environment variables (`$DATABASE_URL`, etc.).
-3. The reusable workflow needs `secrets: inherit` (below). That makes repository secrets available to the workflow YAML; to expose a custom secret into the preview process, map it on the composite-action step with `env:` (see [Exposing secrets to your app](#exposing-secrets-to-your-app)).
-
-### 3. Workflow
+### 2. Workflow
 
 Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`:
 
@@ -70,7 +64,6 @@ permissions:
 jobs:
   preview:
     uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
-    secrets: inherit
     with:
       working-directory: .
       config: .preview.json
@@ -85,24 +78,9 @@ What this wires:
 
 You can also add the checkbox yourself as the first line of the PR body; the ensure job is a convenience. Ticking it (PR body edit) is the only trigger the shipped workflow listens for.
 
-### 4. Use it
+### 3. Use it
 
 Open a PR → confirm line 1 is `- [ ] Check to generate preview` → tick the box → wait for `[Preview Website](<url>) · created … · expires after 5m idle`. When the preview stops, finalize resets the idle checkbox. Stop reason is in the job log only (no PR comments).
-
-### Exposing secrets to your app
-
-`secrets: inherit` alone does not export custom secrets into `start` / `.preview/steps/*.sh`. Map them when you call the composite action, for example in a workflow modeled on [`.github/workflows/preview.yml`](.github/workflows/preview.yml):
-
-```yaml
-- uses: scottgrayson/plugins/plugins/preview@main
-  env:
-    DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  with:
-    mode: run
-    working-directory: .
-    config: .preview.json
-    # …pr-number, job-start-epoch, created-et, skip-idle-reset from mark-loading
-```
 
 ### Custom triggers
 
@@ -150,14 +128,8 @@ For local smoke-testing without a team marketplace, copy the plugin into `~/.cur
 
 ### Run in a consumer repo
 
-1. Same `.preview.json` / steps / `.env.example` as Actions mode.
-2. Export secrets into the environment (names from `.env.example`):
-
-```bash
-export DATABASE_URL="…"   # example — use your real secret names
-```
-
-3. Ask the agent to preview the PR/branch, or run the CLI from the installed plugin (skill locates `bin/preview`):
+1. Same `.preview.json` / steps as Actions mode.
+2. Ask the agent to preview the PR/branch, or run the CLI from the installed plugin (skill locates `bin/preview`):
 
 ```bash
 preview up --agent --config .preview.json --workdir .
@@ -215,7 +187,7 @@ App with a start command and ignored health checks:
 # .preview/steps/seed.sh
 #!/usr/bin/env bash
 set -euo pipefail
-# Uses $DATABASE_URL from Actions env or your shell export
+echo "seed ok"
 ```
 
 Workflow inputs (`working-directory`, `config`) are relative to the consumer repo checkout. Ref: prefer `@v1` once released; `@main` until then.

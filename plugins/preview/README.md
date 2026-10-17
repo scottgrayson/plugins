@@ -4,18 +4,20 @@ Temporary public previews of a repo app on any branch or PR via a free Cloudflar
 
 Two modes share the same scripts:
 
-1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel using repository secrets (no AI).
+1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
 2. **Agent mode** — install this plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
+
+Secrets are not supported in v1; previews work for apps that need no secrets.
 
 Full marketplace install guide: [root README](../../README.md). This page matches that guide and adds plugin-local notes.
 
 ---
 
-## Actions mode (no AI, uses repo secrets)
+## Actions mode (no AI)
 
 ### 1. Repo setup
 
-Commit next to your app (plain values only — no secrets in git):
+Commit next to your app:
 
 **`.preview.json`** (all fields optional; defaults shown):
 
@@ -45,15 +47,9 @@ Commit next to your app (plain values only — no secrets in git):
 
 **Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
 
-**`.env.example`**: secret *names* only. Optional **`PREVIEW.md`**: human check notes.
+**Optional `PREVIEW.md`**: human check notes.
 
-### 2. Secrets
-
-1. Create GitHub repository secrets matching `.env.example`.
-2. Step scripts and `start` read them as environment variables.
-3. Use `secrets: inherit` on the reusable workflow call. To expose a custom secret into the preview process, map it with `env:` on the composite-action step (see below).
-
-### 3. Workflow
+### 2. Workflow
 
 Add `.github/workflows/preview.yml`. Pin `@v1` when released; until then `@main`:
 
@@ -68,7 +64,6 @@ permissions:
 jobs:
   preview:
     uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
-    secrets: inherit
     with:
       working-directory: .
       config: .preview.json
@@ -81,7 +76,7 @@ jobs:
 
 You can add the checkbox yourself as PR body line 1; the ensure job is a convenience. The shipped workflow’s only start trigger is ticking that box.
 
-### 4. Use it
+### 3. Use it
 
 Open a PR → confirm line 1 is `- [ ] Check to generate preview` → tick the box → wait for `[Preview Website](<url>) · created … · expires after 5m idle`. Finalize restores the idle checkbox. Stop reason is in the job log only.
 
@@ -92,20 +87,6 @@ PR description line 1 is exactly one of:
 - `[Preview Website](<url>) · created 11:52 AM ET · expires after 5m idle` (running)
 
 GitHub strips `target=_blank` from PR bodies; use Cmd/Ctrl-click for a new tab.
-
-### Exposing secrets to your app
-
-`secrets: inherit` alone does not export custom secrets into `start` / `.preview/steps/*.sh`. Map them on the composite action (pattern in this repo’s [`.github/workflows/preview.yml`](../../.github/workflows/preview.yml)):
-
-```yaml
-- uses: scottgrayson/plugins/plugins/preview@main
-  env:
-    DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  with:
-    mode: run
-    working-directory: .
-    config: .preview.json
-```
 
 ### Custom triggers
 
@@ -148,7 +129,6 @@ Local smoke-test: copy this plugin to `~/.cursor/plugins/local/preview` and relo
 ### Run in a consumer repo
 
 ```bash
-export DATABASE_URL="…"   # names from .env.example
 preview up --agent --config .preview.json --workdir .
 ```
 
