@@ -1,5 +1,6 @@
 .preview/run/
 **/.preview/run/
+.preview-metrics/
 *.log
 .DS_Store
 __pycache__/

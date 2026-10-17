@@ -18,13 +18,24 @@ inputs:
     required: false
     default: ''
   mode:
-    description: ensure-checkbox | gate | run
+    description: ensure-checkbox | gate | mark-loading | run
     required: false
     default: run
+  metrics-dir:
+    description: Directory for cached avg-ready metrics
+    required: false
+    default: .preview-metrics
+  job-start-epoch:
+    description: Epoch seconds when the job started (for READY timing)
+    required: false
+    default: ''
 outputs:
   should_start:
     description: Whether the PR checkbox gate says to start a preview
     value: ${{ steps.gate.outputs.should_start }}
+  avg_seconds:
+    description: Avg ready seconds used for the loading line
+    value: ${{ steps.loading.outputs.avg_seconds }}
 runs:
   using: composite
   steps:
@@ -50,7 +61,7 @@ runs:
         PREVIEW_MODE: ${{ inputs.mode }}
       run: |
         set -euo pipefail
-        if [[ "$PREVIEW_MODE" != "gate" ]]; then
+        if [[ "$PREVIEW_MODE" != "gate" && "$PREVIEW_MODE" != "mark-loading" ]]; then
           echo "should_start=yes" >> "$GITHUB_OUTPUT"
           exit 0
         fi
@@ -60,8 +71,29 @@ runs:
         should="$(preview_actions_should_start)"
         echo "should_start=$should" >> "$GITHUB_OUTPUT"
         if [[ "$should" != "yes" ]]; then
-          echo "Skipping preview (line 1 is not the ticked idle checkbox)."
+          echo "Skipping preview (control line is not the ticked idle checkbox)."
         fi
+
+    - name: Mark loading
+      id: loading
+      if: inputs.mode == 'mark-loading'
+      shell: bash
+      env:
+        PREVIEW_PR_NUMBER: ${{ inputs.pr-number }}
+        GH_TOKEN: ${{ github.token }}
+        PREVIEW_METRICS_DIR: ${{ inputs.metrics-dir }}
+        SHOULD_START: ${{ steps.gate.outputs.should_start }}
+      run: |
+        set -euo pipefail
+        PLUGIN_ROOT="${{ github.action_path }}"
+        # shellcheck source=/dev/null
+        source "$PLUGIN_ROOT/lib/actions_pr.sh"
+        avg="$(preview_actions_read_avg_seconds)"
+        echo "avg_seconds=$avg" >> "$GITHUB_OUTPUT"
+        if [[ "$SHOULD_START" != "yes" ]]; then
+          exit 0
+        fi
+        preview_actions_mark_loading "$avg"
 
     - name: Install tools
       if: inputs.mode == 'run'
@@ -80,6 +112,8 @@ runs:
         PREVIEW_LABELS: ${{ inputs.labels }}
         PREVIEW_WORKDIR: ${{ inputs.working-directory }}
         PREVIEW_CONFIG_INPUT: ${{ inputs.config }}
+        PREVIEW_METRICS_DIR: ${{ inputs.metrics-dir }}
+        PREVIEW_JOB_START_EPOCH: ${{ inputs.job-start-epoch }}
         GH_TOKEN: ${{ github.token }}
         GITHUB_TOKEN: ${{ github.token }}
       run: |
@@ -95,6 +129,7 @@ runs:
 
         labels="${PREVIEW_LABELS:-}"
         config="$PREVIEW_CONFIG_INPUT"
+        job_start="${PREVIEW_JOB_START_EPOCH:-$(date +%s)}"
 
         cleanup() {
           local reason
@@ -103,6 +138,7 @@ runs:
           if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
             preview_actions_mark_stopped "$reason" || true
           fi
+          echo "[preview] stop reason: $reason" >&2
         }
         trap cleanup EXIT
 
@@ -131,14 +167,16 @@ runs:
           echo "timed out waiting for READY" >&2
           echo "--- up.stderr ---" >&2
           cat "$LOG_DIR/up.stderr" >&2 || true
-          echo "--- status/url ---" >&2
-          cat "$PREVIEW_STATE_DIR/status" >&2 || true
-          cat "$PREVIEW_STATE_DIR/url" >&2 || true
           exit 1
         fi
         mkdir -p "$PREVIEW_STATE_DIR"
         cp "$LOG_DIR/up.stdout" "$PREVIEW_STATE_DIR/up.stdout" 2>/dev/null || true
         cp "$LOG_DIR/up.stderr" "$PREVIEW_STATE_DIR/up.stderr" 2>/dev/null || true
+
+        ready_at="$(date +%s)"
+        elapsed=$((ready_at - job_start))
+        if (( elapsed < 1 )); then elapsed=1; fi
+        preview_actions_write_avg_seconds "$elapsed"
 
         if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
           preview_actions_mark_ready "$url"
@@ -147,6 +185,7 @@ runs:
         wait "$UP_PID" || true
         trap - EXIT
         reason="$(cat "$PREVIEW_STATE_DIR/reason" 2>/dev/null || echo stopped)"
+        echo "[preview] stop reason: $reason" >&2
         if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
           preview_actions_mark_stopped "$reason"
         fi

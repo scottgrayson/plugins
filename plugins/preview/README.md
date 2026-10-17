@@ -55,12 +55,13 @@ jobs:
 
 Or call the composite action at `scottgrayson/plugins/plugins/preview@main` (see this repo's `.github/workflows/preview.yml`).
 
-PR description line 1 is exactly:
+PR description line 1 is exactly one of:
 
 - `- [ ] Check to generate preview` (idle)
-- `- [x] <preview URL>` (running)
+- `- [x] Link to preview will be available soon (avg deploy time 1m1s)` (loading)
+- `- [x] [Preview](<url>)` (running)
 
-Ticking the idle box starts the job. Concurrency is per PR. On shutdown the box resets and a "Preview stopped" comment includes the reason. `GITHUB_TOKEN` description edits do not re-trigger workflows.
+Ticking the idle box starts the job. The loading line is written before checkout/install; the average comes from a cached EMA of past job-start→READY times (default `1m1s`). Concurrency is per PR. On any shutdown the line resets to idle; the stop reason is written to the job log only (no PR comments). `GITHUB_TOKEN` description edits do not re-trigger workflows.
 
 ## Agent
 

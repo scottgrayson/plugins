@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  actions: read
 
 jobs:
   ensure-checkbox:
@@ -40,24 +41,69 @@ jobs:
       group: preview-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     steps:
+      - name: Resolve
+        id: pr
+        shell: bash
+        run: |
+          echo "job_start=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .preview-metrics
+          key: preview-avg-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            preview-avg-${{ github.repository }}-
+
+      - name: Gate and mark loading
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PREVIEW_PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PREVIEW_METRICS_DIR: ${{ github.workspace }}/.preview-metrics
+          PLUGIN_REF: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha || 'main' }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/preview-lib "$PREVIEW_METRICS_DIR"
+          # Prefer scripts from scottgrayson/plugins@main for consumers; self-PR uses head.
+          REF="main"
+          if [[ "${{ github.repository }}" == "scottgrayson/plugins" ]]; then
+            REF="$HEAD_SHA"
+          fi
+          for f in common.sh pr_description.sh actions_pr.sh; do
+            gh api "repos/scottgrayson/plugins/contents/plugins/preview/lib/${f}?ref=${REF}" --jq .content \
+              | base64 -d >"/tmp/preview-lib/$f"
+          done
+          # shellcheck source=/dev/null
+          source /tmp/preview-lib/actions_pr.sh
+          should="$(preview_actions_should_start)"
+          echo "start=$should" >> "$GITHUB_OUTPUT"
+          avg="$(preview_actions_read_avg_seconds)"
+          echo "avg_seconds=$avg" >> "$GITHUB_OUTPUT"
+          if [[ "$should" != "yes" ]]; then
+            echo "Skipping preview (control line is not newly ticked)."
+            exit 0
+          fi
+          preview_actions_mark_loading "$avg"
+
       - uses: actions/checkout@v4
+        if: steps.decide.outputs.start == 'yes'
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
-
-      - uses: ./_preview_plugin/plugins/preview
-        id: gate
-        with:
-          mode: gate
-          pr-number: ${{ github.event.pull_request.number }}
+          ref: ${{ github.repository == 'scottgrayson/plugins' && steps.pr.outputs.head_sha || 'main' }}
 
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Collect labels
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         id: labels
         shell: bash
         env:
@@ -67,10 +113,26 @@ jobs:
           echo "csv=$labels" >> "$GITHUB_OUTPUT"
 
       - uses: ./_preview_plugin/plugins/preview
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         with:
           mode: run
           working-directory: ${{ inputs.working-directory }}
           config: ${{ inputs.config }}
           labels: ${{ steps.labels.outputs.csv }}
           pr-number: ${{ github.event.pull_request.number }}
+          metrics-dir: ${{ github.workspace }}/.preview-metrics
+          job-start-epoch: ${{ steps.pr.outputs.job_start }}
+
+      - name: Reset idle on early failure
+        if: failure() && steps.decide.outputs.start == 'yes'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PREVIEW_PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source /tmp/preview-lib/actions_pr.sh 2>/dev/null || source _preview_plugin/plugins/preview/lib/actions_pr.sh
+          preview_actions_mark_stopped "failure"
+          echo "[preview] stop reason: failure" >&2
