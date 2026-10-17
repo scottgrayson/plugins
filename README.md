@@ -5,7 +5,7 @@ MIT-licensed plugins by Scott Grayson. This marketplace currently ships **previe
 Two modes share the same scripts:
 
 1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
-2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
+2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (localhost by default; never ticks the Actions checkbox).
 
 Plugin package: [`plugins/preview/`](plugins/preview/) · Example: [`examples/preview/`](examples/preview/)
 
@@ -139,6 +139,7 @@ For local smoke-testing without a team marketplace, copy the plugin into `~/.cur
 
 ```bash
 preview up --agent --config .preview/config.json --workdir .
+# prints http://127.0.0.1:<proxy-port> — no Cloudflare tunnel
 ```
 
 From a checkout of this marketplace (without installing):
@@ -147,7 +148,14 @@ From a checkout of this marketplace (without installing):
 plugins/preview/bin/preview up --agent --config .preview/config.json --workdir path/to/app
 ```
 
-`up --agent` disables the idle timer; only `totalCapSeconds` applies. Stay in the turn until it stops, then report the reason. See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
+`up --agent` is localhost-only (app + proxy), disables idle, and still applies `totalCapSeconds`. When a human asks for a public link:
+
+```bash
+preview up --agent --share --config .preview/config.json --workdir .
+# or: preview share --config .preview/config.json --workdir .
+```
+
+Stay in the turn until it stops, then report the reason. See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
 
 ### Optional: repo agent rules
 
@@ -165,6 +173,7 @@ The skill sets `disable-model-invocation: true`, so it never auto-fires from its
 
 | | Actions / CLI | Agent (`--agent`) |
 | --- | --- | --- |
+| Tunnel | Always (`*.trycloudflare.com`) | Off unless `--share` / `preview share` |
 | Idle after READY | **5 minutes** (`idleSeconds: 300`) | **Off** |
 | Total max | **15 minutes** (`totalCapSeconds: 900`) | Same — safety net |
 | Cap vs idle | Cap always wins | Cap only |

@@ -5,7 +5,7 @@ Temporary public previews of a repo app on any branch or PR via a free Cloudflar
 Two modes share the same scripts:
 
 1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
-2. **Agent mode** — install this plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (never ticks the Actions checkbox).
+2. **Agent mode** — install this plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (localhost by default; never ticks the Actions checkbox).
 
 Secrets are not supported in v1; previews work for apps that need no secrets.
 
@@ -136,6 +136,7 @@ Local smoke-test: copy this plugin to `~/.cursor/plugins/local/preview` and relo
 
 ```bash
 preview up --agent --config .preview/config.json --workdir .
+# localhost only — no tunnel
 ```
 
 From a checkout of this marketplace:
@@ -144,7 +145,7 @@ From a checkout of this marketplace:
 bin/preview up --agent --config /path/to/app/.preview/config.json --workdir /path/to/app
 ```
 
-`--agent` disables idle; only `totalCapSeconds` applies. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
+`--agent` is localhost-only, disables idle, and still applies `totalCapSeconds`. For a public link (when a human asks): `preview up --agent --share` or `preview share`. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
 
 ### Optional: repo agent rules
 
@@ -162,6 +163,7 @@ The skill sets `disable-model-invocation: true`, so it never auto-fires from its
 
 | | Actions / CLI | Agent (`--agent`) |
 | --- | --- | --- |
+| Tunnel | Always (`*.trycloudflare.com`) | Off unless `--share` / `preview share` |
 | Idle after READY | **5 minutes** (`300`) | **Off** |
 | Total max | **15 minutes** (`900`) | Same — safety net |
 | Cap vs idle | Cap always wins | Cap only |

@@ -284,6 +284,82 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Agent CLI: --share / share documented; agent default is local-only
+help_out="$("$PLUGIN/bin/preview" --help 2>&1 || true)"
+assert_contains "help mentions --share" "$help_out" "--share"
+assert_contains "help mentions share command" "$help_out" "share    Same as"
+# Agent without --share must not start a tunnel (gate in bin/preview)
+if rg -n 'use_tunnel=0' "$PLUGIN/bin/preview" >/dev/null \
+  && rg -n 'cmd_share|up --agent --share' "$PLUGIN/bin/preview" >/dev/null; then
+  echo "PASS agent default skips tunnel; share opts in"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL agent local-only / share gate missing in bin/preview"
+  FAIL=$((FAIL + 1))
+fi
+
+# Smoke: preview up --agent prints localhost, no trycloudflare, local HTTP works
+SMOKE_DIR="$TMP/agent-local"
+mkdir -p "$SMOKE_DIR/.preview"
+cp "$ROOT/examples/preview/serve.py" "$ROOT/examples/preview/index.html" "$SMOKE_DIR/"
+# Unique app port so parallel leftovers cannot collide
+smoke_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+cat >"$SMOKE_DIR/.preview/config.json" <<JSON
+{
+  "type": "static",
+  "start": "python3 serve.py",
+  "port": $smoke_port,
+  "idleSeconds": 300,
+  "totalCapSeconds": 120
+}
+JSON
+export PREVIEW_STATE_DIR="$SMOKE_DIR/.preview/run"
+rm -rf "$PREVIEW_STATE_DIR"
+("$PLUGIN/bin/preview" up --agent --config "$SMOKE_DIR/.preview/config.json" --workdir "$SMOKE_DIR" \
+  >"$TMP/agent-local.stdout" 2>"$TMP/agent-local.stderr") &
+smoke_pid=$!
+url=""
+for _ in $(seq 1 40); do
+  if [[ -f "$PREVIEW_STATE_DIR/status" ]]; then
+    st="$(cat "$PREVIEW_STATE_DIR/status" 2>/dev/null || true)"
+    if [[ "$st" == "ready" || "$st" == "watching" ]]; then
+      url="$(cat "$PREVIEW_STATE_DIR/url" 2>/dev/null || true)"
+      [[ -n "$url" ]] && break
+    fi
+  fi
+  if ! kill -0 "$smoke_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$url" == http://127.0.0.1:* ]] && [[ "$url" != *trycloudflare* ]]; then
+  echo "PASS agent --agent URL is localhost (no tunnel)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL agent --agent URL should be localhost, got: $url"
+  echo "  stderr: $(tail -5 "$TMP/agent-local.stderr" 2>/dev/null || true)"
+  FAIL=$((FAIL + 1))
+fi
+code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 "$url/" 2>/dev/null || echo fail)"
+if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+  echo "PASS agent localhost HTTP $code"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL agent localhost HTTP (code=$code url=$url)"
+  FAIL=$((FAIL + 1))
+fi
+# No trycloudflare anywhere in this run's state/logs
+if rg -n 'trycloudflare' "$PREVIEW_STATE_DIR" "$TMP/agent-local.stdout" "$TMP/agent-local.stderr" >/dev/null 2>&1; then
+  echo "FAIL agent --agent leaked trycloudflare URL"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS agent --agent has no trycloudflare URL"
+  PASS=$((PASS + 1))
+fi
+"$PLUGIN/bin/preview" stop smoke-test >/dev/null 2>&1 || true
+wait "$smoke_pid" 2>/dev/null || true
+unset PREVIEW_STATE_DIR
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [[ "$FAIL" -eq 0 ]]

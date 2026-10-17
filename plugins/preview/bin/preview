@@ -22,24 +22,30 @@ usage() {
   cat <<'EOF'
 Usage: preview <command>
 
-  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent]
+  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent] [--share]
+  share [--config PATH] [--labels CSV] [--workdir DIR]
   url
   status
   stop [reason]
   wait
 
-  --agent  Agent mode: disable idle timer; only totalCapSeconds applies.
+  --agent  Agent mode: no idle timer; only totalCapSeconds applies.
+           Default: app + local proxy only (localhost URL, no tunnel).
+  --share  Open a Cloudflare quick tunnel and print the public URL.
+           Implied for Actions/CLI (non-agent). With --agent, opt-in only.
+  share    Same as: up --agent --share
 EOF
 }
 
 cmd_up() {
-  local config="" labels="" workdir="" agent=0
+  local config="" labels="" workdir="" agent=0 share=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config) config="$2"; shift 2 ;;
       --labels) labels="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
       --agent) agent=1; shift ;;
+      --share) share=1; shift ;;
       *) preview_die "unknown argument: $1" ;;
     esac
   done
@@ -50,6 +56,12 @@ cmd_up() {
 
   if (( agent )); then
     export PREVIEW_AGENT_MODE=1
+  fi
+
+  # Actions / human CLI always tunnel. Agent mode stays local unless --share.
+  local use_tunnel=1
+  if (( agent )) && (( ! share )); then
+    use_tunnel=0
   fi
 
   export PREVIEW_STATE_DIR="${PREVIEW_STATE_DIR:-$PWD/.preview/run}"
@@ -72,6 +84,11 @@ cmd_up() {
   preview_write pgid "$$"
   if [[ "${PREVIEW_AGENT_MODE:-}" == "1" || "${PREVIEW_AGENT_MODE:-}" == "true" ]]; then
     preview_write agent_mode "1"
+  fi
+  if (( use_tunnel )); then
+    preview_write share "1"
+  else
+    preview_write share "0"
   fi
 
   preview_load_config "${config:-$(preview_default_config_path)}"
@@ -118,7 +135,13 @@ cmd_up() {
   preview_wait_port 127.0.0.1 "$proxy_port" || preview_die "proxy did not open port $proxy_port"
 
   local url
-  url="$(preview_start_tunnel "http://127.0.0.1:$proxy_port")"
+  if (( use_tunnel )); then
+    url="$(preview_start_tunnel "http://127.0.0.1:$proxy_port")"
+  else
+    url="http://127.0.0.1:$proxy_port"
+    preview_write url "$url"
+    preview_log "agent mode: local only (no tunnel); pass --share for a public URL"
+  fi
   preview_wait_ready "$url" >/dev/null
 
   # Seed idle clock: READY itself is not user traffic.
@@ -131,6 +154,11 @@ cmd_up() {
   [[ -n "$reason" ]] || reason="watchdog"
   preview_cleanup "$reason"
   echo "preview stopped: $reason" >&2
+}
+
+cmd_share() {
+  # Human-facing public link: agent mode + Cloudflare quick tunnel.
+  cmd_up --agent --share "$@"
 }
 
 cmd_url() {
@@ -179,6 +207,7 @@ main() {
   shift || true
   case "$cmd" in
     up) cmd_up "$@" ;;
+    share) cmd_share "$@" ;;
     url) cmd_url "$@" ;;
     status) cmd_status "$@" ;;
     stop) cmd_stop "$@" ;;

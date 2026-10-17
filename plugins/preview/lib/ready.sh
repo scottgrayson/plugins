@@ -7,19 +7,22 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 preview_http_ok() {
   local url="$1"
   local code
-  # Prefer QUIC/HTTP3 when curl supports it, then HTTP/2, then plain HTTPS.
+  # Prefer QUIC/HTTP3 when curl supports it, then HTTP/2, then plain HTTP(S).
   # Keep timeouts short so READY polling stays responsive.
-  if curl --help 2>&1 | grep -q -- '--http3'; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http3 "$url" 2>/dev/null || true)"
+  # Local agent URLs are plain http:// — skip http3/http2 probes.
+  if [[ "$url" == https://* ]]; then
+    if curl --help 2>&1 | grep -q -- '--http3'; then
+      code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http3 "$url" 2>/dev/null || true)"
+      if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+        echo "http3:$code"
+        return 0
+      fi
+    fi
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http2 "$url" 2>/dev/null || true)"
     if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
-      echo "http3:$code"
+      echo "http2:$code"
       return 0
     fi
-  fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http2 "$url" 2>/dev/null || true)"
-  if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
-    echo "http2:$code"
-    return 0
   fi
   code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)"
   if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
@@ -33,7 +36,7 @@ preview_wait_ready() {
   local url="${1:-$(preview_read url)}"
   [[ -n "$url" ]] || preview_die "no preview URL"
   local i mode
-  preview_log "waiting for public URL to answer: $url"
+  preview_log "waiting for URL to answer: $url"
   for i in $(seq 1 90); do
     if mode="$(preview_http_ok "$url")"; then
       preview_write ready_at "$(date +%s)"
@@ -45,5 +48,5 @@ preview_wait_ready() {
     fi
     sleep 1
   done
-  preview_die "public URL never answered HTTP: $url"
+  preview_die "URL never answered HTTP: $url"
 }
