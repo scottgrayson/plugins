@@ -4,15 +4,15 @@ on:
   workflow_call:
     inputs:
       working-directory:
-        description: Directory containing .preview.json
+        description: Directory containing .preview/config.json
         type: string
         required: false
         default: .
       config:
-        description: Path to .preview.json relative to working-directory
+        description: Path to .preview/config.json relative to working-directory
         type: string
         required: false
-        default: .preview.json
+        default: .preview/config.json
 
 permissions:
   contents: read

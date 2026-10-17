@@ -177,7 +177,7 @@ jobs:
         with:
           mode: run
           working-directory: examples/hello-world
-          config: .preview.json
+          config: .preview/config.json
           labels: ${{ steps.labels.outputs.csv }}
           pr-number: ${{ needs.mark-loading.outputs.pr_number }}
           job-start-epoch: ${{ needs.mark-loading.outputs.job_start }}

@@ -19,7 +19,7 @@ STATIC_EXT = {
     ".pdf", ".txt", ".xml", ".json", ".wasm",
 }
 
-# Merged with repo ignorePaths. Repos add their own patterns in .preview.json.
+# Merged with repo ignorePaths. Repos add their own patterns in .preview/config.json.
 DEFAULT_IGNORE_PATHS = ["*poll*"]
 
 HOP_BY_HOP = {

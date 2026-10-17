@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 preview_default_config_path() {
-  echo "${PREVIEW_CONFIG:-$PWD/.preview.json}"
+  echo "${PREVIEW_CONFIG:-$PWD/.preview/config.json}"
 }
 
 preview_load_config() {

@@ -9,6 +9,8 @@ Two modes share the same scripts:
 
 Secrets are not supported in v1; previews work for apps that need no secrets.
 
+All repo-side preview files live under `.preview/` (`config.json`, `steps/`, optional `README.md`).
+
 Full marketplace install guide: [root README](../../README.md). This page matches that guide and adds plugin-local notes.
 
 ---
@@ -19,7 +21,7 @@ Full marketplace install guide: [root README](../../README.md). This page matche
 
 Commit next to your app:
 
-**`.preview.json`** (all fields optional; defaults shown):
+**`.preview/config.json`** (all fields optional; defaults shown):
 
 ```json
 {
@@ -47,7 +49,7 @@ Commit next to your app:
 
 **Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
 
-**Optional `PREVIEW.md`**: human check notes.
+**Optional `.preview/README.md`**: human check notes.
 
 ### 2. Workflow
 
@@ -66,7 +68,7 @@ jobs:
     uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
     with:
       working-directory: .
-      config: .preview.json
+      config: .preview/config.json
 ```
 
 | Event | Job | Effect |
@@ -129,13 +131,13 @@ Local smoke-test: copy this plugin to `~/.cursor/plugins/local/preview` and relo
 ### Run in a consumer repo
 
 ```bash
-preview up --agent --config .preview.json --workdir .
+preview up --agent --config .preview/config.json --workdir .
 ```
 
 From a checkout of this marketplace:
 
 ```bash
-bin/preview up --agent --config /path/to/app/.preview.json --workdir /path/to/app
+bin/preview up --agent --config /path/to/app/.preview/config.json --workdir /path/to/app
 ```
 
 `--agent` disables idle; only `totalCapSeconds` applies. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).

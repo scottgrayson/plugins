@@ -58,7 +58,7 @@ source "$LIB/pr_description.sh"
 source "$LIB/watchdog.sh"
 
 mkdir -p "$TMP/app/.preview/steps"
-cat >"$TMP/app/.preview.json" <<'JSON'
+cat >"$TMP/app/.preview/config.json" <<'JSON'
 {
   "type": "static",
   "port": 4321,
@@ -75,12 +75,13 @@ chmod +x "$TMP/app/.preview/steps/"*.sh
 export PREVIEW_STATE_DIR="$TMP/state-config"
 mkdir -p "$PREVIEW_STATE_DIR"
 pushd "$TMP/app" >/dev/null
-preview_load_config "$TMP/app/.preview.json"
+preview_load_config "$TMP/app/.preview/config.json"
 assert_eq "config port" "$PREVIEW_PORT" "4321"
 assert_eq "config idle" "$PREVIEW_IDLE_SECONDS" "30"
 assert_eq "config type" "$PREVIEW_TYPE" "static"
 assert_contains "config ignorePaths" "$PREVIEW_IGNORE_PATHS" "/healthz*"
 assert_contains "config defaultSteps" "$PREVIEW_DEFAULT_STEPS" "seed"
+assert_eq "default config path" "$(preview_default_config_path)" "$TMP/app/.preview/config.json"
 popd >/dev/null
 
 export PREVIEW_STATE_DIR="$TMP/state-defaults"
@@ -95,14 +96,14 @@ popd >/dev/null
 export PREVIEW_STATE_DIR="$TMP/state-steps"
 mkdir -p "$PREVIEW_STATE_DIR"
 pushd "$TMP/app" >/dev/null
-preview_load_config "$TMP/app/.preview.json"
+preview_load_config "$TMP/app/.preview/config.json"
 got="$(preview_resolve_steps "" "$TMP/app/.preview/steps" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 assert_eq "default steps when no labels" "$got" "seed"
 got="$(preview_resolve_steps "preview:migrate,other" "$TMP/app/.preview/steps" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 assert_eq "label selects migrate" "$got" "migrate"
 assert_fail_contains "unknown step lists valid" "unknown step 'nope'" \
-  bash -c "source '$LIB/config.sh'; export PREVIEW_STATE_DIR='$PREVIEW_STATE_DIR'; preview_load_config '$TMP/app/.preview.json'; preview_resolve_steps 'preview:nope' '$TMP/app/.preview/steps'"
-out="$(bash -c "source '$LIB/config.sh'; export PREVIEW_STATE_DIR='$PREVIEW_STATE_DIR'; preview_load_config '$TMP/app/.preview.json'; preview_resolve_steps 'preview:nope' '$TMP/app/.preview/steps'" 2>&1 || true)"
+  bash -c "source '$LIB/config.sh'; export PREVIEW_STATE_DIR='$PREVIEW_STATE_DIR'; preview_load_config '$TMP/app/.preview/config.json'; preview_resolve_steps 'preview:nope' '$TMP/app/.preview/steps'"
+out="$(bash -c "source '$LIB/config.sh'; export PREVIEW_STATE_DIR='$PREVIEW_STATE_DIR'; preview_load_config '$TMP/app/.preview/config.json'; preview_resolve_steps 'preview:nope' '$TMP/app/.preview/steps'" 2>&1 || true)"
 assert_contains "unknown step mentions migrate" "$out" "migrate"
 popd >/dev/null
 

@@ -11,6 +11,8 @@ Plugin package: [`plugins/preview/`](plugins/preview/) · Example: [`examples/he
 
 Secrets are not supported in v1; previews work for apps that need no secrets.
 
+All repo-side preview files live under `.preview/` (`config.json`, `steps/`, optional `README.md`).
+
 ---
 
 ## Actions mode (no AI)
@@ -19,7 +21,7 @@ Secrets are not supported in v1; previews work for apps that need no secrets.
 
 Commit these next to your app:
 
-**`.preview.json`** (all fields optional; defaults shown):
+**`.preview/config.json`** (all fields optional; defaults shown):
 
 ```json
 {
@@ -47,7 +49,7 @@ Commit these next to your app:
 
 **Steps** (optional): scripts at `.preview/steps/<name>.sh`. JSON never embeds commands — only step names. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
 
-**Optional `PREVIEW.md`**: human check notes for the preview.
+**Optional `.preview/README.md`**: human check notes for the preview.
 
 ### 2. Workflow
 
@@ -66,7 +68,7 @@ jobs:
     uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
     with:
       working-directory: .
-      config: .preview.json
+      config: .preview/config.json
 ```
 
 What this wires:
@@ -128,17 +130,17 @@ For local smoke-testing without a team marketplace, copy the plugin into `~/.cur
 
 ### Run in a consumer repo
 
-1. Same `.preview.json` / steps as Actions mode.
+1. Same `.preview/config.json` / steps as Actions mode.
 2. Ask the agent to preview the PR/branch, or run the CLI from the installed plugin (skill locates `bin/preview`):
 
 ```bash
-preview up --agent --config .preview.json --workdir .
+preview up --agent --config .preview/config.json --workdir .
 ```
 
 From a checkout of this marketplace (without installing):
 
 ```bash
-plugins/preview/bin/preview up --agent --config .preview.json --workdir path/to/app
+plugins/preview/bin/preview up --agent --config .preview/config.json --workdir path/to/app
 ```
 
 `up --agent` disables the idle timer; only `totalCapSeconds` applies. Stay in the turn until it stops, then report the reason. See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).

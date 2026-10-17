@@ -26,21 +26,27 @@ If the plugin is installed elsewhere, set `PREVIEW_BIN` to that install's `bin/p
 
 ## Config
 
-Repo config is `.preview.json` (plain values only). Named steps live at `.preview/steps/<name>.sh`. Optional human notes: `PREVIEW.md`. Secrets are not supported in v1; previews work for apps that need no secrets.
+All repo-side preview files live under `.preview/`:
+
+- `.preview/config.json` — plain values only
+- `.preview/steps/<name>.sh` — named step scripts
+- `.preview/README.md` — optional human notes
+
+Secrets are not supported in v1; previews work for apps that need no secrets.
 
 Defaults when omitted: `type=static`, `idleSeconds=300` (5m), `totalCapSeconds=900` (15m). Max always wins: the total cap stops the preview even if idle would allow more.
 
-Built-in ignore (merged with `ignorePaths`): path wildcard `*poll*` plus static assets (common extensions and `/assets/`, `/static/`). Repos add their own patterns via `ignorePaths` in `.preview.json` (fnmatch wildcards supported).
+Built-in ignore (merged with `ignorePaths`): path wildcard `*poll*` plus static assets (common extensions and `/assets/`, `/static/`). Repos add their own patterns via `ignorePaths` in `.preview/config.json` (fnmatch wildcards supported).
 
 ## Commands
 
 ```bash
 # Agent mode (required for agents): no idle timer; only totalCapSeconds as safety net
 PREVIEW_PR_NUMBER=<n> PREVIEW_BRANCH=<name> \
-  "$PREVIEW_BIN" up --agent --config .preview.json --labels "<csv labels>" --workdir <app-dir>
+  "$PREVIEW_BIN" up --agent --config .preview/config.json --labels "<csv labels>" --workdir <app-dir>
 
 # Actions / human CLI (idle + total cap)
-"$PREVIEW_BIN" up --config .preview.json
+"$PREVIEW_BIN" up --config .preview/config.json
 
 # Print public URL once READY
 "$PREVIEW_BIN" url
@@ -68,7 +74,7 @@ Live edits on static / file-served apps appear on the same URL after refresh. Pr
 ## Previewing a PR (local agent mode)
 
 1. Check out the PR head (or work in the already-checked-out PR branch).
-2. `cd` to the app directory that has `.preview.json` (for this repo: `examples/hello-world`).
+2. `cd` to the app directory that has `.preview/config.json` (for this repo: `examples/hello-world`).
 3. Set `PREVIEW_PR_NUMBER` from the PR.
 4. Pass PR labels via `--labels` if present (`preview:<step>` only). Unknown steps must fail with the valid list — do not invent commands.
 5. Run `up --agent`, report the URL, stay until stopped, then report the stop reason.
