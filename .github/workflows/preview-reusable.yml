@@ -155,7 +155,7 @@ jobs:
     needs: mark-loading
     if: needs.mark-loading.outputs.start == 'yes'
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 20
     concurrency:
       group: preview-${{ github.repository }}-pr-${{ needs.mark-loading.outputs.pr_number }}
       cancel-in-progress: false

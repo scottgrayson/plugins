@@ -112,7 +112,7 @@ runs:
         trap cleanup EXIT
 
         preview_load_config "$config"
-        idle_seconds="${PREVIEW_IDLE_SECONDS:-900}"
+        idle_seconds="${PREVIEW_IDLE_SECONDS:-300}"
 
         LOG_DIR="$(mktemp -d)"
         setsid "$PLUGIN_ROOT/bin/preview" up --config "$config" --labels "$labels" >"$LOG_DIR/up.stdout" 2>"$LOG_DIR/up.stderr" &

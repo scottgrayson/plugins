@@ -60,7 +60,7 @@ preview_actions_mark_loading() {
 preview_actions_mark_ready() {
   local url="$1"
   local job_start_epoch="${2:-$(date +%s)}"
-  local idle_seconds="${3:-900}"
+  local idle_seconds="${3:-300}"
   local deploy_seconds="${4:-}"
   local body new_body created_et
   body="$(preview_actions_get_body)"

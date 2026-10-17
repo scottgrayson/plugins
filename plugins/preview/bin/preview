@@ -22,27 +22,34 @@ usage() {
   cat <<'EOF'
 Usage: preview <command>
 
-  up [--config PATH] [--labels CSV] [--workdir DIR]
+  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent]
   url
   status
   stop [reason]
   wait
+
+  --agent  Agent mode: disable idle timer; only totalCapSeconds applies.
 EOF
 }
 
 cmd_up() {
-  local config="" labels="" workdir=""
+  local config="" labels="" workdir="" agent=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config) config="$2"; shift 2 ;;
       --labels) labels="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
+      --agent) agent=1; shift ;;
       *) preview_die "unknown argument: $1" ;;
     esac
   done
 
   if [[ -n "$workdir" ]]; then
     cd "$workdir"
+  fi
+
+  if (( agent )); then
+    export PREVIEW_AGENT_MODE=1
   fi
 
   export PREVIEW_STATE_DIR="${PREVIEW_STATE_DIR:-$PWD/.preview/run}"
@@ -63,6 +70,9 @@ cmd_up() {
   preview_write status starting
   preview_write started_at "$(date +%s)"
   preview_write pgid "$$"
+  if [[ "${PREVIEW_AGENT_MODE:-}" == "1" || "${PREVIEW_AGENT_MODE:-}" == "true" ]]; then
+    preview_write agent_mode "1"
+  fi
 
   preview_load_config "${config:-$(preview_default_config_path)}"
 

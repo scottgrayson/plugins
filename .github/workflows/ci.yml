@@ -6,19 +6,23 @@ on:
   pull_request:
 
 jobs:
-  tapp-ban:
+  brand-ban:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fail if whole-word tapp appears
+      - name: Fail if forbidden brand whole-word appears
         shell: bash
         run: |
           set -euo pipefail
-          if rg -n -i --glob '!.git/**' '\btapp\b' .; then
-            echo "Forbidden whole-word match for 'tapp' (case-insensitive)." >&2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep >/dev/null
+          # Split so this workflow file itself does not contain the needle.
+          needle="t""app"
+          if rg -n -i --glob '!.git/**' "\\b${needle}\\b" .; then
+            echo "Forbidden whole-word brand match (case-insensitive)." >&2
             exit 1
           fi
-          echo "OK: no whole-word tapp matches"
+          echo "OK: no forbidden brand whole-word matches"
 
   tests:
     runs-on: ubuntu-latest

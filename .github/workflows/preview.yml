@@ -3,8 +3,6 @@ name: Preview
 on:
   pull_request:
     types: [opened, edited, reopened]
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
@@ -12,7 +10,7 @@ permissions:
 
 jobs:
   ensure-checkbox:
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
+    if: github.event.action == 'opened' || github.event.action == 'reopened'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,10 +20,9 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
 
   # Fast path: gate + loading line only. No checkout, cache, or script fetch.
+  # Checkbox-only: listens for PR body edit with a ticked control line.
   mark-loading:
-    if: |
-      (github.event_name == 'pull_request' && github.event.action == 'edited') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/preview start'))
+    if: github.event.action == 'edited'
     runs-on: ubuntu-latest
     outputs:
       start: ${{ steps.go.outputs.start }}
@@ -40,10 +37,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          FORCE_START: ${{ github.event_name == 'issue_comment' && 'yes' || 'no' }}
-          TICK_AT: ${{ github.event.pull_request.updated_at || github.event.comment.created_at }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TICK_AT: ${{ github.event.pull_request.updated_at }}
         run: |
           set -euo pipefail
           export JOB_START
@@ -63,7 +59,6 @@ jobs:
           token = os.environ["GH_TOKEN"]
           repo = os.environ["REPO"]
           pr = os.environ["PR_NUMBER"]
-          force = os.environ.get("FORCE_START", "no") == "yes"
           job_start = int(os.environ["JOB_START"])
           out_path = os.environ["GITHUB_OUTPUT"]
 
@@ -134,7 +129,7 @@ jobs:
 
           body = (api("GET", f"pulls/{pr}").get("body") or "")
           current = control_line(body)
-          should = force or current == TICKED
+          should = current == TICKED
           created_et = format_et(job_start)
           with open(out_path, "a", encoding="utf-8") as fh:
               fh.write(f"start={'yes' if should else 'no'}\n")
@@ -156,7 +151,7 @@ jobs:
     needs: mark-loading
     if: needs.mark-loading.outputs.start == 'yes'
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 20
     concurrency:
       group: preview-${{ github.repository }}-pr-${{ needs.mark-loading.outputs.pr_number }}
       cancel-in-progress: false

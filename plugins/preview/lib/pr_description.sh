@@ -236,7 +236,7 @@ preview_pr_set_running() {
 }
 
 preview_pr_set_url() {
-  preview_pr_set_running "$1" "$2" "${3:-$(preview_pr_format_et)}" "${4:-900}"
+  preview_pr_set_running "$1" "$2" "${3:-$(preview_pr_format_et)}" "${4:-300}"
 }
 
 preview_pr_reset_idle() {

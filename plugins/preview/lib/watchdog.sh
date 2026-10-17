@@ -36,17 +36,22 @@ PY
 }
 
 preview_watchdog() {
-  local idle="${PREVIEW_IDLE_SECONDS:-900}"
-  local cap="${PREVIEW_TOTAL_CAP_SECONDS:-7200}"
-  local started ready_at now last_active age idle_age
+  # Agent mode disables idle; only the total cap applies as a safety net.
+  local idle="${PREVIEW_IDLE_SECONDS:-300}"
+  local cap="${PREVIEW_TOTAL_CAP_SECONDS:-900}"
+  local started ready_at now last_active idle_age
+  if [[ "${PREVIEW_AGENT_MODE:-}" == "1" || "${PREVIEW_AGENT_MODE:-}" == "true" ]]; then
+    idle=0
+  fi
   started="$(preview_read started_at)"
   [[ -n "$started" ]] || started="$(date +%s)"
 
   preview_write status watching
-  preview_log "watchdog idle=${idle}s total_cap=${cap}s"
+  preview_log "watchdog idle=${idle}s total_cap=${cap}s agent=${PREVIEW_AGENT_MODE:-0}"
 
   while true; do
     now="$(date +%s)"
+    # Total cap always wins.
     if (( now - started >= cap )); then
       preview_write reason "total-cap"
       preview_log "total cap reached (${cap}s)"
@@ -59,15 +64,18 @@ preview_watchdog() {
       continue
     fi
 
-    last_active="$(preview_last_counted_ts)"
-    if [[ -z "$last_active" ]]; then
-      last_active="$ready_at"
-    fi
-    idle_age=$((now - last_active))
-    if (( idle_age >= idle )); then
-      preview_write reason "idle"
-      preview_log "idle timeout (${idle}s since last counted request)"
-      return 0
+    # Single idle timer: starts at READY, resets on each counted request. idle=0 disables it.
+    if (( idle > 0 )); then
+      last_active="$(preview_last_counted_ts)"
+      if [[ -z "$last_active" ]]; then
+        last_active="$ready_at"
+      fi
+      idle_age=$((now - last_active))
+      if (( idle_age >= idle )); then
+        preview_write reason "idle"
+        preview_log "idle timeout (${idle}s since last counted request)"
+        return 0
+      fi
     fi
 
     if [[ -f "$(preview_state_dir)/stop" ]]; then

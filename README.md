@@ -28,9 +28,13 @@ This repository uses it on itself to preview `examples/hello-world`.
 
 ### Quick start (agent / CLI)
 
+Agents run previews locally on their VM — never tick the Actions checkbox:
+
 ```bash
 cd examples/hello-world
-../../plugins/preview/bin/preview up
+../../plugins/preview/bin/preview up --agent
 ```
+
+Defaults: idle 5 minutes (Actions/CLI only), total max 15 minutes. Agent mode disables idle.
 
 Named Cloudflare tunnels are planned for v2.

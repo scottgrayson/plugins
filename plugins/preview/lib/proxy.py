@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import sys
 import threading
 import time
-from collections import defaultdict, deque
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,6 +19,9 @@ STATIC_EXT = {
     ".pdf", ".txt", ".xml", ".json", ".wasm",
 }
 
+# Merged with repo ignorePaths. Repos add their own patterns in .preview.json.
+DEFAULT_IGNORE_PATHS = ["*poll*"]
+
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
@@ -26,26 +29,23 @@ HOP_BY_HOP = {
 
 
 class CountTracker:
-    def __init__(self, ignore_paths: list[str], poll_tolerance: float = 0.2, poll_min: int = 3):
-        self.ignore_exact = set()
-        self.ignore_prefixes = []
+    def __init__(self, ignore_paths: list[str]):
+        patterns = list(DEFAULT_IGNORE_PATHS)
         for p in ignore_paths:
-            if p.endswith("*"):
-                self.ignore_prefixes.append(p[:-1])
-            else:
-                self.ignore_exact.add(p)
-        self.poll_tolerance = poll_tolerance
-        self.poll_min = poll_min
-        self.history: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=8))
-        self.lock = threading.Lock()
-        self.poll_paths: set[str] = set()
+            if p and p not in patterns:
+                patterns.append(p)
+        self.ignore_patterns = patterns
 
     def ignored_by_config(self, path: str) -> bool:
-        if path in self.ignore_exact:
-            return True
-        for prefix in self.ignore_prefixes:
-            if path.startswith(prefix):
-                return True
+        candidates = {path, path.split("?", 1)[0]}
+        bare = path.lstrip("/")
+        if bare:
+            candidates.add(bare)
+            candidates.add("/" + bare)
+        for pattern in self.ignore_patterns:
+            for candidate in candidates:
+                if fnmatch.fnmatchcase(candidate, pattern) or fnmatch.fnmatchcase(candidate.lower(), pattern.lower()):
+                    return True
         return False
 
     @staticmethod
@@ -58,46 +58,12 @@ class CountTracker:
             return True
         return False
 
-    @staticmethod
-    def poll_path_heuristic(path: str) -> bool:
-        # Best-effort only. ignorePaths is the guaranteed override for custom poll routes.
-        lower = path.lower()
-        needles = ("poll", "livewire", "heartbeat", "healthz", "health-check", "wire/")
-        return any(n in lower for n in needles)
-
-    def looks_like_poll(self, path: str, now: float) -> bool:
-        if not self.poll_path_heuristic(path):
-            return False
-        with self.lock:
-            hist = self.history[path]
-            if path in self.poll_paths:
-                hist.append(now)
-                return True
-            timestamps = list(hist) + [now]
-            hist.append(now)
-            if len(timestamps) < self.poll_min:
-                return False
-            intervals = [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))]
-            mean = sum(intervals) / len(intervals)
-            if mean < 1.0:
-                return False
-            if any(abs(i - mean) / mean > self.poll_tolerance for i in intervals):
-                return False
-            self.poll_paths.add(path)
-            return True
-
     def should_count(self, method: str, path: str) -> tuple[bool, str]:
         clean = path.split("?", 1)[0] or "/"
-        now = time.time()
         if self.ignored_by_config(clean):
             return False, "ignorePaths"
         if method.upper() in {"GET", "HEAD"} and self.is_static(clean):
             return False, "static"
-        if method.upper() in {"GET", "HEAD", "POST"} and self.looks_like_poll(clean, now):
-            return False, "poll"
-        if method.upper() in {"GET", "HEAD", "POST"} and self.poll_path_heuristic(clean):
-            with self.lock:
-                self.history[clean].append(now)
         return True, "user"
 
 
