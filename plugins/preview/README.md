@@ -94,6 +94,10 @@ GitHub strips `target=_blank` from PR bodies; use Cmd/Ctrl-click for a new tab.
 
 No `onDemand` flag and no triggers list. For comment commands, labels, schedule, etc., write your own workflow that calls the reusable workflow or composite action.
 
+### Security
+
+Fork PRs are skipped (`head.repo.full_name == github.repository`); the workflow listens on `pull_request` only (never `pull_request_target`). Quick-tunnel URLs are public to anyone with the link (no login), so use preview-only data. Secrets are not supported in v1.
+
 ---
 
 ## Agent mode (plugin)

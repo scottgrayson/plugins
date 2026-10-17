@@ -250,6 +250,40 @@ else
   PASS=$((PASS + 1))
 fi
 
+# Security: never pull_request_target; same-repo gate on every reusable job
+WF_PREVIEW="$ROOT/.github/workflows/preview.yml"
+WF_REUSABLE="$ROOT/.github/workflows/preview-reusable.yml"
+SAME_REPO='github.event.pull_request.head.repo.full_name == github.repository'
+if rg -n 'pull_request_target' "$WF_PREVIEW" "$WF_REUSABLE" >/dev/null 2>&1; then
+  echo "FAIL pull_request_target present"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS no pull_request_target"
+  PASS=$((PASS + 1))
+fi
+# preview.yml must use pull_request (not target)
+if yq -e '.on.pull_request' "$WF_PREVIEW" >/dev/null 2>&1 && ! yq -e '.on.pull_request_target' "$WF_PREVIEW" >/dev/null 2>&1; then
+  echo "PASS preview.yml on.pull_request only"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL preview.yml on: must be pull_request only"
+  FAIL=$((FAIL + 1))
+fi
+jobs_missing=""
+for job in ensure-checkbox mark-loading preview finalize; do
+  ifc="$(yq -r ".jobs.\"$job\".if // \"\"" "$WF_REUSABLE")"
+  if [[ "$ifc" != *"$SAME_REPO"* ]]; then
+    jobs_missing+="$job "
+  fi
+done
+if [[ -z "$jobs_missing" ]]; then
+  echo "PASS reusable jobs gate fork PRs"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL reusable jobs missing same-repo if: $jobs_missing"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [[ "$FAIL" -eq 0 ]]

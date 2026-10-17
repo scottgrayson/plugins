@@ -20,7 +20,11 @@ permissions:
 
 jobs:
   ensure-checkbox:
-    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
+    # Same-repo PRs only — fork PRs never run steps or open a tunnel.
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'reopened')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +40,10 @@ jobs:
 
   # Fast path: gate + loading line only. No checkout, cache, or script fetch.
   mark-loading:
-    if: github.event_name == 'pull_request' && github.event.action == 'edited'
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'edited'
     runs-on: ubuntu-latest
     outputs:
       start: ${{ steps.go.outputs.start }}
@@ -163,7 +170,9 @@ jobs:
 
   preview:
     needs: mark-loading
-    if: needs.mark-loading.outputs.start == 'yes'
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.mark-loading.outputs.start == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -208,7 +217,10 @@ jobs:
   # Short dedicated job so Idle appears live (same pattern as mark-loading).
   finalize:
     needs: [mark-loading, preview]
-    if: always() && needs.mark-loading.outputs.start == 'yes'
+    if: >
+      always() &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.mark-loading.outputs.start == 'yes'
     runs-on: ubuntu-latest
     steps:
       - name: Reset to idle
