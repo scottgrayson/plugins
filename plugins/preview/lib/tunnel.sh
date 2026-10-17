@@ -43,13 +43,15 @@ preview_start_tunnel() {
   : >"$url_file"
 
   preview_log "starting quick tunnel to $target_url"
+  # Redirect wrap stdio so callers using $(preview_start_tunnel) are not blocked
+  # by the long-lived cloudflared pipe holding the command-substitution FD open.
   (
     "$cf" tunnel --no-autoupdate --url "$target_url" 2>&1 | tee "$log" | while IFS= read -r line; do
       if [[ "$line" =~ https://[a-zA-Z0-9.-]+\.trycloudflare\.com ]]; then
         echo "${BASH_REMATCH[0]}" >"$url_file"
       fi
     done
-  ) &
+  ) </dev/null >"$(preview_state_dir)/tunnel.wrap.log" 2>&1 &
   local tunnel_wrap_pid=$!
   preview_write tunnel_wrap_pid "$tunnel_wrap_pid"
 

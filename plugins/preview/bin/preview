@@ -54,7 +54,11 @@ cmd_up() {
     fi
   fi
 
-  rm -rf "$(preview_state_dir)"
+  # Preserve nothing from a prior run except we recreate the state dir cleanly.
+  local state
+  state="$(preview_state_dir)"
+  mkdir -p "$state"
+  find "$state" -mindepth 1 -maxdepth 1 ! -name bin -exec rm -rf {} +
   preview_ensure_state
   preview_write status starting
   preview_write started_at "$(date +%s)"

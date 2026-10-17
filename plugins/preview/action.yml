@@ -106,7 +106,8 @@ runs:
         }
         trap cleanup EXIT
 
-        setsid "$PLUGIN_ROOT/bin/preview" up --config "$config" --labels "$labels" >"$PREVIEW_STATE_DIR/up.stdout" 2>"$PREVIEW_STATE_DIR/up.stderr" &
+        LOG_DIR="$(mktemp -d)"
+        setsid "$PLUGIN_ROOT/bin/preview" up --config "$config" --labels "$labels" >"$LOG_DIR/up.stdout" 2>"$LOG_DIR/up.stderr" &
         UP_PID=$!
         echo "$UP_PID" >"$PREVIEW_STATE_DIR/up_pid"
 
@@ -121,12 +122,23 @@ runs:
           fi
           if ! kill -0 "$UP_PID" 2>/dev/null; then
             echo "preview up exited early:" >&2
-            cat "$PREVIEW_STATE_DIR/up.stderr" >&2 || true
+            cat "$LOG_DIR/up.stderr" >&2 || true
             exit 1
           fi
           sleep 1
         done
-        [[ -n "$url" ]] || { echo "timed out waiting for READY"; exit 1; }
+        if [[ -z "$url" ]]; then
+          echo "timed out waiting for READY" >&2
+          echo "--- up.stderr ---" >&2
+          cat "$LOG_DIR/up.stderr" >&2 || true
+          echo "--- status/url ---" >&2
+          cat "$PREVIEW_STATE_DIR/status" >&2 || true
+          cat "$PREVIEW_STATE_DIR/url" >&2 || true
+          exit 1
+        fi
+        mkdir -p "$PREVIEW_STATE_DIR"
+        cp "$LOG_DIR/up.stdout" "$PREVIEW_STATE_DIR/up.stdout" 2>/dev/null || true
+        cp "$LOG_DIR/up.stderr" "$PREVIEW_STATE_DIR/up.stderr" 2>/dev/null || true
 
         if [[ -n "${PREVIEW_PR_NUMBER:-}" ]]; then
           preview_actions_mark_ready "$url"

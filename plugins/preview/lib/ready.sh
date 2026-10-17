@@ -8,19 +8,20 @@ preview_http_ok() {
   local url="$1"
   local code
   # Prefer QUIC/HTTP3 when curl supports it, then HTTP/2, then plain HTTPS.
+  # Keep timeouts short so READY polling stays responsive.
   if curl --help 2>&1 | grep -q -- '--http3'; then
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 --http3 "$url" 2>/dev/null || true)"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http3 "$url" 2>/dev/null || true)"
     if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
       echo "http3:$code"
       return 0
     fi
   fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 --http2 "$url" 2>/dev/null || true)"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 --http2 "$url" 2>/dev/null || true)"
   if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
     echo "http2:$code"
     return 0
   fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "$url" 2>/dev/null || true)"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)"
   if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
     echo "http:$code"
     return 0
