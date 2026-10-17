@@ -4,30 +4,59 @@ set -euo pipefail
 # shellcheck source=common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+# Pin cloudflared to a release + sha256. Bump version and checksums together
+# (copy from the GitHub release body "SHA256 Checksums" section).
+# Override with PREVIEW_CLOUDFLARED_VERSION only for local experiments — CI/Actions
+# should use the values below.
+PREVIEW_CLOUDFLARED_VERSION="${PREVIEW_CLOUDFLARED_VERSION:-2026.10.1}"
+
+preview_cloudflared_sha256() {
+  # Official checksums from:
+  # https://github.com/cloudflare/cloudflared/releases/tag/2026.10.1
+  case "$1" in
+    amd64) echo "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586" ;;
+    arm64) echo "2c65dfabf616c40efc7545d107d7a57ad5e21377e2964b7e88af19a238074a46" ;;
+    *) return 1 ;;
+  esac
+}
+
 preview_install_cloudflared() {
-  if preview_have_cmd cloudflared; then
-    command -v cloudflared
-    return 0
-  fi
-  local bin_dir
+  # Always install the pinned binary into state/bin (do not trust PATH).
+  local bin_dir dest arch url expect got
   bin_dir="$(preview_state_dir)/bin"
   mkdir -p "$bin_dir"
-  local dest="$bin_dir/cloudflared"
-  if [[ -x "$dest" ]]; then
-    echo "$dest"
-    return 0
-  fi
-  local url arch
+  dest="$bin_dir/cloudflared"
+
   arch="$(uname -m)"
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
     aarch64|arm64) arch="arm64" ;;
     *) preview_die "unsupported arch for cloudflared: $arch" ;;
   esac
-  url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
-  preview_log "downloading cloudflared"
+
+  expect="$(preview_cloudflared_sha256 "$arch")" \
+    || preview_die "no pinned sha256 for cloudflared arch=$arch"
+  url="https://github.com/cloudflare/cloudflared/releases/download/${PREVIEW_CLOUDFLARED_VERSION}/cloudflared-linux-${arch}"
+
+  if [[ -x "$dest" ]]; then
+    got="$(sha256sum "$dest" | awk '{print $1}')"
+    if [[ "$got" == "$expect" ]]; then
+      echo "$dest"
+      return 0
+    fi
+    preview_log "cloudflared checksum mismatch on cache; re-downloading"
+    rm -f "$dest"
+  fi
+
+  preview_log "downloading cloudflared ${PREVIEW_CLOUDFLARED_VERSION} (${arch})"
   curl -fsSL "$url" -o "$dest"
+  got="$(sha256sum "$dest" | awk '{print $1}')"
+  if [[ "$got" != "$expect" ]]; then
+    rm -f "$dest"
+    preview_die "cloudflared sha256 mismatch: got ${got} want ${expect} (${url})"
+  fi
   chmod +x "$dest"
+  preview_log "cloudflared ${PREVIEW_CLOUDFLARED_VERSION} verified sha256=${got}"
   echo "$dest"
 }
 

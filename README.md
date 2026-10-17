@@ -53,7 +53,7 @@ Commit these next to your app:
 
 ### 2. Workflow
 
-Add `.github/workflows/preview.yml`. Pin a release tag when one exists (`@v1`); until then use `@main`. This marketplace dogfoods the same shape in [`.github/workflows/preview.yml`](.github/workflows/preview.yml) (relative `uses`, `working-directory: examples/preview`):
+Add `.github/workflows/preview.yml`. Pin the reusable workflow at `@v1` (moving major tag). This marketplace dogfoods the same shape in [`.github/workflows/preview.yml`](.github/workflows/preview.yml) (relative `uses: ./`, `working-directory: examples/preview`):
 
 ```yaml
 name: Preview
@@ -65,7 +65,7 @@ permissions:
   pull-requests: write
 jobs:
   preview:
-    uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
+    uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@v1
     with:
       working-directory: .
       config: .preview/config.json
@@ -215,6 +215,25 @@ set -euo pipefail
 echo "seed ok"
 ```
 
-Workflow inputs (`working-directory`, `config`) are relative to the consumer repo checkout. Ref: prefer `@v1` once released; `@main` until then.
+Workflow inputs (`working-directory`, `config`) are relative to the consumer repo checkout. Consumers pin `@v1`; this repo’s dogfood workflow uses the local `./` path.
+
+### Releasing
+
+Do **not** tag from a PR branch. After this lands on `main`, create the immutable patch tag and move the major alias:
+
+```bash
+git checkout main && git pull
+git tag v1.0.0
+git tag -f v1
+git push origin v1.0.0
+git push origin -f v1
+```
+
+Later patches: `v1.0.1`, then `git tag -f v1` again so `@v1` tracks the latest v1.x.
+
+### Pinning / dependency bumps
+
+- Third-party Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment (see workflows). Dependabot (`.github/dependabot.yml`, `github-actions` ecosystem) opens weekly PRs to refresh them.
+- `cloudflared` is pinned in `plugins/preview/lib/tunnel.sh` (`PREVIEW_CLOUDFLARED_VERSION` + per-arch sha256 from the [release notes](https://github.com/cloudflare/cloudflared/releases)). Bump version and checksums together; downloads are verified before use.
 
 More detail: [`plugins/preview/README.md`](plugins/preview/README.md). Named Cloudflare tunnels are out of scope for v1.

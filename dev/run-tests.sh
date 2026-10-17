@@ -360,6 +360,63 @@ fi
 wait "$smoke_pid" 2>/dev/null || true
 unset PREVIEW_STATE_DIR
 
+# Release pinning: consumer docs @v1; Actions SHA-pinned; cloudflared version+sha256
+if grep -n 'preview-reusable.yml@main' "$ROOT/README.md" "$PLUGIN/README.md" >/dev/null 2>&1; then
+  echo "FAIL consumer README still pins @main"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS consumer README pins @v1 (not @main)"
+  PASS=$((PASS + 1))
+fi
+if grep -n 'preview-reusable.yml@v1' "$ROOT/README.md" "$PLUGIN/README.md" >/dev/null 2>&1; then
+  echo "PASS consumer README shows @v1"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL consumer README missing @v1"
+  FAIL=$((FAIL + 1))
+fi
+# This repo dogfoods local path
+if grep -q 'uses: ./.github/workflows/preview-reusable.yml' "$ROOT/.github/workflows/preview.yml"; then
+  echo "PASS dogfood preview.yml uses local ./"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL dogfood preview.yml must use local ./"
+  FAIL=$((FAIL + 1))
+fi
+# No floating action tags like @v4 (must be full SHA)
+if grep -R -nE 'uses:[[:space:]]*actions/[a-zA-Z0-9_-]+@v[0-9]' "$ROOT/.github/workflows" >/dev/null 2>&1; then
+  echo "FAIL floating actions/*@vN tag in workflows"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS no floating actions/*@vN tags"
+  PASS=$((PASS + 1))
+fi
+if grep -q 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0' "$ROOT/.github/workflows/ci.yml" \
+  && grep -q 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0' "$ROOT/.github/workflows/preview-reusable.yml"; then
+  echo "PASS actions/checkout pinned to SHA # v4.4.0"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL actions/checkout not SHA-pinned"
+  FAIL=$((FAIL + 1))
+fi
+if grep -q 'PREVIEW_CLOUDFLARED_VERSION=.*2026.10.1' "$PLUGIN/lib/tunnel.sh" \
+  && grep -q '3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586' "$PLUGIN/lib/tunnel.sh" \
+  && grep -q '2c65dfabf616c40efc7545d107d7a57ad5e21377e2964b7e88af19a238074a46' "$PLUGIN/lib/tunnel.sh" \
+  && grep -q 'sha256 mismatch' "$PLUGIN/lib/tunnel.sh"; then
+  echo "PASS cloudflared pinned version + sha256 verify"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL cloudflared pin/verify missing"
+  FAIL=$((FAIL + 1))
+fi
+if [[ -f "$ROOT/.github/dependabot.yml" ]] && grep -q 'package-ecosystem: github-actions' "$ROOT/.github/dependabot.yml"; then
+  echo "PASS dependabot github-actions config"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL missing dependabot github-actions config"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [[ "$FAIL" -eq 0 ]]

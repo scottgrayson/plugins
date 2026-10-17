@@ -53,7 +53,7 @@ Commit next to your app:
 
 ### 2. Workflow
 
-Add `.github/workflows/preview.yml`. Pin `@v1` when released; until then `@main`. This marketplace dogfoods the same shape (relative `uses`, `working-directory: examples/preview`):
+Add `.github/workflows/preview.yml`. Pin the reusable workflow at `@v1`. This marketplace dogfoods the same shape (relative `uses: ./`, `working-directory: examples/preview`):
 
 ```yaml
 name: Preview
@@ -65,7 +65,7 @@ permissions:
   pull-requests: write
 jobs:
   preview:
-    uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@main
+    uses: scottgrayson/plugins/.github/workflows/preview-reusable.yml@v1
     with:
       working-directory: .
       config: .preview/config.json
@@ -186,7 +186,18 @@ Built-in ignore: `*poll*` + static assets. Single idle timer from READY; resets 
 }
 ```
 
-CLI only (no plugin install): run `bin/preview` from this package. Workflow ref: prefer `@v1` once released; `@main` until then.
+CLI only (no plugin install): run `bin/preview` from this package. Consumers pin `@v1`; this repo’s dogfood workflow uses the local `./` path.
+
+### Releasing
+
+After merge to `main` (do not tag from a PR branch):
+
+```bash
+git tag v1.0.0 && git tag -f v1
+git push origin v1.0.0 && git push origin -f v1
+```
+
+Later: tag `v1.0.x`, then move `v1` again. Actions are SHA-pinned (`# vX.Y.Z` comments); Dependabot refreshes them. `cloudflared` version + sha256 live in `lib/tunnel.sh` — bump both together from the upstream release notes.
 
 ## v2
 

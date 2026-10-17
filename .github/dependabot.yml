@@ -1,0 +1,9 @@
+# Keep GitHub Actions SHA pins current. Dependabot opens PRs that bump
+# `uses: owner/action@<sha> # vX.Y.Z` comments when new releases land.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

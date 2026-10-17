@@ -27,12 +27,12 @@ jobs:
       (github.event.action == 'opened' || github.event.action == 'reopened')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
-          # Dogfood PR branch of this marketplace; consumers get @main.
-          ref: ${{ github.repository == 'scottgrayson/plugins' && github.event.pull_request.head.sha || 'main' }}
+          # Dogfood PR branch of this marketplace; consumers get the v1 moving tag.
+          ref: ${{ github.repository == 'scottgrayson/plugins' && github.event.pull_request.head.sha || 'v1' }}
       - uses: ./_preview_plugin/plugins/preview
         with:
           mode: ensure-checkbox
@@ -182,15 +182,15 @@ jobs:
       stop_reason: ${{ steps.run.outputs.stop_reason }}
     steps:
       # Consumer checkout first so a later plugin checkout into _preview_plugin is not wiped.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.mark-loading.outputs.head_sha }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
-          ref: ${{ github.repository == 'scottgrayson/plugins' && needs.mark-loading.outputs.head_sha || 'main' }}
+          ref: ${{ github.repository == 'scottgrayson/plugins' && needs.mark-loading.outputs.head_sha || 'v1' }}
 
       - name: Collect labels
         id: labels
