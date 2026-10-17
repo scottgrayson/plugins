@@ -172,15 +172,16 @@ jobs:
     outputs:
       stop_reason: ${{ steps.run.outputs.stop_reason }}
     steps:
+      # Consumer checkout first so a later plugin checkout into _preview_plugin is not wiped.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.mark-loading.outputs.head_sha }}
+
       - uses: actions/checkout@v4
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
           ref: ${{ github.repository == 'scottgrayson/plugins' && needs.mark-loading.outputs.head_sha || 'main' }}
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.mark-loading.outputs.head_sha }}
 
       - name: Collect labels
         id: labels
