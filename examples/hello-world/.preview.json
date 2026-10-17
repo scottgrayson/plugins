@@ -2,7 +2,7 @@
   "type": "static",
   "start": "python3 serve.py",
   "port": 4173,
-  "idleSeconds": 30,
+  "idleSeconds": 300,
   "totalCapSeconds": 900,
   "defaultSteps": [],
   "ignorePaths": [],
