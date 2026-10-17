@@ -1,6 +1,7 @@
 ---
 name: preview
 description: Start, report, and wait on a temporary Cloudflare quick-tunnel preview of a repo app or PR. Use when asked to preview a PR, branch, or local app.
+disable-model-invocation: true
 ---
 
 # preview
@@ -9,7 +10,7 @@ Share the same scripts Actions mode uses. No AI is required to keep the tunnel u
 
 ## Agents: local only — never trigger Actions
 
-**Only start a preview when the human asks** (or when the consumer repo’s own agent rules say to). Do not start one on your own initiative.
+This skill has `disable-model-invocation: true`: it is not auto-selected from its description. Run it only via explicit `/preview` (or when a consumer repo rule tells you to invoke it). Do not start a preview on your own initiative.
 
 **Run previews on your own VM in agent mode.** Start the tunnel locally with `preview up --agent` so you can hit the site, debug, and edit in place.
 
