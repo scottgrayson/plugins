@@ -3,6 +3,8 @@ name: Preview
 on:
   pull_request:
     types: [opened, edited, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -10,7 +12,7 @@ permissions:
 
 jobs:
   ensure-checkbox:
-    if: github.event.action == 'opened' || github.event.action == 'reopened'
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,38 +22,88 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
 
   preview:
-    if: github.event.action == 'edited'
+    if: |
+      (github.event_name == 'pull_request' && github.event.action == 'edited') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/preview start'))
     runs-on: ubuntu-latest
     timeout-minutes: 130
     concurrency:
-      group: preview-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+      group: preview-${{ github.repository }}-pr-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve PR number
+        id: pr
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "force_start=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "force_start=no" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: ./plugins/preview
         id: gate
         with:
           mode: gate
-          pr-number: ${{ github.event.pull_request.number }}
+          pr-number: ${{ steps.pr.outputs.number }}
+
+      - name: Decide start
+        id: decide
+        shell: bash
+        run: |
+          if [[ "${{ steps.pr.outputs.force_start }}" == "yes" || "${{ steps.gate.outputs.should_start }}" == "yes" ]]; then
+            echo "start=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "start=no" >> "$GITHUB_OUTPUT"
+            echo "Skipping preview (checkbox not newly ticked)."
+          fi
+
+      - name: Tick checkbox for comment start
+        if: steps.decide.outputs.start == 'yes' && steps.pr.outputs.force_start == 'yes'
+        shell: bash
+        env:
+          PREVIEW_PR_NUMBER: ${{ steps.pr.outputs.number }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source plugins/preview/lib/actions_pr.sh
+          body="$(preview_actions_get_body)"
+          # shellcheck source=/dev/null
+          source plugins/preview/lib/pr_description.sh
+          new_body="$(preview_pr_set_line1 "${body:-}" '- [x] Check to generate preview')"
+          preview_actions_set_body "$new_body"
 
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Checkout PR head for comment trigger
+        if: steps.decide.outputs.start == 'yes' && github.event_name == 'issue_comment'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checkout "${{ steps.pr.outputs.number }}"
 
       - name: Collect labels
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         id: labels
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          labels="$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" --jq '[.[].name]|join(",")')"
+          labels="$(gh api "repos/${{ github.repository }}/issues/${{ steps.pr.outputs.number }}/labels" --jq '[.[].name]|join(",")')"
           echo "csv=$labels" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         with:
           path: |
             examples/hello-world/.npm
@@ -59,10 +111,10 @@ jobs:
           key: preview-deps-${{ runner.os }}-${{ hashFiles('examples/hello-world/**') }}
 
       - uses: ./plugins/preview
-        if: steps.gate.outputs.should_start == 'yes'
+        if: steps.decide.outputs.start == 'yes'
         with:
           mode: run
           working-directory: examples/hello-world
           config: .preview.json
           labels: ${{ steps.labels.outputs.csv }}
-          pr-number: ${{ github.event.pull_request.number }}
+          pr-number: ${{ steps.pr.outputs.number }}

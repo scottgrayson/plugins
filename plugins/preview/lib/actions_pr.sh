@@ -44,10 +44,9 @@ preview_actions_ensure_checkbox() {
 }
 
 preview_actions_should_start() {
-  local body line1
+  local body
   body="$(preview_actions_get_body)"
-  line1="$(preview_pr_line1 "${body:-}")"
-  if preview_pr_should_start "$line1"; then
+  if preview_pr_should_start "${body:-}"; then
     echo "yes"
   else
     echo "no"
