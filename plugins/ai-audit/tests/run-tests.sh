@@ -366,14 +366,23 @@ from ai_audit.token_audit import (
     run_token_audit,
     TOOL_RESULT_TRIM_FRAC,
     _token_volume_budget,
+    _token_volume_raw,
+    SAVINGS_BUDGET_FRAC,
 )
 
 FIX = Path("$FIX")
 
 def check(label, data, wins):
     budget = _token_volume_budget(data)
+    raw = _token_volume_raw(data)
     total = sum(int(w.get("saving_est_tokens") or 0) for w in wins)
     assert total <= budget, f"{label}: savings {total} > budget {budget}"
+    # Soft ceiling: savings at most ~80% of measured usage
+    # (ledger budget = SAVINGS_BUDGET_FRAC * raw; optimistic levers overlap).
+    if raw > 0:
+        assert total <= int(raw * SAVINGS_BUDGET_FRAC) + 1, (
+            f"{label}: savings {total} > {SAVINGS_BUDGET_FRAC:.0%} of raw {raw}"
+        )
 
 # Synthetic: without a shared ledger, model half + 100% tool growth would exceed total.
 synthetic = {
@@ -441,12 +450,72 @@ assert model_win.saving_est_tokens == expected or model_win.saving_est_tokens <=
 )
 PY
 
-assert_contains "grok bot win uses context x messages" \
-  "$(py_get "$TMP/grok-token.json" 'next((w.get("method","") for w in data["wins"] if "context" in w["title"].lower() or "bot" in w["title"].lower()), "")')" \
-  "message count"
+assert_eq "grok bot win saving unknown" \
+  "$(py_get "$TMP/grok-token.json" 'next(w["saving_est_tokens"]==0 and w.get("ask") for w in data["wins"] if "bot" in w["title"].lower() and "context" in w["title"].lower())')" \
+  "True"
+assert_contains "grok bot win shows context bytes" \
+  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
+  "context bytes"
+assert_contains "grok bot win notes stored messages not model calls" \
+  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
+  "not model calls"
+assert_contains "grok bot win notes skill catalogs" \
+  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
+  "skill catalogs"
 assert_eq "grok bot win not arbitrary half volume" \
   "$(py_get "$TMP/grok-token.json" 'any("cut message volume ~50%" in (w.get("method") or "") for w in data["wins"])')" \
   "False"
+
+py_check "no grok bot win exceeds that bot's own volume" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from pathlib import Path
+from ai_audit.detect import detect_host
+from ai_audit.token_audit import run_token_audit, rank_token_wins
+
+roots = detect_host("grok", root=Path("$FIX/grok"))
+out = run_token_audit(roots)
+by_bot = out["data"].get("by_bot") or {}
+for w in out["wins"]:
+    if "bot" not in w["title"].lower():
+        continue
+    # Match agent id / label inside backticks
+    label = ""
+    if "\`" in w["title"]:
+        label = w["title"].split("\`")[1]
+    bot_vol = None
+    for aid, b in by_bot.items():
+        if aid == label or aid.startswith(label.rstrip("…")) or label.rstrip("…") in aid:
+            bot_vol = int(b.get("est_tokens") or 0)
+            break
+    assert bot_vol is not None, (w["title"], list(by_bot))
+    assert int(w["saving_est_tokens"] or 0) <= bot_vol, (
+        f"{w['title']}: saving {w['saving_est_tokens']} > bot volume {bot_vol}"
+    )
+
+# Synthetic regression: even if a claim were attempted, cap by bot volume
+synth = {
+    "by_bot": {
+        "bot-a": {
+            "est_tokens": 100,
+            "message_count": 50,
+            "stored_message_count": 50,
+            "always_context_bytes": 4000,
+            "always_context_tokens": 1000,
+        }
+    },
+    "by_model": {},
+    "by_kind": {},
+    "routines": [],
+}
+# Current implementation: saving unknown (0) — still assert invariant
+for w in rank_token_wins("grok", synth):
+    if "bot" in w.title.lower():
+        assert w.saving_est_tokens <= 100
+        assert w.saving_est_tokens == 0
+        assert "saving unknown" in (w.method or "")
+        assert "not model calls" in (w.measured or "")
+PY
 
 assert_contains "claude tool win claims fraction not 100%" \
   "$(py_get "$TMP/claude-token.json" 'next((w.get("method","") for w in data["wins"] if "Shrink tool" in w["title"]), "")')" \
@@ -457,6 +526,25 @@ assert_eq "claude savings sum <= total" \
 assert_eq "cursor savings sum <= total" \
   "$(py_get "$TMP/cursor-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())')" \
   "True"
+
+echo "== round4: cache-hit fraction / 80% ceiling / cursor short prose =="
+assert_contains "cache-hit method states price delta" \
+  "$(py_get "$TMP/cursor-token.json" 'next((w.get("method","") for w in data["wins"] if "cache" in w["title"].lower()), "")')" \
+  "price delta"
+assert_eq "cursor savings at most ~80% of usage" \
+  "$(py_get "$TMP/cursor-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= int(0.8 * sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())) + 1')" \
+  "True"
+# Re-run cursor-token after fixture edits is not needed for prose — facts path:
+"$BIN" facts --host cursor --root "$FIX/cursor" --memories "$FIX/cursor/memories.mdc" --json-only >"$TMP/cursor-facts.json"
+assert_eq "cursor AGENTS.md short prose Use pnpm." \
+  "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if "AGENTS.md" in f["path"] and f["text"].strip()=="Use pnpm.")')" \
+  "1"
+assert_eq "cursor rule short prose Use pnpm." \
+  "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if f["source"]=="rule" and f["text"].strip()=="Use pnpm.")')" \
+  "1"
+assert_eq "cursor memories short prose Ship small." \
+  "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if f["source"]=="memories_export" and f["text"].strip()=="Ship small.")')" \
+  "1"
 
 echo "== baseline =="
 assert_ge "claude inventory" "$(py_get "$TMP/claude-context.json" 'len(data["inventory"])')" 8

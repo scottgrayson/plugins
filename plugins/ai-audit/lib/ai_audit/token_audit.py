@@ -31,6 +31,13 @@ from .detect import Roots
 CACHE_HIT_MIN_EVENTS = 5
 # Fraction of measured tool-result prompt growth claimed as a trim saving.
 TOOL_RESULT_TRIM_FRAC = 0.5
+# Cache-hit saving: share of (input − cache_read) that is realistically static
+# enough to become cache hits, times the typical cached-vs-uncached input price
+# delta (~10¢ cached vs ~$1 uncached → ~90% cost reduction on that share).
+CACHE_HIT_CACHEABLE_SHARE = 0.5
+CACHE_HIT_PRICE_DELTA = 0.9  # fraction of uncached input price saved when cached
+# Soft ceiling: optimistic levers overlap; never imply you can erase nearly all spend.
+SAVINGS_BUDGET_FRAC = 0.8
 
 
 def _norm_header(h: str) -> str:
@@ -781,8 +788,10 @@ def collect_grok_tokens(
             {"name": name, "cron": cron, "est_runs_per_week": runs}
         )
 
-    # Always-loaded context per bot (description + that bot's memory) × messages
-    # is a measurable lever for "trim this bot's context".
+    # Always-loaded context evidence per bot (description + memory bytes).
+    # Not converted into a token saving: context×messages is a different unit
+    # from the message-text volume that backs the ledger budget, and Grok
+    # exposes no per-call token data. Skill catalogs also load every turn.
     if sand:
         for agent_id, stats in by_bot.items():
             always_bytes = 0
@@ -793,10 +802,10 @@ def collect_grok_tokens(
             mem = sand / "user-memory" / "by-agent" / agent_id / "profile.md"
             if mem.is_file():
                 always_bytes += mem.stat().st_size
-            always_tok = float(est_tokens(always_bytes))
             msg_n = float(stats.get("message_count") or 0)
-            stats["always_context_tokens"] = always_tok
-            stats["context_x_messages"] = always_tok * msg_n
+            stats["always_context_bytes"] = float(always_bytes)
+            stats["always_context_tokens"] = float(est_tokens(always_bytes))
+            stats["stored_message_count"] = msg_n
 
     total_tokens = sum(v["est_tokens"] for v in by_bot.values()) or 1.0
     for v in by_bot.values():
@@ -823,8 +832,8 @@ def collect_grok_tokens(
     }
 
 
-def _token_volume_budget(data: dict[str, Any]) -> int:
-    """Total measured token volume used as the savings ceiling."""
+def _token_volume_raw(data: dict[str, Any]) -> int:
+    """Raw measured token volume (before the soft savings ceiling)."""
     by_model = data.get("by_model") or {}
     if by_model:
         return int(sum(float(v.get("total_tokens") or 0) for v in by_model.values()))
@@ -835,6 +844,18 @@ def _token_volume_budget(data: dict[str, Any]) -> int:
         return int(sum(float(v.get("est_tokens") or 0) for v in by_bot.values()))
     by_kind = data.get("by_kind") or {}
     return int(sum(float(v.get("total_tokens") or 0) for v in by_kind.values()))
+
+
+def _token_volume_budget(data: dict[str, Any]) -> int:
+    """
+    Ledger ceiling for claimed savings.
+
+    Individual wins are optimistic and partially overlapping. Cap at
+    SAVINGS_BUDGET_FRAC of measured usage so the report never implies you can
+    erase nearly all spend by stacking every lever.
+    """
+    raw = _token_volume_raw(data)
+    return int(raw * SAVINGS_BUDGET_FRAC)
 
 
 class _ClaimedLedger:
@@ -999,20 +1020,32 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 and inp > 1000
                 and cr / max(inp + cr, 1) < 0.2
             ):
-                gap = int(inp - cr)
-                desired = max(0, gap)
+                gap = max(0, int(inp - cr))
+                # Not 100% of the gap: only the cacheable share, priced at the
+                # cached-vs-uncached input delta (tokens as a cost proxy).
+                desired = int(
+                    gap * CACHE_HIT_CACHEABLE_SHARE * CACHE_HIT_PRICE_DELTA
+                )
                 saving = ledger.claim(desired, model=model)
                 overlaps = ""
                 if saving < desired:
                     overlaps = f"capped by ledger (wanted {desired}); overlaps prior claims"
+                pct_share = int(CACHE_HIT_CACHEABLE_SHARE * 100)
+                pct_delta = int(CACHE_HIT_PRICE_DELTA * 100)
                 wins.append(
                     Win(
                         title=f"Improve prompt-cache hit rate ({model})",
                         saving_est_tokens=saving,
-                        measured=f"cache_read={int(cr)} vs input={int(inp)} over {count} events",
+                        measured=(
+                            f"cache_read={int(cr)} vs input={int(inp)} over {count} events "
+                            f"(gap {gap}; claiming ~{pct_share}% cacheable × ~{pct_delta}% price delta)"
+                        ),
                         rationale="Low cache-read share means repeated static context is re-billed",
                         suggestion="Stabilize always-on context; trim volatile prefixes.",
-                        method="estimate: cache_read gap (input − cache_read) if hit rate approaches input",
+                        method=(
+                            f"estimate: ~{pct_share}% of (input−cache_read) realistically cacheable "
+                            f"× ~{pct_delta}% cached-vs-uncached input price delta"
+                        ),
                         overlaps=overlaps,
                     )
                 )
@@ -1113,47 +1146,39 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
         ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
         for agent_id, b in ranked_bots[:2]:
             label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
-            msg_n = int(b.get("message_count") or 0)
+            msg_n = int(b.get("stored_message_count") or b.get("message_count") or 0)
+            always_bytes = int(b.get("always_context_bytes") or 0)
             always_tok = int(b.get("always_context_tokens") or 0)
-            cxm = int(b.get("context_x_messages") or 0)
-            if cxm > 0 and always_tok > 0:
-                desired = cxm // 2
-                saving = ledger.claim(desired)
-                overlaps = ""
-                if saving < desired:
-                    overlaps = f"capped by ledger (wanted {desired})"
-                wins.append(
-                    Win(
-                        title=f"Trim always-loaded context for bot `{label}`",
-                        saving_est_tokens=saving,
-                        measured=(
-                            f"{always_tok} always-loaded context tokens × {msg_n} messages "
-                            f"= {cxm} context·message tokens"
-                        ),
-                        rationale="Each message re-pays always-on bot context",
-                        suggestion="Shorten this bot's description and memory; drop unused always-on skills.",
-                        method=(
-                            "estimate: trim always-loaded context ~50% × message count "
-                            "(context tokens × messages)"
-                        ),
-                        overlaps=overlaps,
-                    )
+            bot_volume = int(b.get("est_tokens") or 0)
+            # Prefer saving-unknown: context×messages is not the same unit as the
+            # message-text ledger budget, and Grok has no per-call token data.
+            # Never claim more than this bot's own estimated volume.
+            measured = (
+                f"{always_bytes} always-loaded context bytes "
+                f"(~{always_tok} tok from desc+memory; skill catalogs also load every turn); "
+                f"{msg_n} stored messages (not model calls); "
+                f"this bot's message-text volume ~{bot_volume} est. tokens"
+            )
+            wins.append(
+                Win(
+                    title=f"Trim always-loaded context for bot `{label}`",
+                    saving_est_tokens=0,
+                    measured=measured,
+                    rationale=(
+                        "Grok exposes no per-call tokens; context×messages would mix units "
+                        "with the message-text volume budget"
+                    ),
+                    suggestion=(
+                        "Shorten this bot's description and memory; uninstall unused "
+                        "plugins/skills (catalogs load every turn)."
+                    ),
+                    method=(
+                        "saving unknown — measured context bytes + stored message count "
+                        "(not model calls); no per-call token data"
+                    ),
+                    ask=True,
                 )
-            else:
-                wins.append(
-                    Win(
-                        title=f"Review traffic for bot `{label}`",
-                        saving_est_tokens=0,
-                        measured=(
-                            f"{msg_n} messages; ~{int(b.get('est_tokens') or 0)} est. tokens "
-                            "from text length; always-loaded context not measured"
-                        ),
-                        rationale="Estimated from search-index aggregates (not billed tokens)",
-                        suggestion="Shorten this bot's description/memory; narrow chat triggers.",
-                        method="saving unknown — need always-loaded context × message count",
-                        ask=True,
-                    )
-                )
+            )
 
     if data.get("missing_csv"):
         wins.append(

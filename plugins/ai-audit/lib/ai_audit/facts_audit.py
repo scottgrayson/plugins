@@ -283,7 +283,7 @@ def collect_cursor_facts(
                         source="memories_export",
                     )
                 )
-            elif s and not s.startswith("#") and len(s) > 20:
+            elif s and not s.startswith("#") and len(s) > 8:
                 facts.append(
                     Fact(host="cursor", path=str(memories_path), text=s, source="memories_export")
                 )
