@@ -1,0 +1,5 @@
+{
+  "mcpBoxServers": [],
+  "mcpCustomInstructions": "Be careful with MCP tools.",
+  "autoReviewInstructions": {"allowInstructions": ["a"], "blockInstructions": []}
+}

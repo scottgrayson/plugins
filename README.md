@@ -1,6 +1,9 @@
 # plugins
 
-MIT-licensed plugins by Scott Grayson. This marketplace currently ships **preview**: temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`).
+MIT-licensed plugins by Scott Grayson. This marketplace ships:
+
+- **preview** — temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`).
+- **ai-audit** — read-only audits of agent context, token cost, and saved facts (Claude Code, Cursor, Grok Bot). Package: [`plugins/ai-audit/`](plugins/ai-audit/).
 
 Two modes share the same scripts:
 
@@ -107,6 +110,7 @@ In a Claude Code session:
 ```text
 /plugin marketplace add scottgrayson/plugins
 /plugin install preview@scottgrayson-plugins
+/plugin install ai-audit@scottgrayson-plugins
 ```
 
 Or from your shell:
@@ -114,12 +118,14 @@ Or from your shell:
 ```bash
 claude plugin marketplace add scottgrayson/plugins
 claude plugin install preview@scottgrayson-plugins
+claude plugin install ai-audit@scottgrayson-plugins
 ```
 
 One-shot (adds the marketplace if needed):
 
 ```text
 /plugin install preview --marketplace scottgrayson/plugins
+/plugin install ai-audit --marketplace scottgrayson/plugins
 ```
 
 ### Install — Cursor
@@ -128,9 +134,9 @@ This repo is a Cursor team marketplace catalog ([`.cursor-plugin/marketplace.jso
 
 1. **Dashboard → Plugins & MCPs → Team Marketplaces → Add Marketplace → Import from Repo**
 2. Paste `https://github.com/scottgrayson/plugins` (requires Teams/Enterprise for team marketplaces)
-3. Open **Customize** in the sidebar → find **preview** → **Install** (user or project scope)
+3. Open **Customize** in the sidebar → find **preview** or **ai-audit** → **Install** (user or project scope)
 
-For local smoke-testing without a team marketplace, copy the plugin into `~/.cursor/plugins/local/preview` (must contain `.cursor-plugin/plugin.json`) and reload the window. Official Marketplace `/add-plugin` only works for plugins listed on [cursor.com/marketplace](https://cursor.com/marketplace).
+For local smoke-testing without a team marketplace, copy the plugin into `~/.cursor/plugins/local/<name>` (must contain `.cursor-plugin/plugin.json`) and reload the window. Official Marketplace `/add-plugin` only works for plugins listed on [cursor.com/marketplace](https://cursor.com/marketplace).
 
 ### Run in a consumer repo
 

@@ -38,7 +38,7 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
-      - name: Run preview unit tests
+      - name: Run unit tests (preview + ai-audit)
         run: bash dev/run-tests.sh
 
   e2e-agent:

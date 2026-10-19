@@ -21,6 +21,23 @@
         "cloudflare",
         "tunnel"
       ]
+    },
+    {
+      "name": "ai-audit",
+      "source": "./plugins/ai-audit",
+      "description": "Read-only audits of agent context, token cost, and saved facts",
+      "version": "0.1.0",
+      "author": {
+        "name": "Scott Grayson"
+      },
+      "license": "MIT",
+      "keywords": [
+        "audit",
+        "context",
+        "tokens",
+        "memory",
+        "cost"
+      ]
     }
   ]
 }

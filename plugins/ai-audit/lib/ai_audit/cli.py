@@ -1,0 +1,124 @@
+"""ai-audit CLI: detect | context | token | facts."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+from . import __version__
+from .context_audit import run_context_audit
+from .detect import detect_host
+from .facts_audit import run_facts_audit
+from .report import context_markdown, facts_markdown, to_json, token_markdown
+from .token_audit import run_token_audit
+
+
+def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
+    json_text = to_json(payload)
+    if args.out_dir:
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.json").write_text(json_text, encoding="utf-8")
+        (out / "report.md").write_text(md, encoding="utf-8")
+    if args.json_only:
+        sys.stdout.write(json_text)
+    elif args.md_only:
+        sys.stdout.write(md if md.endswith("\n") else md + "\n")
+    else:
+        sys.stdout.write(md if md.endswith("\n") else md + "\n")
+        sys.stdout.write("\n---\n\n")
+        sys.stdout.write(json_text)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ai-audit",
+        description="Read-only context / token / facts audits (never writes; never prints secrets).",
+    )
+    p.add_argument("--version", action="version", version=f"ai-audit {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--host",
+            default="auto",
+            choices=["auto", "claude", "cursor", "grok"],
+            help="Force host or auto-detect (default: auto)",
+        )
+        sp.add_argument("--home", default=None, help="Override $HOME")
+        sp.add_argument("--project", default=None, help="Project directory")
+        sp.add_argument(
+            "--root",
+            default=None,
+            help="Fixture/root dir containing home/, project/, and/or sand-data/",
+        )
+        sp.add_argument("--json-only", action="store_true")
+        sp.add_argument("--md-only", action="store_true")
+        sp.add_argument("--out-dir", default=None, help="Write report.json and report.md here")
+
+    d = sub.add_parser("detect", help="Detect host and roots")
+    add_common(d)
+
+    c = sub.add_parser("context", help="Inventory context loaders and rank wins")
+    add_common(c)
+
+    t = sub.add_parser("token", help="Attribute token cost and rank wins")
+    add_common(t)
+    t.add_argument("--csv", default=None, help="Cursor dashboard Usage CSV path")
+    t.add_argument(
+        "--no-admin-api",
+        action="store_true",
+        help="Do not call Cursor Admin API even if CURSOR_ADMIN_API_KEY is set",
+    )
+
+    f = sub.add_parser("facts", help="Audit memory/facts for stale/duplicate/conflict/orphan")
+    add_common(f)
+    f.add_argument("--stale-days", type=int, default=30)
+    f.add_argument("--memories", default=None, help="Cursor exported memories .mdc")
+
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    roots = detect_host(
+        host=args.host,
+        home=Path(args.home) if args.home else None,
+        project=Path(args.project) if args.project else None,
+        root=Path(args.root) if args.root else None,
+    )
+
+    if args.cmd == "detect":
+        payload = {"audit": "detect", "version": __version__, **roots.to_dict()}
+        return _emit(payload, f"# Detect\n\nHost: **{roots.host}**\n", args)
+
+    if args.cmd == "context":
+        payload = run_context_audit(roots)
+        return _emit(payload, context_markdown(payload), args)
+
+    if args.cmd == "token":
+        payload = run_token_audit(
+            roots,
+            csv_path=Path(args.csv) if args.csv else None,
+            use_admin_api=not args.no_admin_api,
+        )
+        return _emit(payload, token_markdown(payload), args)
+
+    if args.cmd == "facts":
+        payload = run_facts_audit(
+            roots,
+            stale_days=args.stale_days,
+            memories_path=Path(args.memories) if args.memories else None,
+        )
+        return _emit(payload, facts_markdown(payload), args)
+
+    parser.error(f"unknown command {args.cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,6 @@
+---
+description: Frontend only
+globs: ["**/*.tsx"]
+---
+
+Use the design system tokens.

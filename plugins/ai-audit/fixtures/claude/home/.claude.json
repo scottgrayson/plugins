@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "docs": { "command": "npx", "args": ["docs-mcp"] },
+    "search": { "command": "npx", "args": ["search-mcp"], "env": { "API_KEY": "SHOULD_NOT_APPEAR" } },
+    "unused": { "command": "npx", "args": ["unused-mcp"] }
+  }
+}
