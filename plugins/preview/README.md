@@ -47,7 +47,7 @@ Commit next to your app:
 | `ignorePaths` | Extra fnmatch patterns never counted as usage (merged with built-in `*poll*` + static assets) |
 | `root` | Doc root for `type: static` when `start` is empty |
 
-**Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
+**Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run. Steps rerun on every `preview up`, so they must be safe to repeat.
 
 **Optional `.preview/README.md`**: human check notes.
 
