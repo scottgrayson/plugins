@@ -226,7 +226,8 @@ def fetch_cursor_admin_usage(
     Uses documented Basic auth. Supports date range + pagination.
     Never scrapes IDE DBs.
     """
-    key = api_key or os.environ.get("CURSOR_ADMIN_API_KEY") or os.environ.get("CURSOR_API_KEY")
+    # Explicit admin key only — never fall back to other API key env vars.
+    key = api_key or os.environ.get("CURSOR_ADMIN_API_KEY")
     if not key:
         return None
 
@@ -349,13 +350,47 @@ def _usage_dedupe_key(obj: dict, msg: dict) -> Optional[str]:
     return None
 
 
+def _extract_tools(content: Any) -> list[dict[str, str]]:
+    tools: list[dict[str, str]] = []
+    if not isinstance(content, list):
+        return tools
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tools.append(
+                {
+                    "name": str(block.get("name") or "tool"),
+                    "id": str(block.get("id") or ""),
+                }
+            )
+    return tools
+
+
+def _extract_tool_results(content: Any) -> list[str]:
+    out: list[str] = []
+    if not isinstance(content, list):
+        return out
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            out.append(str(block.get("tool_use_id") or block.get("name") or "tool"))
+    return out
+
+
+def _prompt_tokens(r: dict[str, Any]) -> int:
+    """Input + cache_creation + cache_read (prompt-side tokens for growth)."""
+    return (
+        int(r.get("input") or 0)
+        + int(r.get("cache_write") or 0)
+        + int(r.get("cache_read") or 0)
+    )
+
+
 def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
     """
-    Parse transcript lines with usage. Deduplicate by message.id / requestId
-    because split assistant responses repeat the same usage on several lines.
+    Parse transcript lines. Deduplicate *usage* by message.id / requestId
+    (split responses repeat usage), but still collect tool_use from every line.
     """
     rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_usage: set[str] = set()
     if is_secret_path(path):
         return rows
     try:
@@ -373,16 +408,15 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
                 msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
                 if not isinstance(msg, dict):
                     continue
+
+                content = msg.get("content") or obj.get("content") or []
+                tools_used = _extract_tools(content)
+                tool_results = _extract_tool_results(content)
                 usage = msg.get("usage") or obj.get("usage")
-                if not isinstance(usage, dict):
-                    # Still track tool_result lines for attribution (no usage).
-                    content = msg.get("content") or obj.get("content") or []
-                    tool_results = []
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "tool_result":
-                                tool_results.append(str(block.get("tool_use_id") or block.get("name") or "tool"))
-                    if tool_results:
+                has_usage = isinstance(usage, dict)
+
+                if not has_usage:
+                    if tools_used or tool_results:
                         rows.append(
                             {
                                 "model": str(msg.get("model") or obj.get("model") or ""),
@@ -390,7 +424,7 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
                                 "output": 0,
                                 "cache_read": 0,
                                 "cache_write": 0,
-                                "tools_used": [],
+                                "tools_used": tools_used,
                                 "tool_results": tool_results,
                                 "has_usage": False,
                                 "path": str(path),
@@ -400,22 +434,30 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
                     continue
 
                 dedupe = _usage_dedupe_key(obj, msg)
-                if dedupe and dedupe in seen:
-                    continue
-                if dedupe:
-                    seen.add(dedupe)
+                usage_dup = bool(dedupe and dedupe in seen_usage)
+                if dedupe and not usage_dup:
+                    seen_usage.add(dedupe)
 
-                tools_used = []
-                content = msg.get("content") or []
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tools_used.append(
-                                {
-                                    "name": str(block.get("name") or "tool"),
-                                    "id": str(block.get("id") or ""),
-                                }
-                            )
+                if usage_dup:
+                    # Keep tool_use from this split line; skip re-counting usage.
+                    if tools_used or tool_results:
+                        rows.append(
+                            {
+                                "model": str(msg.get("model") or obj.get("model") or "unknown"),
+                                "input": 0,
+                                "output": 0,
+                                "cache_read": 0,
+                                "cache_write": 0,
+                                "tools_used": tools_used,
+                                "tool_results": tool_results,
+                                "has_usage": False,
+                                "path": str(path),
+                                "dedupe_key": dedupe,
+                                "usage_deduped": True,
+                            }
+                        )
+                    continue
+
                 rows.append(
                     {
                         "model": str(msg.get("model") or obj.get("model") or "unknown"),
@@ -424,7 +466,7 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
                         "cache_read": int(usage.get("cache_read_input_tokens") or 0),
                         "cache_write": int(usage.get("cache_creation_input_tokens") or 0),
                         "tools_used": tools_used,
-                        "tool_results": [],
+                        "tool_results": tool_results,
                         "has_usage": True,
                         "path": str(path),
                         "dedupe_key": dedupe,
@@ -438,34 +480,30 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
 def _attribute_tools(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     """
     Attribute tool cost to the request that carries the tool_result
-    (next request's input growth), not the request that emits tool_use.
+    (next request's prompt-token growth including cache), not the tool_use request.
     """
     by_tool: dict[str, dict[str, float]] = defaultdict(
         lambda: {"count": 0, "attributed_input": 0, "input_growth": 0}
     )
     pending_tools: list[str] = []
-    prev_input = 0
+    prev_prompt = 0
 
     for r in rows:
-        # When this row has tool_results (or follows a tool_use), attribute growth.
         if pending_tools and r.get("has_usage"):
-            growth = max(0, int(r["input"]) - prev_input)
-            # Distribute growth across pending tools from the prior turn.
+            cur = _prompt_tokens(r)
+            growth = max(0, cur - prev_prompt)
             share = growth / len(pending_tools) if pending_tools else 0
             for name in pending_tools:
                 by_tool[name]["count"] += 1
-                by_tool[name]["attributed_input"] += int(r["input"])
+                by_tool[name]["attributed_input"] += cur
                 by_tool[name]["input_growth"] += int(share)
             pending_tools = []
 
         if r.get("has_usage"):
-            prev_input = int(r["input"])
+            prev_prompt = _prompt_tokens(r)
 
         for t in r.get("tools_used") or []:
             pending_tools.append(t["name"] if isinstance(t, dict) else str(t))
-
-        # tool_result lines confirm the prior tool_use completed; they do not
-        # add extra pending names (IDs like toolu_* must not dilute attribution).
 
     return dict(by_tool)
 
@@ -673,16 +711,18 @@ def collect_grok_tokens(
     by_bot: dict[str, dict[str, float]] = {}
     if sand and (sand / "search-index.db").is_file():
         db_path = sand / "search-index.db"
-        tmp_copy = None
+        tmp_dir = None
         try:
-            # immutable=1 avoids rewriting -shm; fall back to a temp copy.
-            try:
-                con = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
-            except sqlite3.Error:
-                tmp_copy = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-                tmp_copy.close()
-                shutil.copy2(db_path, tmp_copy.name)
-                con = sqlite3.connect(f"file:{tmp_copy.name}?mode=ro", uri=True)
+            # Copy db + wal + shm so we see recent WAL rows without rewriting the live DB.
+            # Opening the live file read-only can miss uncheckpointed WAL content.
+            tmp_dir = tempfile.mkdtemp(prefix="ai-audit-sqlite-")
+            dst = Path(tmp_dir) / "search-index.db"
+            shutil.copy2(db_path, dst)
+            for suffix in ("-wal", "-shm"):
+                side = Path(str(db_path) + suffix)
+                if side.is_file():
+                    shutil.copy2(side, Path(str(dst) + suffix))
+            con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
             try:
                 cur = con.execute(
                     "SELECT agent_id, COUNT(*), COALESCE(SUM(LENGTH(body)), 0) "
@@ -696,14 +736,11 @@ def collect_grok_tokens(
                     }
             finally:
                 con.close()
-        except sqlite3.Error as e:
+        except (sqlite3.Error, OSError) as e:
             notes.append(f"search-index.db unreadable: {type(e).__name__}")
         finally:
-            if tmp_copy is not None:
-                try:
-                    os.unlink(tmp_copy.name)
-                except OSError:
-                    pass
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     routine_files = 0
     if sand and (sand / "agents").is_dir():
@@ -749,90 +786,130 @@ def collect_grok_tokens(
 
 
 def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
-    """Only emit numbered savings when measured. Ask-items have saving=0 and ask=True."""
+    """
+    Emit savings that estimate what a change would save (with method stated),
+    not raw totals. Overlapping volumes are not double-counted as savings.
+    """
     wins: list[Win] = []
+    claimed = 0  # tokens already claimed as savings (overlap guard)
 
     by_model = data.get("by_model") or {}
     by_kind = data.get("by_kind") or {}
 
-    if by_kind:
-        # Cloud first
-        for kind in ("cloud_agent", "automation", "local"):
-            m = by_kind.get(kind)
-            if not m:
-                continue
-            total = int(m.get("total_tokens") or 0)
-            count = int(m.get("count") or 0)
-            if total <= 0:
-                continue
-            label = {
-                "cloud_agent": "cloud agents",
-                "automation": "automations",
-                "local": "local/IDE",
-            }[kind]
-            wins.append(
-                Win(
-                    title=f"Review {label} spend",
-                    saving_est_tokens=total,
-                    measured=f"{total} tokens across {count} events (kind={kind})",
-                    rationale="Measured from usage CSV/API breakdown by kind",
-                    suggestion=(
-                        "Run less often / narrow triggers"
-                        if kind != "local"
-                        else "Trim context; prefer cheaper models for IDE chats."
-                    ),
-                )
+    # Cloud / automation first: estimate halving frequency.
+    for kind in ("cloud_agent", "automation"):
+        m = by_kind.get(kind)
+        if not m:
+            continue
+        total = int(m.get("total_tokens") or 0)
+        count = int(m.get("count") or 0)
+        if total <= 0:
+            continue
+        label = "cloud agents" if kind == "cloud_agent" else "automations"
+        saving = max(0, total // 2)
+        claimed += saving
+        wins.append(
+            Win(
+                title=f"Run {label} less often",
+                saving_est_tokens=saving,
+                measured=f"total volume {total} tokens across {count} events (kind={kind})",
+                rationale="Cloud usage is the priority lever",
+                suggestion="Widen schedules; drop chatty triggers; skip test runs.",
+                method="estimate: cut run frequency ~50% → ~half of measured volume",
             )
-
-    if by_model:
-        ranked = sorted(by_model.items(), key=lambda kv: -float(kv[1].get("total_tokens") or 0))
-        if ranked:
-            top_model, top = ranked[0]
-            total = int(top.get("total_tokens") or 0)
-            count = int(top.get("count") or 0)
-            if total > 0:
-                wins.append(
-                    Win(
-                        title=f"Highest-volume model `{top_model}`",
-                        saving_est_tokens=total,
-                        measured=f"{total} tokens across {count} events",
-                        rationale="Measured token volume by model",
-                        suggestion="Prefer a cheaper model for routine/automation work when quality allows.",
-                    )
-                )
-            for model, m in ranked[:3]:
-                cr = float(m.get("cache_read") or 0)
-                inp = float(m.get("input") or 0)
-                count = int(m.get("count") or 0)
-                if (
-                    count >= CACHE_HIT_MIN_EVENTS
-                    and inp > 1000
-                    and cr / max(inp + cr, 1) < 0.2
-                ):
-                    # Measured gap: input that could have been cache-read
-                    gap = int(inp - cr)
-                    wins.append(
-                        Win(
-                            title=f"Low prompt-cache share ({model})",
-                            saving_est_tokens=max(0, gap),
-                            measured=f"cache_read={int(cr)} vs input={int(inp)} over {count} events",
-                            rationale="Measured cache-read vs input (min sample size applied)",
-                            suggestion="Stabilize always-on context; trim volatile prefixes.",
-                        )
-                    )
+        )
 
     by_max = data.get("by_max_mode") or {}
     if by_max.get("on") and int(by_max["on"].get("total_tokens") or 0) > 0:
         total = int(by_max["on"]["total_tokens"])
         wins.append(
             Win(
-                title="Max Mode spend",
-                saving_est_tokens=total,
-                measured=f"{total} tokens with Max Mode on ({int(by_max['on'].get('count') or 0)} events)",
-                rationale="Measured Max Mode breakdown from usage CSV",
+                title="Turn Max Mode off for routine work",
+                saving_est_tokens=0,
+                measured=(
+                    f"total volume {total} tokens with Max Mode on "
+                    f"({int(by_max['on'].get('count') or 0)} events)"
+                ),
+                rationale="Max Mode surcharge is a cost lever; exact premium not in the CSV",
                 suggestion="Disable Max Mode for routine tasks.",
+                method="saving unknown — Max surcharge only; total volume shown",
+                ask=True,
+                overlaps="overlaps model/kind token volumes",
             )
         )
+
+    local = by_kind.get("local")
+    if local and int(local.get("total_tokens") or 0) > 0:
+        total = int(local["total_tokens"])
+        wins.append(
+            Win(
+                title="Review local/IDE spend",
+                saving_est_tokens=0,
+                measured=f"total volume {total} tokens across {int(local.get('count') or 0)} events",
+                rationale="Local/IDE is secondary to cloud",
+                suggestion="Trim context; prefer cheaper models for IDE chats.",
+                method="saving unknown — total volume shown; no schedule lever",
+                ask=True,
+            )
+        )
+
+    if by_model:
+        ranked = sorted(by_model.items(), key=lambda kv: -float(kv[1].get("total_tokens") or 0))
+        top_model, top = ranked[0]
+        total = int(top.get("total_tokens") or 0)
+        count = int(top.get("count") or 0)
+        if total > 0:
+            # Cheaper-model delta unknown without prices; estimate half of *unclaimed* volume.
+            residual = max(0, total - claimed)
+            if residual > 0:
+                saving = residual // 2
+                wins.append(
+                    Win(
+                        title=f"Move some `{top_model}` work to a cheaper model",
+                        saving_est_tokens=saving,
+                        measured=f"total volume {total} tokens across {count} events",
+                        rationale="Highest token volume by model",
+                        suggestion="Prefer a cheaper model for routine/automation work when quality allows.",
+                        method=(
+                            "estimate: move ~half of residual volume (after kind wins) "
+                            "to a cheaper model; price delta unknown so tokens≈proxy"
+                        ),
+                        overlaps=f"overlaps kind wins by ~{min(total, claimed)} tokens already claimed",
+                    )
+                )
+            else:
+                wins.append(
+                    Win(
+                        title=f"Highest-volume model `{top_model}`",
+                        saving_est_tokens=0,
+                        measured=f"total volume {total} tokens across {count} events",
+                        rationale="Volume already covered by kind/frequency wins",
+                        suggestion="Prefer a cheaper model when quality allows.",
+                        method="saving unknown — overlaps prior kind wins",
+                        ask=True,
+                        overlaps="fully overlapped by kind savings claims",
+                    )
+                )
+        for model, m in ranked[:3]:
+            cr = float(m.get("cache_read") or 0)
+            inp = float(m.get("input") or 0)
+            count = int(m.get("count") or 0)
+            if (
+                count >= CACHE_HIT_MIN_EVENTS
+                and inp > 1000
+                and cr / max(inp + cr, 1) < 0.2
+            ):
+                gap = int(inp - cr)
+                wins.append(
+                    Win(
+                        title=f"Improve prompt-cache hit rate ({model})",
+                        saving_est_tokens=max(0, gap),
+                        measured=f"cache_read={int(cr)} vs input={int(inp)} over {count} events",
+                        rationale="Low cache-read share means repeated static context is re-billed",
+                        suggestion="Stabilize always-on context; trim volatile prefixes.",
+                        method="estimate: cache_read gap (input − cache_read) if hit rate approaches input",
+                    )
+                )
 
     by_tool = data.get("by_tool") or {}
     if by_tool:
@@ -847,29 +924,35 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 continue
             wins.append(
                 Win(
-                    title=f"Tool `{name}` input growth",
+                    title=f"Shrink tool `{name}` results",
                     saving_est_tokens=growth,
-                    measured=f"{count} uses; ~{growth} tokens input growth on tool_result requests",
-                    rationale="Attributed to the request carrying the tool_result",
+                    measured=f"{count} uses; ~{growth} prompt-token growth on tool_result requests",
+                    rationale="Attributed to the request carrying the tool_result (incl. cache tokens)",
                     suggestion="Prefer smaller tool outputs; cache results.",
+                    method="measured: next-request prompt growth (input+cache_read+cache_write)",
                 )
             )
 
     by_bot = data.get("by_bot") or {}
     if by_bot:
         ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
-        for agent_id, b in ranked_bots[:3]:
+        for agent_id, b in ranked_bots[:2]:
             est = int(b.get("est_tokens") or 0)
             if est <= 0:
                 continue
             label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
+            saving = est // 2
             wins.append(
                 Win(
-                    title=f"Message volume for bot `{label}`",
-                    saving_est_tokens=est,
-                    measured=f"{int(b.get('message_count') or 0)} messages; ~{est} est. tokens from text length",
+                    title=f"Lower traffic for bot `{label}`",
+                    saving_est_tokens=saving,
+                    measured=(
+                        f"{int(b.get('message_count') or 0)} messages; "
+                        f"~{est} est. tokens from text length"
+                    ),
                     rationale="Estimated from search-index aggregates (not billed tokens)",
                     suggestion="Narrow chat triggers for this bot.",
+                    method="estimate: cut message volume ~50%",
                 )
             )
 
@@ -877,41 +960,47 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
     if routines:
         total_runs = sum(float(r.get("est_runs_per_week") or 0) for r in routines)
         if total_runs > 0:
-            # When user also gave usage_total, allocate proportionally as measured input.
             usage_total = data.get("usage_total")
             if usage_total:
+                saving = int(float(usage_total) * 0.5)
                 wins.append(
                     Win(
-                        title="Routine schedule × count",
-                        saving_est_tokens=int(float(usage_total)),
+                        title="Widen routine schedules",
+                        saving_est_tokens=saving,
                         measured=(
                             f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week; "
                             f"usage total {usage_total}"
                             + (f" ({data.get('usage_period')})" if data.get("usage_period") else "")
                         ),
-                        rationale="Measured from provided usage total + routine schedules",
+                        rationale="Docs name schedule as the top lever",
                         suggestion="Widen intervals; drop chatty triggers; skip test runs.",
+                        method="estimate: cut routine-driven usage ~50% of provided usage total",
                     )
                 )
             else:
                 wins.append(
                     Win(
-                        title="Routine schedule × count",
-                        saving_est_tokens=int(total_runs),
+                        title="Widen routine schedules",
+                        saving_est_tokens=0,
                         measured=f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week",
-                        rationale="Measured from provided --routines-json schedules",
-                        suggestion="Provide --usage-total to convert runs into token/cost share.",
+                        rationale="Schedules known but no usage total to convert into tokens",
+                        suggestion="Provide --usage-total to estimate token share.",
+                        method="saving unknown — runs/week measured; need usage total",
+                        ask=True,
                     )
                 )
     elif host == "grok":
-        # No routines provided and none on disk with schedules → ask item, no number.
         wins.append(
             Win(
                 title="List routines and Usage totals",
                 saving_est_tokens=0,
                 measured="no routine schedules provided",
                 rationale="Grok docs name schedule as the top lever, but no measured routine data yet",
-                suggestion="Ask the bot to list routines; ask the user for Usage page numbers; re-run with --routines-json and --usage-total.",
+                suggestion=(
+                    "Ask the bot to list routines; ask the user for Usage page numbers; "
+                    "re-run with --routines-json and --usage-total."
+                ),
+                method="saving unknown",
                 ask=True,
             )
         )
@@ -924,6 +1013,7 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 measured="no CSV / Admin API data",
                 rationale="Cloud usage is the priority source for Cursor",
                 suggestion="Download Usage CSV from the dashboard and re-run with --csv.",
+                method="saving unknown",
                 ask=True,
             )
         )

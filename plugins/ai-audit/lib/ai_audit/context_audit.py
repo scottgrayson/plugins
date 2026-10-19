@@ -661,8 +661,12 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
                     cache_path,
                     desc_bytes,
                     "always",
-                    notes=f"{counted} skill description(s) not already in workflows (bytes)",
+                    notes=(
+                        f"{counted} skill description(s) not already in workflows (bytes); "
+                        "app-managed — not user-editable"
+                    ),
                     skill_count=counted,
+                    not_user_editable=True,
                 )
             )
 
@@ -786,6 +790,7 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
 
 def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
     wins: list[Win] = []
+    TARGET_DESC_BYTES = 200
 
     for it in items:
         if it.load != "always":
@@ -794,16 +799,57 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
             continue
         if it.meta.get("orphan"):
             continue
+        # App-managed / plugin caches: not user-editable (surface even when small).
+        if it.kind in ("managed_skill_cache", "plugin_skill_cache"):
+            wins.append(
+                Win(
+                    title=f"Unload unused {'managed' if 'managed' in it.kind else 'plugin'} skills",
+                    saving_est_tokens=it.est_tokens,
+                    measured=f"{it.bytes} bytes (~{it.est_tokens} tokens) always listed",
+                    rationale="App-managed or plugin skill catalog — not a user-editable file",
+                    suggestion="Uninstall unused plugins/connectors; do not edit cache.json.",
+                    path=it.path,
+                    method="estimate: remove unused catalog entries → full listing size",
+                )
+            )
+            continue
+
+        if it.kind == "bot_description" and it.load == "always":
+            target = min(TARGET_DESC_BYTES, max(40, it.bytes // 2))
+            saving = max(0, it.est_tokens - est_tokens(target))
+            wins.append(
+                Win(
+                    title="Shorten the active bot description",
+                    saving_est_tokens=saving if saving > 0 else it.est_tokens,
+                    measured=f"{it.bytes} bytes (~{it.est_tokens} tokens), load=always",
+                    rationale="Active bot description is always loaded",
+                    suggestion="Edit the bot description in the bot settings (not split profile.json).",
+                    path=it.path,
+                    method=f"estimate: trim description toward ~{target} bytes",
+                )
+            )
+            continue
+
         if it.est_tokens < 50:
             continue
+
+        if it.kind == "skill_description":
+            # Handled below with trim-to-N method; skip generic trim.
+            continue
+
+        saving = it.est_tokens
+        method = "estimate: remove or heavily trim always-on item"
+        if it.kind == "rule":
+            method = "estimate: remove/shorten always-on rule (or add paths: so it is conditional)"
         wins.append(
             Win(
                 title=f"Trim always-on {it.kind}",
-                saving_est_tokens=it.est_tokens,
+                saving_est_tokens=saving,
                 measured=f"{it.bytes} bytes (~{it.est_tokens} tokens), load=always",
                 rationale=it.notes or "Always loaded into context",
-                suggestion=f"Shorten or split `{it.path}` (suggestion only — do not apply).",
+                suggestion=f"Shorten `{it.path}` (suggestion only — do not apply).",
                 path=it.path,
+                method=method,
             )
         )
 
@@ -826,23 +872,26 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
                         rationale="Same skill description listed from multiple compat directories",
                         suggestion="Keep one install path; remove or disable the duplicates.",
                         path=ordered[0].path,
+                        method="estimate: drop duplicate always-listed descriptions",
                     )
                 )
 
     for it in items:
-        if it.kind == "skill_description" and it.load == "always" and it.bytes > 400:
+        if it.kind == "skill_description" and it.load == "always" and it.bytes > TARGET_DESC_BYTES:
+            target_tok = est_tokens(TARGET_DESC_BYTES)
+            saving = max(0, it.est_tokens - target_tok)
             wins.append(
                 Win(
                     title=f"Shorten skill description ({it.meta.get('skill') or Path(it.path).parent.name})",
-                    saving_est_tokens=max(0, it.est_tokens - est_tokens(200)),
-                    measured=f"{it.bytes} description bytes",
+                    saving_est_tokens=saving,
+                    measured=f"{it.bytes} description bytes (total volume); target {TARGET_DESC_BYTES} bytes",
                     rationale="Skill descriptions are always listed",
                     suggestion="Move detail into the skill body (on demand).",
                     path=it.path,
+                    method=f"estimate: trim description to {TARGET_DESC_BYTES} bytes",
                 )
             )
 
-    # Orphan memory: cleanup/clutter, NOT a token saving.
     for it in items:
         if it.kind == "memory" and it.meta.get("orphan"):
             wins.append(
@@ -854,20 +903,27 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
                     suggestion="Archive or delete after approval.",
                     path=it.path,
                     ask=True,
+                    method="cleanup only — no token saving",
                 )
             )
 
     for it in items:
         if it.kind == "mcp_servers" and int(it.meta.get("server_count") or 0) >= 3:
+            schema = it.meta.get("sized_by") == "schemas"
             wins.append(
                 Win(
-                    title="Disable unused MCP servers",
-                    saving_est_tokens=it.est_tokens if it.meta.get("sized_by") == "schemas" else 0,
+                    title="Disable unused MCP servers / connectors",
+                    saving_est_tokens=it.est_tokens if schema else 0,
                     measured=f"{it.meta.get('server_count')} servers ({it.meta.get('sized_by', 'config')})",
                     rationale=it.notes,
-                    suggestion="Disable servers you rarely use.",
+                    suggestion="Uninstall or disable unused connectors; confirm with /mcp.",
                     path=it.path,
-                    ask=it.meta.get("sized_by") != "schemas",
+                    ask=not schema,
+                    method=(
+                        "estimate: drop unused server schemas from always-loaded set"
+                        if schema
+                        else "saving unknown — config-size only"
+                    ),
                 )
             )
 

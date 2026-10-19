@@ -24,12 +24,18 @@ def wins_markdown(wins: list[dict[str, Any]], heading: str = "Biggest wins") -> 
         rationale = w.get("rationale") or ""
         suggestion = w.get("suggestion") or ""
         path = w.get("path") or ""
+        method = w.get("method") or ""
+        overlaps = w.get("overlaps") or ""
         if ask and saving <= 0:
-            lines.append(f"{i}. **{title}** — ask / check (no measured saving)")
+            lines.append(f"{i}. **{title}** — ask / check (saving unknown)")
         else:
-            lines.append(f"{i}. **{title}** — ~{saving} est. tokens")
+            lines.append(f"{i}. **{title}** — ~{saving} est. tokens saved")
         if measured:
             lines.append(f"   - Measured: {measured}")
+        if method:
+            lines.append(f"   - Method: {method}")
+        if overlaps:
+            lines.append(f"   - Overlap: {overlaps}")
         if path:
             lines.append(f"   - Path: `{path}`")
         if rationale:

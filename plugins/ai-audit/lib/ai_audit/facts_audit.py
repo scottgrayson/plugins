@@ -78,13 +78,27 @@ def _parse_grok_profile(path: Path, agent_id: str) -> list[Fact]:
 
 
 def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
+    """Extract bullets and non-bullet prose lines/sentences as facts."""
     facts: list[Fact] = []
     for line in text.splitlines():
         s = line.strip()
+        if not s or s.startswith("#") or s.startswith("@"):
+            continue
+        if s.startswith("---"):
+            continue
         if s.startswith("-") and len(s) > 8:
             facts.append(
                 Fact(host=host, path=str(path), text=s.lstrip("- ").strip(), source=source)
             )
+            continue
+        # Non-bullet prose: keep substantial lines (and split on sentence boundaries).
+        if len(s) > 20 and not s.startswith(("```", "<!--")):
+            # Prefer whole line when short; otherwise split sentences.
+            parts = re.split(r"(?<=[.!?])\s+", s) if len(s) > 120 else [s]
+            for part in parts:
+                p = part.strip()
+                if len(p) > 20:
+                    facts.append(Fact(host=host, path=str(path), text=p, source=source))
     return facts
 
 
@@ -135,7 +149,7 @@ def collect_grok_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], list[
                     kind="orphan",
                     path=str(profile_md),
                     detail=f"Memory for agent `{agent_id}` but no agents/{agent_id} directory",
-                    saving_est_tokens=est_tokens(profile_md.stat().st_size if profile_md.is_file() else 0),
+                    saving_est_tokens=0,  # cleanup/clutter only — not loaded, no token saving
                     suggestion="Archive or delete orphaned profile.md after approval.",
                 )
             )
@@ -387,16 +401,20 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
             if a.path == b.path and a.text == b.text:
                 continue
             sim = similarity(a.text, b.text)
-            if sim < 0.45:
-                continue
             conflict = _polarity_conflict(a.text, b.text)
+            # Polarity conflicts (pnpm vs npm, always vs never) can share few words;
+            # require only modest topical overlap. Near-duplicates need higher sim.
+            if conflict and sim < 0.2:
+                continue
+            if not conflict and sim < 0.45:
+                continue
             dated_near_dup = (
                 sim > 0.75
                 and a.text.lower() != b.text.lower()
                 and a.date
                 and b.date
                 and a.date != b.date
-                and conflict  # only if polarity also disagrees
+                and conflict
             )
             if conflict or dated_near_dup:
                 newer = a if (a.date or "") >= (b.date or "") else b
@@ -424,6 +442,7 @@ def issues_to_wins(issues: list[FactIssue]) -> list[Win]:
 
     for kind, group in by_kind.items():
         saving = sum(i.saving_est_tokens for i in group)
+        is_orphan = kind == "orphan"
         wins.append(
             Win(
                 title={
@@ -432,12 +451,17 @@ def issues_to_wins(issues: list[FactIssue]) -> list[Win]:
                     "conflict": "Resolve conflicting facts",
                     "orphan": "Remove orphaned memory files",
                 }.get(kind, f"Fix {kind} issues"),
-                saving_est_tokens=saving if saving > 0 else 0,
-                measured=f"{len(group)} {kind} issue(s); ~{saving} est. tokens",
+                saving_est_tokens=0 if is_orphan else (saving if saving > 0 else 0),
+                measured=(
+                    f"{len(group)} {kind} issue(s); cleanup only"
+                    if is_orphan
+                    else f"{len(group)} {kind} issue(s); ~{saving} est. tokens"
+                ),
                 rationale=_q(group[0].detail, 160),
                 suggestion=group[0].suggestion or "Show a diff; apply only after approval.",
                 path=group[0].path,
-                ask=saving <= 0,
+                ask=is_orphan or saving <= 0,
+                method="cleanup only — no token saving" if is_orphan else "sum of issue sizes",
             )
         )
     return rank_wins(wins, limit=5)
