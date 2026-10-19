@@ -546,6 +546,86 @@ assert_eq "cursor memories short prose Ship small." \
   "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if f["source"]=="memories_export" and f["text"].strip()=="Ship small.")')" \
   "1"
 
+echo "== round5: installed-copy locate + schedule + README =="
+# Skills must not hard-code checkout-only paths
+for skill in context-audit token-audit facts-audit; do
+  assert_not_contains "skill $skill has no checkout path" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "bash plugins/ai-audit/bin/ai-audit"
+  assert_contains "skill $skill has Locate the CLI" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "Locate the CLI"
+  assert_contains "skill $skill mentions CLAUDE_PLUGIN_ROOT" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "CLAUDE_PLUGIN_ROOT"
+  assert_contains "skill $skill has Schedule as a routine" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "Schedule as a routine"
+  assert_contains "skill $skill schedules Claude Code" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "### Claude Code"
+  assert_contains "skill $skill schedules Cursor" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "### Cursor"
+  assert_contains "skill $skill schedules Grok Bot" \
+    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "### Grok Bot"
+done
+
+assert_contains "README install Claude Code" "$(cat "$PLUGIN/README.md")" "### Claude Code"
+assert_contains "README install Cursor" "$(cat "$PLUGIN/README.md")" "### Cursor"
+assert_contains "README install Grok Bot" "$(cat "$PLUGIN/README.md")" "### Grok Bot"
+
+# Copy plugin outside the repo; run CLI from an unrelated cwd the way skills instruct
+INSTALL_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-install.XXXXXX")"
+UNRELATED="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-cwd.XXXXXX")"
+trap 'rm -rf "$INSTALL_PARENT" "$UNRELATED"' RETURN
+cp -a "$PLUGIN" "$INSTALL_PARENT/ai-audit"
+chmod +x "$INSTALL_PARENT/ai-audit/bin/ai-audit" "$INSTALL_PARENT/ai-audit/scripts/locate-cli.sh"
+
+(
+  cd "$UNRELATED"
+  # B) Skill-file relative bootstrap from SKILL.md
+  export SKILL_MD="$INSTALL_PARENT/ai-audit/skills/context-audit/SKILL.md"
+  AI_AUDIT="$(bash "$(dirname "$SKILL_MD")/../../scripts/locate-cli.sh")"
+  test -x "$AI_AUDIT" || test -f "$AI_AUDIT"
+  # Must not depend on repo checkout path
+  case "$AI_AUDIT" in
+    "$INSTALL_PARENT"/*) ;;
+    *) echo "locate returned unexpected path: $AI_AUDIT" >&2; exit 1 ;;
+  esac
+  # Run from unrelated cwd against fixtures (absolute --root)
+  bash "$AI_AUDIT" detect --root "$FIX/claude" --json-only >"$TMP/install-detect.json"
+  bash "$AI_AUDIT" context --host claude --root "$FIX/claude" --json-only >"$TMP/install-context.json"
+  # A) CLAUDE_PLUGIN_ROOT style
+  unset SKILL_MD
+  export CLAUDE_PLUGIN_ROOT="$INSTALL_PARENT/ai-audit"
+  AI_AUDIT2="$(bash "$CLAUDE_PLUGIN_ROOT/scripts/locate-cli.sh")"
+  bash "$AI_AUDIT2" facts --host claude --root "$FIX/claude" --json-only >"$TMP/install-facts.json"
+  # C) AI_AUDIT_PLUGIN_ROOT / local Cursor layout
+  unset CLAUDE_PLUGIN_ROOT
+  export AI_AUDIT_PLUGIN_ROOT="$INSTALL_PARENT/ai-audit"
+  AI_AUDIT3="$(bash "$AI_AUDIT_PLUGIN_ROOT/scripts/locate-cli.sh")"
+  bash "$AI_AUDIT3" token --host claude --root "$FIX/claude" --json-only >"$TMP/install-token.json"
+  # Fail clearly when nothing is configured (strict: ignore script-relative sibling)
+  unset AI_AUDIT_PLUGIN_ROOT SKILL_MD CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+  if AI_AUDIT_LOCATE_STRICT=1 bash "$INSTALL_PARENT/ai-audit/scripts/locate-cli.sh" 2>"$TMP/locate-fail.txt"; then
+    echo "locate should have failed without env" >&2
+    exit 1
+  fi
+  grep -q "ai-audit CLI not found" "$TMP/locate-fail.txt"
+) || { echo "FAIL installed-copy locate/run"; FAIL=$((FAIL + 1)); }
+
+if [[ -f "$TMP/install-detect.json" ]]; then
+  assert_eq "install-copy detect host" "$(py_get "$TMP/install-detect.json" 'data["host"]')" "claude"
+  assert_ge "install-copy context inventory" "$(py_get "$TMP/install-context.json" 'len(data["inventory"])')" 8
+  assert_ge "install-copy facts scanned" "$(py_get "$TMP/install-facts.json" 'len(data.get("facts") or [])')" 1
+  assert_eq "install-copy token audit" "$(py_get "$TMP/install-token.json" 'data["audit"]')" "token"
+  assert_contains "locate fails clearly" "$(cat "$TMP/locate-fail.txt")" "ai-audit CLI not found"
+  echo "PASS installed-copy locate + run from unrelated cwd"
+  PASS=$((PASS + 1))
+fi
+
 echo "== baseline =="
 assert_ge "claude inventory" "$(py_get "$TMP/claude-context.json" 'len(data["inventory"])')" 8
 assert_eq "claude always rule" \
