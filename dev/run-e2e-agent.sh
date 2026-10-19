@@ -101,6 +101,16 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.25
 done
+# Watchdog logs after READY; wait briefly so the line is flushed to the err file.
+for _ in $(seq 1 40); do
+  if grep -q 'watchdog idle=0s total_cap=0s agent=1' /tmp/preview-e2e-b.err 2>/dev/null; then
+    break
+  fi
+  if ! kill -0 "$UP_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
 if grep -q 'watchdog idle=0s total_cap=0s agent=1' /tmp/preview-e2e-b.err; then
   pass "agent watchdog idle=0 total_cap=0"
 else

@@ -7,6 +7,24 @@ LIB="$PLUGIN/lib"
 PASS=0
 FAIL=0
 
+# ripgrep for brand-ban / workflow greps (not always on ubuntu-latest).
+if ! command -v rg >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq ripgrep >/dev/null
+  else
+    RG_DIR="$ROOT/dev/.bin"
+    mkdir -p "$RG_DIR"
+    if [[ ! -x "$RG_DIR/rg" ]]; then
+      curl -fsSL -o /tmp/rg.tar.gz         https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz
+      tar -xzf /tmp/rg.tar.gz -C /tmp
+      mv /tmp/ripgrep-14.1.1-x86_64-unknown-linux-musl/rg "$RG_DIR/rg"
+      chmod +x "$RG_DIR/rg"
+    fi
+    export PATH="$RG_DIR:$PATH"
+  fi
+fi
+
 # mikefarah yq (workflow YAML assertions). Install if missing or not mikefarah.
 if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -qi mikefarah; then
   YQ_BIN="$ROOT/dev/.bin/yq"
