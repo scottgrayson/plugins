@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +20,8 @@ from .common import (
     skill_description_chars,
 )
 from .detect import Roots
+
+_IMPORT_RE = re.compile(r"@([^\s\]\)\"\'<>]+)")
 
 
 def _item(
@@ -44,49 +47,105 @@ def _item(
     )
 
 
+def _utf8_bytes(s: str) -> int:
+    return len(s.encode("utf-8"))
+
+
+def _skill_extra_files(skill_dir: Path, skill_md: Path) -> list[tuple[Path, int]]:
+    """Every file in the skill folder except SKILL.md, labeled on-demand."""
+    out: list[tuple[Path, int]] = []
+    if not skill_dir.is_dir():
+        return out
+    for p in sorted(skill_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.resolve() == skill_md.resolve():
+            continue
+        out.append((p, file_bytes(p)))
+    return out
+
+
 def _skill_items(host: str, scope: str, skill_md: Path) -> list[InventoryItem]:
     text = safe_read_text(skill_md) or ""
     desc_chars, meta, body = skill_description_chars(text)
-    name = meta.get("name") or skill_md.parent.name
-    items = [
-        _item(
-            host,
-            "skill_description",
-            scope,
-            skill_md,
-            desc_chars,
-            "always",
-            notes=f"skill={name}; description always listed",
-            skill=str(name),
-            disable_model_invocation=bool(meta.get("disable-model-invocation")),
-        ),
+    name = str(meta.get("name") or skill_md.parent.name)
+    disable = bool(meta.get("disable-model-invocation"))
+    items: list[InventoryItem] = []
+
+    if disable:
+        if host == "grok":
+            # Catalog lists only the skill path (no description).
+            path_listing = _utf8_bytes(str(skill_md))
+            items.append(
+                _item(
+                    host,
+                    "skill_path",
+                    scope,
+                    skill_md,
+                    path_listing,
+                    "always",
+                    notes=f"skill={name}; disable-model-invocation — path only in catalog",
+                    skill=name,
+                    disable_model_invocation=True,
+                )
+            )
+        else:
+            # Claude Code / Cursor: manual-only; description not always listed.
+            items.append(
+                _item(
+                    host,
+                    "skill_description",
+                    scope,
+                    skill_md,
+                    _utf8_bytes(str(meta.get("description") or "")),
+                    "on_demand",
+                    notes=f"skill={name}; disable-model-invocation — manual invoke only",
+                    skill=name,
+                    disable_model_invocation=True,
+                )
+            )
+    else:
+        items.append(
+            _item(
+                host,
+                "skill_description",
+                scope,
+                skill_md,
+                _utf8_bytes(str(meta.get("description") or "")),
+                "always",
+                notes=f"skill={name}; description always listed",
+                skill=name,
+                disable_model_invocation=False,
+            )
+        )
+
+    items.append(
         _item(
             host,
             "skill_body",
             scope,
             skill_md,
-            len(body.encode("utf-8")),
+            _utf8_bytes(body),
             "on_demand",
             notes=f"skill={name}; body loads when invoked",
-            skill=str(name),
-        ),
-    ]
-    refs = skill_md.parent / "references"
-    if refs.is_dir():
-        total = sum(file_bytes(p) for p in refs.rglob("*") if p.is_file())
-        if total:
-            items.append(
-                _item(
-                    host,
-                    "skill_refs",
-                    scope,
-                    refs,
-                    total,
-                    "on_demand",
-                    notes=f"skill={name}; reference files",
-                    skill=str(name),
-                )
+            skill=name,
+        )
+    )
+
+    for extra, nbytes in _skill_extra_files(skill_md.parent, skill_md):
+        rel = extra.relative_to(skill_md.parent) if skill_md.parent in extra.parents or extra.parent == skill_md.parent else extra.name
+        items.append(
+            _item(
+                host,
+                "skill_asset",
+                scope,
+                extra,
+                nbytes,
+                "on_demand",
+                notes=f"skill={name}; extra file {rel}",
+                skill=name,
             )
+        )
     return items
 
 
@@ -110,7 +169,7 @@ def _agent_items(host: str, scope: str, path: Path) -> list[InventoryItem]:
             "subagent_description",
             scope,
             path,
-            len(desc),
+            _utf8_bytes(desc),
             "always",
             notes=f"subagent={name}",
             subagent=str(name),
@@ -121,11 +180,139 @@ def _agent_items(host: str, scope: str, path: Path) -> list[InventoryItem]:
             "subagent_body",
             scope,
             path,
-            len(body.encode("utf-8")),
+            _utf8_bytes(body),
             "on_demand",
             notes=f"subagent={name}; prompt when invoked",
             subagent=str(name),
         ),
+    ]
+
+
+def _resolve_imports(
+    host: str,
+    scope: str,
+    path: Path,
+    seen: set[Path],
+) -> list[InventoryItem]:
+    """Follow @path imports recursively; always-load; guard cycles."""
+    items: list[InventoryItem] = []
+    resolved = path.resolve()
+    if resolved in seen:
+        return items
+    seen.add(resolved)
+    if not path.is_file():
+        return items
+    text = safe_read_text(path) or ""
+    items.append(
+        _item(
+            host,
+            "instructions",
+            scope,
+            path,
+            file_bytes(path),
+            "always",
+            notes="loaded at launch" + (" (import)" if len(seen) > 1 else ""),
+            imported=len(seen) > 1,
+        )
+    )
+    base = path.parent
+    for m in _IMPORT_RE.finditer(text):
+        rel = m.group(1).strip()
+        if rel.startswith("http://") or rel.startswith("https://"):
+            continue
+        candidate = (base / rel).resolve()
+        # Also try as-is relative to project-ish parents
+        if not candidate.is_file():
+            continue
+        items.extend(_resolve_imports(host, scope, candidate, seen))
+    return items
+
+
+def _nested_instruction_files(project: Path) -> list[Path]:
+    """Nested CLAUDE.md / AGENTS.md under the project (excluding root copies handled separately)."""
+    found: list[Path] = []
+    for name in ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"):
+        for p in project.rglob(name):
+            if p.is_file():
+                found.append(p)
+    return sorted(set(found))
+
+
+def _mcp_items(
+    host: str,
+    scope: str,
+    cfg_path: Path,
+    defer_schemas: bool,
+) -> list[InventoryItem]:
+    data = load_json_safe(cfg_path)
+    if data is None:
+        return []
+    servers = data.get("mcpServers") or data.get("mcp") or {}
+    if not isinstance(servers, dict):
+        # Flat map of server → config
+        if isinstance(data, dict) and "mcpServers" not in data and any(
+            isinstance(v, dict) for v in data.values()
+        ):
+            servers = data
+        else:
+            servers = {}
+    names = sorted(servers.keys()) if isinstance(servers, dict) else []
+    schema_bytes = 0
+    has_schemas = False
+    for name, cfg in (servers.items() if isinstance(servers, dict) else []):
+        if not isinstance(cfg, dict):
+            continue
+        # Optional on-disk tool schema snapshots (fixtures / exports)
+        for key in ("tools", "toolSchemas", "schemas"):
+            tools = cfg.get(key)
+            if isinstance(tools, list):
+                has_schemas = True
+                schema_bytes += _utf8_bytes(str(tools))
+            elif isinstance(tools, dict):
+                has_schemas = True
+                schema_bytes += _utf8_bytes(str(tools))
+        schema_file = cfg.get("schemaFile") or cfg.get("toolsFile")
+        if isinstance(schema_file, str):
+            sp = Path(schema_file)
+            if not sp.is_absolute():
+                sp = cfg_path.parent / sp
+            if sp.is_file():
+                has_schemas = True
+                schema_bytes += file_bytes(sp)
+
+    if has_schemas:
+        return [
+            _item(
+                host,
+                "mcp_servers",
+                scope,
+                cfg_path,
+                schema_bytes,
+                "always" if not defer_schemas else "conditional",
+                notes=f"{len(names)} server(s); sized by tool schemas",
+                servers=names,
+                server_count=len(names),
+                sized_by="schemas",
+            )
+        ]
+    # Config-size only (names / instructions) — not a fake schema estimate
+    listing = _utf8_bytes(",".join(names))
+    return [
+        _item(
+            host,
+            "mcp_servers",
+            scope,
+            cfg_path,
+            listing,
+            "always",
+            notes=(
+                f"{len(names)} server(s); config-size only (no tool schemas on disk)"
+                + ("; schemas deferred by default" if defer_schemas else "")
+            ),
+            servers=names,
+            server_count=len(names),
+            sized_by="config",
+        )
     ]
 
 
@@ -137,23 +324,43 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
     items: list[InventoryItem] = []
     home = roots.claude_home or (roots.home / ".claude")
     project = roots.project
+    seen_imports: set[Path] = set()
 
-    # Instructions / CLAUDE.md chain
-    candidates = [
+    roots_files = [
         (home / "CLAUDE.md", "user"),
         (project / "CLAUDE.md", "project"),
         (project / ".claude" / "CLAUDE.md", "project"),
         (project / "CLAUDE.local.md", "project_local"),
         (project / "AGENTS.md", "project"),
     ]
-    for path, scope in candidates:
+    for path, scope in roots_files:
         if path.is_file():
-            n = file_bytes(path)
-            items.append(
-                _item(host, "instructions", scope, path, n, "always", notes="loaded at launch")
-            )
+            items.extend(_resolve_imports(host, scope, path, seen_imports))
 
-    # Rules
+    # Nested package instruction files
+    for path in _nested_instruction_files(project):
+        if path.resolve() in seen_imports:
+            continue
+        # Nested AGENTS.md / CLAUDE.md load when working in that subtree
+        load = "conditional" if path.parent != project else "always"
+        if path.name == "CLAUDE.local.md":
+            load = "always"
+        items.extend(
+            _resolve_imports(host, "nested", path, seen_imports)
+            if load == "always"
+            else [
+                _item(
+                    host,
+                    "instructions",
+                    "nested",
+                    path,
+                    file_bytes(path),
+                    "conditional",
+                    notes="nested; loads in subtree",
+                )
+            ]
+        )
+
     for rules_dir, scope in (
         (home / "rules", "user"),
         (project / ".claude" / "rules", "project"),
@@ -168,12 +375,10 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
             notes = f"paths={paths_globs}" if paths_globs else "no paths: always loaded"
             items.append(_item(host, "rule", scope, path, file_bytes(path), load, notes=notes))
 
-    # Auto memory
     projects_dir = home / "projects"
     if projects_dir.is_dir():
         for mem in projects_dir.glob("*/memory/MEMORY.md"):
             n = file_bytes(mem)
-            # First 200 lines / 25 KB always
             always_n = min(n, 25 * 1024)
             items.append(
                 _item(
@@ -187,8 +392,7 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
                     full_bytes=n,
                 )
             )
-            topic_dir = mem.parent
-            for topic in sorted(topic_dir.glob("*.md")):
+            for topic in sorted(mem.parent.glob("*.md")):
                 if topic.name == "MEMORY.md":
                     continue
                 items.append(
@@ -203,14 +407,21 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
                     )
                 )
 
-    # Skills
     for skills_dir, scope in (
         (home / "skills", "user"),
         (project / ".claude" / "skills", "project"),
     ):
         items.extend(_walk_skills(host, scope, skills_dir))
+    # Nested package skills (e.g. packages/foo/.claude/skills)
+    for skill_md in project.rglob(".claude/skills/*/SKILL.md"):
+        # Avoid double-counting project/.claude/skills
+        try:
+            skill_md.relative_to(project / ".claude" / "skills")
+            continue
+        except ValueError:
+            pass
+        items.extend(_skill_items(host, "nested_package", skill_md))
 
-    # Subagents
     for agents_dir, scope in (
         (home / "agents", "user"),
         (project / ".claude" / "agents", "project"),
@@ -219,7 +430,6 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
             for path in sorted(agents_dir.glob("*.md")):
                 items.extend(_agent_items(host, scope, path))
 
-    # Output styles
     for styles_dir, scope in (
         (home / "output-styles", "user"),
         (project / ".claude" / "output-styles", "project"),
@@ -238,33 +448,13 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
                     )
                 )
 
-    # MCP — count servers only; never print env/headers
     for cfg_path, scope in (
         (roots.home / ".claude.json", "user"),
         (project / ".mcp.json", "project"),
         (project / ".claude" / ".mcp.json", "project"),
     ):
-        data = load_json_safe(cfg_path)
-        if data is None:
-            continue
-        names = mcp_server_names(data)
-        # Rough: ~200 bytes listing cost per server name (upper bound placeholder)
-        listing = sum(len(n) + 40 for n in names)
-        items.append(
-            _item(
-                host,
-                "mcp_servers",
-                scope,
-                cfg_path,
-                listing,
-                "always",
-                notes=f"{len(names)} server(s); schemas deferred by default; names only counted",
-                servers=names,
-                server_count=len(names),
-            )
-        )
+        items.extend(_mcp_items(host, scope, cfg_path, defer_schemas=True))
 
-    # Plugins enabled listing
     settings = load_json_safe(home / "settings.json") or {}
     enabled = settings.get("enabledPlugins") if isinstance(settings, dict) else None
     if isinstance(enabled, dict) and enabled:
@@ -275,9 +465,9 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
                 "plugins",
                 "user",
                 home / "settings.json",
-                len(blob),
+                _utf8_bytes(blob),
                 "always",
-                notes=f"{len(enabled)} enabled plugin key(s); component load rules apply",
+                notes=f"{len(enabled)} enabled plugin key(s)",
                 plugin_count=len(enabled),
             )
         )
@@ -304,8 +494,8 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
     items: list[InventoryItem] = []
     home = roots.cursor_home or (roots.home / ".cursor")
     project = roots.project
+    seen: set[Path] = set()
 
-    # Project rules (.mdc only)
     for rules_dir, scope in (
         (project / ".cursor" / "rules", "project"),
         (home / "rules", "user"),
@@ -318,27 +508,26 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
             load, notes = _cursor_rule_load(meta)
             items.append(_item(host, "rule", scope, path, file_bytes(path), load, notes=notes))
 
-    # AGENTS.md
-    agents_md = project / "AGENTS.md"
-    if agents_md.is_file():
-        items.append(
-            _item(host, "instructions", "project", agents_md, file_bytes(agents_md), "always")
-        )
-    claude_md = project / "CLAUDE.md"
-    if claude_md.is_file():
-        items.append(
-            _item(
-                host,
-                "instructions",
-                "project",
-                claude_md,
-                file_bytes(claude_md),
-                "always",
-                notes="CLI also reads CLAUDE.md",
+    for path in _nested_instruction_files(project):
+        if path.resolve() in seen:
+            continue
+        load = "always" if path.parent == project else "conditional"
+        if load == "always":
+            items.extend(_resolve_imports(host, "project", path, seen))
+        else:
+            items.append(
+                _item(
+                    host,
+                    "instructions",
+                    "nested",
+                    path,
+                    file_bytes(path),
+                    "conditional",
+                    notes="nested; loads in subtree",
+                )
             )
-        )
+            seen.add(path.resolve())
 
-    # Skills across compat dirs (duplicate detection later)
     skill_roots = [
         (home / "skills", "user_cursor"),
         (project / ".cursor" / "skills", "project_cursor"),
@@ -352,7 +541,6 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
     for skills_dir, scope in skill_roots:
         items.extend(_walk_skills(host, scope, skills_dir))
 
-    # Subagents
     for agents_dir, scope in (
         (home / "agents", "user"),
         (project / ".cursor" / "agents", "project"),
@@ -363,34 +551,13 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
             for path in sorted(agents_dir.glob("*.md")):
                 items.extend(_agent_items(host, scope, path))
 
-    # MCP
     for cfg_path, scope in (
         (home / "mcp.json", "user"),
         (project / ".cursor" / "mcp.json", "project"),
     ):
-        data = load_json_safe(cfg_path)
-        if data is None:
-            continue
-        names = mcp_server_names(data) or (
-            sorted(data.keys()) if isinstance(data, dict) and "mcpServers" not in data else []
-        )
-        # Cursor docs unclear on deferral — treat tool list as always (upper bound).
-        listing = sum(len(n) + 80 for n in names)
-        items.append(
-            _item(
-                host,
-                "mcp_servers",
-                scope,
-                cfg_path,
-                listing,
-                "always",
-                notes=f"{len(names)} server(s); schemas assumed always (upper bound)",
-                servers=names,
-                server_count=len(names),
-            )
-        )
+        items.extend(_mcp_items(host, scope, cfg_path, defer_schemas=False))
 
-    # CLI default model / maxMode (cost levers, tiny context)
+    # CLI config is NOT context — report as config only.
     for cfg_path, scope in (
         (home / "cli-config.json", "user"),
         (project / ".cursor" / "cli.json", "project"),
@@ -400,18 +567,18 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
             continue
         model = str(data.get("model") or "")
         max_mode = data.get("maxMode")
-        blob = f"model={model};maxMode={max_mode}"
         items.append(
             _item(
                 host,
                 "cli_config",
                 scope,
                 cfg_path,
-                len(blob),
-                "always",
-                notes="default model / Max mode are cost levers",
+                0,
+                "unknown",
+                notes="config only (not loaded into context); cost lever",
                 model=model,
                 maxMode=max_mode,
+                context=False,
             )
         )
 
@@ -433,6 +600,21 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
 # --- Grok Bot --------------------------------------------------------------
 
 
+def _active_agent_id(sand: Path) -> Optional[str]:
+    """Real settings use activeAgentId; also accept legacy keys."""
+    for path in (
+        sand / "settings.json",
+        sand / "agents" / "active-agent.json",
+    ):
+        data = load_json_safe(path)
+        if not isinstance(data, dict):
+            continue
+        for key in ("activeAgentId", "active_agent_id", "id", "agentId", "active"):
+            if data.get(key):
+                return str(data[key])
+    return None
+
+
 def collect_grok(roots: Roots) -> list[InventoryItem]:
     host = "grok"
     items: list[InventoryItem] = []
@@ -440,11 +622,17 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
     if sand is None or not sand.is_dir():
         return items
 
-    # Workflows / skills
-    workflows = sand / "workflows"
-    items.extend(_walk_skills(host, "workflows", workflows))
+    # Workflows are the source of truth for skill files.
+    workflow_items = _walk_skills(host, "workflows", sand / "workflows")
+    items.extend(workflow_items)
+    workflow_skill_names = {
+        str(it.meta.get("skill"))
+        for it in workflow_items
+        if it.kind in ("skill_description", "skill_path")
+    }
 
-    # Managed + plugin skill caches (descriptions)
+    # Managed / plugin caches: only count skills NOT already covered by workflows
+    # (dedupe by skill id/name). Measure bytes, not raw char length of Python str.
     for cache_path, kind in (
         (sand / "managed-skills" / "cache.json", "managed_skill_cache"),
         (sand / "plugin-skills" / "cache.json", "plugin_skill_cache"),
@@ -453,29 +641,33 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
         if not isinstance(data, dict):
             continue
         skills = data.get("skills") or []
-        desc_total = 0
+        desc_bytes = 0
+        counted = 0
         for s in skills:
-            if isinstance(s, dict):
-                desc_total += len(str(s.get("description") or ""))
-        items.append(
-            _item(
-                host,
-                kind,
-                "cache",
-                cache_path,
-                desc_total,
-                "always",
-                notes=f"{len(skills)} skill description(s) listed",
-                skill_count=len(skills),
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("id") or s.get("name") or "")
+            name = str(s.get("name") or sid)
+            if name in workflow_skill_names or sid in workflow_skill_names:
+                continue
+            desc_bytes += _utf8_bytes(str(s.get("description") or ""))
+            counted += 1
+        if counted:
+            items.append(
+                _item(
+                    host,
+                    kind,
+                    "cache",
+                    cache_path,
+                    desc_bytes,
+                    "always",
+                    notes=f"{counted} skill description(s) not already in workflows (bytes)",
+                    skill_count=counted,
+                )
             )
-        )
 
-    # Bot profiles
     agents_dir = sand / "agents"
-    active_id = None
-    active = load_json_safe(agents_dir / "active-agent.json")
-    if isinstance(active, dict):
-        active_id = active.get("id") or active.get("agentId") or active.get("active")
+    active_id = _active_agent_id(sand)
 
     if agents_dir.is_dir():
         for profile in sorted(agents_dir.glob("*/profile.json")):
@@ -490,7 +682,7 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
                     "bot_description",
                     "agent",
                     profile,
-                    len(desc),
+                    _utf8_bytes(desc),
                     load,
                     notes=notes,
                     agent_id=agent_id,
@@ -498,36 +690,65 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
                 )
             )
 
-    # Per-bot memory (always for that bot)
+    # Memory: only the active bot's profile.md is always loaded.
     mem_root = sand / "user-memory" / "by-agent"
     if mem_root.is_dir():
-        agent_ids = {p.name for p in agents_dir.iterdir()} if agents_dir.is_dir() else set()
+        agent_ids = {p.name for p in agents_dir.iterdir() if p.is_dir()} if agents_dir.is_dir() else set()
         for profile_md in sorted(mem_root.glob("*/profile.md")):
             agent_id = profile_md.parent.name
             orphan = agent_id not in agent_ids
-            items.append(
-                _item(
-                    host,
-                    "memory",
-                    "agent",
-                    profile_md,
-                    file_bytes(profile_md),
-                    "always",
-                    notes="orphaned agent memory" if orphan else "kept in mind every turn",
-                    agent_id=agent_id,
-                    orphan=orphan,
+            if orphan:
+                items.append(
+                    _item(
+                        host,
+                        "memory",
+                        "agent",
+                        profile_md,
+                        file_bytes(profile_md),
+                        "unknown",
+                        notes="orphaned memory file — not loaded (cleanup/clutter)",
+                        agent_id=agent_id,
+                        orphan=True,
+                        loads=False,
+                    )
                 )
-            )
+            elif active_id and agent_id == active_id:
+                items.append(
+                    _item(
+                        host,
+                        "memory",
+                        "agent",
+                        profile_md,
+                        file_bytes(profile_md),
+                        "always",
+                        notes="active bot memory; kept in mind every turn",
+                        agent_id=agent_id,
+                        orphan=False,
+                    )
+                )
+            else:
+                items.append(
+                    _item(
+                        host,
+                        "memory",
+                        "agent",
+                        profile_md,
+                        file_bytes(profile_md),
+                        "on_demand",
+                        notes="inactive bot memory; not in active context",
+                        agent_id=agent_id,
+                        orphan=False,
+                    )
+                )
 
-    # Global settings — MCP custom instructions only (sizes); skip secret files
     settings = load_json_safe(sand / "settings.json")
     if isinstance(settings, dict):
         custom = str(settings.get("mcpCustomInstructions") or "")
         by_server = settings.get("mcpCustomInstructionsByServerId") or {}
         extra = 0
         if isinstance(by_server, dict):
-            extra = sum(len(str(v)) for v in by_server.values())
-        n = len(custom) + extra
+            extra = sum(_utf8_bytes(str(v)) for v in by_server.values())
+        n = _utf8_bytes(custom) + extra
         if n:
             items.append(
                 _item(
@@ -542,7 +763,7 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
             )
         box_servers = settings.get("mcpBoxServers") or []
         if isinstance(box_servers, list) and box_servers:
-            listing = sum(len(str(s)) + 40 for s in box_servers)
+            listing = _utf8_bytes(",".join(str(s) for s in box_servers))
             items.append(
                 _item(
                     host,
@@ -551,8 +772,9 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
                     sand / "settings.json",
                     listing,
                     "always",
-                    notes=f"{len(box_servers)} box MCP server(s); tool names always",
+                    notes=f"{len(box_servers)} box MCP server(s); config-size only",
                     server_count=len(box_servers),
+                    sized_by="config",
                 )
             )
 
@@ -565,11 +787,12 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
 def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
     wins: list[Win] = []
 
-    # Large always-on items
     for it in items:
         if it.load != "always":
             continue
-        if it.kind in ("user_rules",) and it.bytes == 0:
+        if it.kind in ("user_rules", "cli_config") and it.bytes == 0:
+            continue
+        if it.meta.get("orphan"):
             continue
         if it.est_tokens < 50:
             continue
@@ -584,16 +807,14 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
             )
         )
 
-    # Duplicate skills across scopes (same skill name, multiple description entries)
     by_skill: dict[str, list[InventoryItem]] = defaultdict(list)
     for it in items:
-        if it.kind == "skill_description":
+        if it.kind == "skill_description" and it.load == "always":
             key = str(it.meta.get("skill") or Path(it.path).parent.name)
             by_skill[key].append(it)
     for name, group in by_skill.items():
         scopes = {g.scope for g in group}
         if len(group) >= 2 and len(scopes) >= 2:
-            # Saving = all but one copy of the always-listed descriptions
             ordered = sorted(group, key=lambda g: -g.est_tokens)
             saving = sum(g.est_tokens for g in ordered[1:])
             if saving > 0:
@@ -608,53 +829,51 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
                     )
                 )
 
-    # Long skill descriptions
     for it in items:
-        if it.kind == "skill_description" and it.bytes > 400:
+        if it.kind == "skill_description" and it.load == "always" and it.bytes > 400:
             wins.append(
                 Win(
                     title=f"Shorten skill description ({it.meta.get('skill') or Path(it.path).parent.name})",
                     saving_est_tokens=max(0, it.est_tokens - est_tokens(200)),
-                    measured=f"{it.bytes} description chars (cap guidance ~200–400)",
+                    measured=f"{it.bytes} description bytes",
                     rationale="Skill descriptions are always listed",
                     suggestion="Move detail into the skill body (on demand).",
                     path=it.path,
                 )
             )
 
-    # Orphan memory
+    # Orphan memory: cleanup/clutter, NOT a token saving.
     for it in items:
         if it.kind == "memory" and it.meta.get("orphan"):
             wins.append(
                 Win(
-                    title="Remove orphaned bot memory file",
-                    saving_est_tokens=it.est_tokens,
-                    measured=f"{it.bytes} bytes always loaded for missing agent",
-                    rationale="profile.md exists for an agent id with no agent directory",
-                    suggestion="Delete or archive the orphaned profile.md after approval.",
+                    title="Clean up orphaned bot memory file",
+                    saving_est_tokens=0,
+                    measured=f"{it.bytes} bytes on disk; not loaded into any bot context",
+                    rationale="Orphaned profile.md is clutter — it does not always-load",
+                    suggestion="Archive or delete after approval.",
                     path=it.path,
+                    ask=True,
                 )
             )
 
-    # Large MCP catalogs
     for it in items:
         if it.kind == "mcp_servers" and int(it.meta.get("server_count") or 0) >= 3:
             wins.append(
                 Win(
                     title="Disable unused MCP servers",
-                    saving_est_tokens=it.est_tokens,
-                    measured=f"{it.meta.get('server_count')} servers configured",
-                    rationale="Each enabled server contributes tool names (and possibly schemas) every turn",
-                    suggestion="Disable servers you rarely use; confirm with /mcp or the connector catalog.",
+                    saving_est_tokens=it.est_tokens if it.meta.get("sized_by") == "schemas" else 0,
+                    measured=f"{it.meta.get('server_count')} servers ({it.meta.get('sized_by', 'config')})",
+                    rationale=it.notes,
+                    suggestion="Disable servers you rarely use.",
                     path=it.path,
+                    ask=it.meta.get("sized_by") != "schemas",
                 )
             )
 
-    # Prefer unique titles by path; ranker sorts by saving
-    # Deduplicate near-identical wins on same path+title
     seen: set[tuple[str, str]] = set()
     unique: list[Win] = []
-    for w in sorted(wins, key=lambda x: (-x.saving_est_tokens, x.title)):
+    for w in sorted(wins, key=lambda x: (-(0 if x.ask else x.saving_est_tokens), x.title)):
         key = (w.title, w.path)
         if key in seen:
             continue

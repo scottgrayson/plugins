@@ -2,177 +2,360 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import os
+import re
+import shutil
 import sqlite3
+import tempfile
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from .common import Win, est_tokens, is_secret_path, rank_wins, safe_read_text
 from .detect import Roots
 
+# Minimum events before suggesting a cache-hit win (avoid single-subagent noise).
+CACHE_HIT_MIN_EVENTS = 5
+
+
+def _norm_header(h: str) -> str:
+    """Case-insensitive, punctuation-tolerant header key."""
+    s = (h or "").strip().lower()
+    s = s.replace("(w/", "with_").replace("(w/o", "without_")
+    s = re.sub(r"[^\w]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
 
 def _num(row: dict[str, str], *keys: str) -> float:
     for k in keys:
-        if k in row and row[k] not in (None, ""):
-            try:
-                return float(str(row[k]).replace(",", "").replace("$", ""))
-            except ValueError:
-                continue
+        nk = _norm_header(k) if " " in k or "(" in k else k
+        # Also try already-normalized
+        for candidate in (k, nk, _norm_header(k)):
+            if candidate in row and row[candidate] not in (None, ""):
+                try:
+                    return float(str(row[candidate]).replace(",", "").replace("$", ""))
+                except ValueError:
+                    continue
     return 0.0
+
+
+def _row_get(row: dict[str, str], *keys: str) -> str:
+    for k in keys:
+        for candidate in (k, _norm_header(k)):
+            if candidate in row and row[candidate]:
+                return str(row[candidate]).strip()
+    return ""
+
+
+def _classify_kind(kind_raw: str, row: dict[str, str]) -> str:
+    """Map Kind / source / ID columns to cloud_agent | automation | local."""
+    blob = " ".join(
+        [
+            kind_raw,
+            _row_get(row, "source", "type", "event_type"),
+            "cloud" if _row_get(row, "cloud_agent_id", "cloudagentid", "agent_id") else "",
+            "auto" if _row_get(row, "automation_id", "automationid") else "",
+        ]
+    ).lower()
+    if any(x in blob for x in ("cloud", "headless", "background")):
+        return "cloud_agent"
+    if any(x in blob for x in ("automation", "routine", "cron")):
+        return "automation"
+    if any(x in blob for x in ("ide", "local", "composer", "chat", "agent")):
+        # Prefer explicit local/IDE; bare "agent" without cloud → local
+        if "cloud" not in blob and "automation" not in blob:
+            if any(x in blob for x in ("ide", "local", "composer", "chat")):
+                return "local"
+    if _row_get(row, "cloud_agent_id", "cloudagentid"):
+        return "cloud_agent"
+    if _row_get(row, "automation_id", "automationid"):
+        return "automation"
+    # Kind column values seen in dashboard exports
+    k = kind_raw.lower()
+    if k in ("cloud agent", "cloud_agent", "cloud-agent", "cloud"):
+        return "cloud_agent"
+    if k in ("automation", "automations"):
+        return "automation"
+    if k in ("", "included", "on-demand", "on_demand"):
+        # Fall through — still classify via IDs above; else local/IDE default for remaining
+        pass
+    return "local"
 
 
 def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
     """
     Parse a Cursor dashboard Usage CSV export.
 
-    Column names vary; we accept common aliases. Never required Admin API.
+    Supports real dashboard headers such as:
+      Date, Kind, Model, Max Mode, Input (w/ Cache Write), Input (w/o Cache Write),
+      Cache Read, Output, Total Tokens, Cost, Cloud Agent ID, Automation ID, …
     """
     text = safe_read_text(path)
     if text is None:
         return {"error": f"cannot read CSV: {path}", "events": [], "by_model": {}}
 
-    # Strip BOM
     if text.startswith("\ufeff"):
         text = text[1:]
     reader = csv.DictReader(text.splitlines())
     events: list[dict[str, Any]] = []
-    by_model: dict[str, dict[str, float]] = defaultdict(
-        lambda: {
-            "input": 0.0,
-            "output": 0.0,
-            "cache_read": 0.0,
-            "cache_write": 0.0,
-            "total_tokens": 0.0,
-            "cost": 0.0,
-            "count": 0.0,
-        }
-    )
+    empty = lambda: {
+        "input": 0.0,
+        "output": 0.0,
+        "cache_read": 0.0,
+        "cache_write": 0.0,
+        "total_tokens": 0.0,
+        "cost": 0.0,
+        "count": 0.0,
+    }
+    by_model: dict[str, dict[str, float]] = defaultdict(empty)
+    by_kind: dict[str, dict[str, float]] = defaultdict(empty)
+    by_max_mode: dict[str, dict[str, float]] = defaultdict(empty)
+
     for raw in reader:
-        # Normalize keys
-        row = {(k or "").strip().lower().replace(" ", "_"): (v or "").strip() for k, v in raw.items()}
-        model = (
-            row.get("model")
-            or row.get("model_name")
-            or row.get("llm")
-            or "unknown"
+        row = {_norm_header(k or ""): (v or "").strip() for k, v in raw.items()}
+        model = _row_get(row, "model", "model_name", "llm") or "unknown"
+        kind_raw = _row_get(row, "kind", "source", "type")
+        kind = _classify_kind(kind_raw, row)
+        max_mode_raw = _row_get(row, "max_mode", "maxmode")
+        max_mode = (
+            "on"
+            if max_mode_raw.lower() in ("true", "1", "yes", "on")
+            else ("off" if max_mode_raw else "unknown")
         )
-        inp = _num(row, "input", "input_tokens", "input_with_cache_write", "prompt_tokens")
+
+        # Real dashboard: Input (w/ Cache Write) + Input (w/o Cache Write)
+        inp_with = _num(
+            row,
+            "input_with_cache_write",
+            "input_w_cache_write",
+            "input_(w/_cache_write)",
+        )
+        inp_without = _num(
+            row,
+            "input_without_cache_write",
+            "input_w_o_cache_write",
+            "input_(w/o_cache_write)",
+            "input_wo_cache_write",
+        )
+        # Normalized forms after _norm_header on "Input (w/ Cache Write)"
+        if not inp_with:
+            inp_with = _num(row, "input_with_cache_write")
+        if not inp_without:
+            inp_without = float(row.get("input_without_cache_write") or 0) or _num(
+                row, "input_without_cache_write"
+            )
+        # Fallback aliases
+        inp = inp_with + inp_without
+        if inp == 0:
+            inp = _num(row, "input", "input_tokens", "prompt_tokens")
+
         out = _num(row, "output", "output_tokens", "completion_tokens")
         cache_read = _num(row, "cache_read", "cache_read_tokens", "cached_input")
-        cache_write = _num(row, "cache_write", "cache_write_tokens", "input_cache_write")
-        total = _num(row, "total", "total_tokens") or (inp + out + cache_read + cache_write)
+        cache_write = inp_with if inp_with else _num(
+            row, "cache_write", "cache_write_tokens", "input_cache_write"
+        )
+        total = _num(row, "total_tokens", "total") or (
+            inp + out + cache_read
+        )
         cost = _num(row, "cost", "total_cost", "charged", "price")
-        date = row.get("date") or row.get("timestamp") or row.get("created_at") or ""
+        date = _row_get(row, "date", "timestamp", "created_at")
+
         ev = {
             "date": date,
             "model": model,
+            "kind": kind,
+            "kind_raw": kind_raw,
+            "max_mode": max_mode,
             "input": inp,
+            "input_with_cache_write": inp_with,
+            "input_without_cache_write": inp_without,
             "output": out,
             "cache_read": cache_read,
             "cache_write": cache_write,
             "total_tokens": total,
             "cost": cost,
+            "cloud_agent_id": _row_get(row, "cloud_agent_id", "cloudagentid"),
+            "automation_id": _row_get(row, "automation_id", "automationid"),
         }
         events.append(ev)
-        m = by_model[model]
-        m["input"] += inp
-        m["output"] += out
-        m["cache_read"] += cache_read
-        m["cache_write"] += cache_write
-        m["total_tokens"] += total
-        m["cost"] += cost
-        m["count"] += 1
+
+        for bucket, key in (
+            (by_model, model),
+            (by_kind, kind),
+            (by_max_mode, max_mode),
+        ):
+            m = bucket[key]
+            m["input"] += inp
+            m["output"] += out
+            m["cache_read"] += cache_read
+            m["cache_write"] += cache_write
+            m["total_tokens"] += total
+            m["cost"] += cost
+            m["count"] += 1
+
+    def _sorted(d: dict) -> dict:
+        return {
+            k: dict(v)
+            for k, v in sorted(d.items(), key=lambda kv: -kv[1]["total_tokens"])
+        }
 
     return {
         "source": str(path),
         "event_count": len(events),
         "events": events,
-        "by_model": {k: dict(v) for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])},
+        "by_model": _sorted(by_model),
+        "by_kind": _sorted(by_kind),
+        "by_max_mode": _sorted(by_max_mode),
     }
 
 
-def fetch_cursor_admin_usage(api_key: Optional[str] = None) -> Optional[dict[str, Any]]:
+def fetch_cursor_admin_usage(
+    api_key: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
     """
-    Optional team Admin API. Key from env CURSOR_ADMIN_API_KEY or argument.
-    Never required. Never scrapes IDE DBs.
+    Opt-in team Admin API (requires --cursor-admin-api plus env key).
+    Uses documented Basic auth. Supports date range + pagination.
+    Never scrapes IDE DBs.
     """
     key = api_key or os.environ.get("CURSOR_ADMIN_API_KEY") or os.environ.get("CURSOR_API_KEY")
     if not key:
         return None
-    # Do not log the key.
+
+    # Documented Basic auth: key as username, empty password.
+    basic = base64.b64encode(f"{key}:".encode()).decode()
     url = "https://api.cursor.com/teams/filtered-usage-events"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps({"page": 1, "pageSize": 100}).encode(),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        data = json.loads(body)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
-        return {"error": f"admin API request failed: {type(e).__name__}", "events": []}
+    empty = lambda: {
+        "input": 0.0,
+        "output": 0.0,
+        "cache_read": 0.0,
+        "cache_write": 0.0,
+        "total_tokens": 0.0,
+        "cost": 0.0,
+        "count": 0.0,
+        "automations": 0.0,
+        "cloud_agents": 0.0,
+    }
+    by_model: dict[str, dict[str, float]] = defaultdict(empty)
+    by_kind: dict[str, dict[str, float]] = defaultdict(empty)
+    all_events: list = []
+    page = 1
+    page_size = 100
 
-    # Normalize into by_model without echoing secrets
-    by_model: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0, "total_tokens": 0.0, "cost": 0.0, "count": 0.0, "automations": 0.0, "cloud_agents": 0.0}
-    )
-    events = data.get("usageEvents") or data.get("events") or data.get("data") or []
-    if not isinstance(events, list):
-        events = []
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        model = str(ev.get("model") or "unknown")
-        usage = ev.get("tokenUsage") or {}
-        if not isinstance(usage, dict):
-            usage = {}
-        m = by_model[model]
-        m["input"] += float(usage.get("inputTokens") or usage.get("input") or 0)
-        m["output"] += float(usage.get("outputTokens") or usage.get("output") or 0)
-        m["cache_read"] += float(usage.get("cacheReadTokens") or usage.get("cacheRead") or 0)
-        m["cache_write"] += float(usage.get("cacheWriteTokens") or usage.get("cacheWrite") or 0)
-        m["total_tokens"] += m["input"] + m["output"]  # incremental already in loop — fix below
-        m["cost"] += float(ev.get("chargedCents") or usage.get("totalCents") or 0) / 100.0
-        m["count"] += 1
-        if ev.get("automationId"):
-            m["automations"] += 1
-        if ev.get("cloudAgentId") or ev.get("isHeadless"):
-            m["cloud_agents"] += 1
+    while True:
+        payload: dict[str, Any] = {"page": page, "pageSize": page_size}
+        if start_date:
+            payload["startDate"] = start_date
+        if end_date:
+            payload["endDate"] = end_date
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {basic}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
+            return {"error": f"admin API request failed: {type(e).__name__}", "events": []}
 
-    # Recompute total_tokens cleanly
-    clean = {}
-    for model, m in by_model.items():
-        clean[model] = {
-            "input": m["input"],
-            "output": m["output"],
-            "cache_read": m["cache_read"],
-            "cache_write": m["cache_write"],
-            "total_tokens": m["input"] + m["output"] + m["cache_read"] + m["cache_write"],
-            "cost": m["cost"],
-            "count": m["count"],
-            "automations": m["automations"],
-            "cloud_agents": m["cloud_agents"],
-        }
+        events = data.get("usageEvents") or data.get("events") or data.get("data") or []
+        if not isinstance(events, list):
+            events = []
+        if not events:
+            break
+        all_events.extend(events)
+
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            model = str(ev.get("model") or "unknown")
+            usage = ev.get("tokenUsage") if isinstance(ev.get("tokenUsage"), dict) else {}
+            inp = float(usage.get("inputTokens") or usage.get("input") or 0)
+            out = float(usage.get("outputTokens") or usage.get("output") or 0)
+            cr = float(usage.get("cacheReadTokens") or usage.get("cacheRead") or 0)
+            cw = float(usage.get("cacheWriteTokens") or usage.get("cacheWrite") or 0)
+            cost = float(ev.get("chargedCents") or usage.get("totalCents") or 0) / 100.0
+            kind = "local"
+            if ev.get("automationId"):
+                kind = "automation"
+            elif ev.get("cloudAgentId") or ev.get("isHeadless"):
+                kind = "cloud_agent"
+            for bucket, key_name in ((by_model, model), (by_kind, kind)):
+                m = bucket[key_name]
+                m["input"] += inp
+                m["output"] += out
+                m["cache_read"] += cr
+                m["cache_write"] += cw
+                m["total_tokens"] += inp + out + cr + cw
+                m["cost"] += cost
+                m["count"] += 1
+                if kind == "automation":
+                    m["automations"] = m.get("automations", 0) + 1
+                if kind == "cloud_agent":
+                    m["cloud_agents"] = m.get("cloud_agents", 0) + 1
+
+        # Stop when a short page arrives or pagination metadata says done.
+        total_pages = data.get("totalPages") or data.get("pageCount")
+        if total_pages is not None and page >= int(total_pages):
+            break
+        if len(events) < page_size:
+            break
+        page += 1
+        if page > 50:  # hard safety cap
+            break
+
+    clean_model = {
+        k: {kk: vv for kk, vv in v.items()}
+        for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])
+    }
+    clean_kind = {
+        k: {kk: vv for kk, vv in v.items()}
+        for k, v in sorted(by_kind.items(), key=lambda kv: -kv[1]["total_tokens"])
+    }
     return {
         "source": "admin_api",
-        "event_count": len(events),
-        "by_model": dict(sorted(clean.items(), key=lambda kv: -kv[1]["total_tokens"])),
-        "events": [],  # omit raw events (may contain emails)
+        "event_count": len(all_events),
+        "by_model": clean_model,
+        "by_kind": clean_kind,
+        "by_max_mode": {},
+        "events": [],
+        "pages_fetched": page,
     }
 
 
+def _usage_dedupe_key(obj: dict, msg: dict) -> Optional[str]:
+    for key in (
+        msg.get("id"),
+        obj.get("requestId"),
+        obj.get("request_id"),
+        msg.get("requestId"),
+    ):
+        if key:
+            return str(key)
+    return None
+
+
 def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
+    """
+    Parse transcript lines with usage. Deduplicate by message.id / requestId
+    because split assistant responses repeat the same usage on several lines.
+    """
     rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
     if is_secret_path(path):
         return rows
     try:
@@ -187,28 +370,64 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                msg = obj.get("message") or obj
+                msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
                 if not isinstance(msg, dict):
                     continue
                 usage = msg.get("usage") or obj.get("usage")
                 if not isinstance(usage, dict):
+                    # Still track tool_result lines for attribution (no usage).
+                    content = msg.get("content") or obj.get("content") or []
+                    tool_results = []
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                tool_results.append(str(block.get("tool_use_id") or block.get("name") or "tool"))
+                    if tool_results:
+                        rows.append(
+                            {
+                                "model": str(msg.get("model") or obj.get("model") or ""),
+                                "input": 0,
+                                "output": 0,
+                                "cache_read": 0,
+                                "cache_write": 0,
+                                "tools_used": [],
+                                "tool_results": tool_results,
+                                "has_usage": False,
+                                "path": str(path),
+                                "dedupe_key": None,
+                            }
+                        )
                     continue
-                model = str(msg.get("model") or obj.get("model") or "unknown")
-                tools = []
+
+                dedupe = _usage_dedupe_key(obj, msg)
+                if dedupe and dedupe in seen:
+                    continue
+                if dedupe:
+                    seen.add(dedupe)
+
+                tools_used = []
                 content = msg.get("content") or []
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tools.append(str(block.get("name") or "tool"))
+                            tools_used.append(
+                                {
+                                    "name": str(block.get("name") or "tool"),
+                                    "id": str(block.get("id") or ""),
+                                }
+                            )
                 rows.append(
                     {
-                        "model": model,
+                        "model": str(msg.get("model") or obj.get("model") or "unknown"),
                         "input": int(usage.get("input_tokens") or 0),
                         "output": int(usage.get("output_tokens") or 0),
                         "cache_read": int(usage.get("cache_read_input_tokens") or 0),
                         "cache_write": int(usage.get("cache_creation_input_tokens") or 0),
-                        "tools": tools,
+                        "tools_used": tools_used,
+                        "tool_results": [],
+                        "has_usage": True,
                         "path": str(path),
+                        "dedupe_key": dedupe,
                     }
                 )
     except OSError:
@@ -216,10 +435,44 @@ def _parse_claude_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _attribute_tools(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    """
+    Attribute tool cost to the request that carries the tool_result
+    (next request's input growth), not the request that emits tool_use.
+    """
+    by_tool: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"count": 0, "attributed_input": 0, "input_growth": 0}
+    )
+    pending_tools: list[str] = []
+    prev_input = 0
+
+    for r in rows:
+        # When this row has tool_results (or follows a tool_use), attribute growth.
+        if pending_tools and r.get("has_usage"):
+            growth = max(0, int(r["input"]) - prev_input)
+            # Distribute growth across pending tools from the prior turn.
+            share = growth / len(pending_tools) if pending_tools else 0
+            for name in pending_tools:
+                by_tool[name]["count"] += 1
+                by_tool[name]["attributed_input"] += int(r["input"])
+                by_tool[name]["input_growth"] += int(share)
+            pending_tools = []
+
+        if r.get("has_usage"):
+            prev_input = int(r["input"])
+
+        for t in r.get("tools_used") or []:
+            pending_tools.append(t["name"] if isinstance(t, dict) else str(t))
+
+        # tool_result lines confirm the prior tool_use completed; they do not
+        # add extra pending names (IDs like toolu_* must not dilute attribution).
+
+    return dict(by_tool)
+
+
 def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
     home = roots.claude_home or (roots.home / ".claude")
     projects = home / "projects"
-    # Also ~/.config/claude/projects
     alt = roots.home / ".config" / "claude" / "projects"
     jsonl_files: list[Path] = []
     for base in (projects, alt):
@@ -227,18 +480,27 @@ def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
             jsonl_files.extend(sorted(base.rglob("*.jsonl")))
 
     by_model: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total_tokens": 0, "count": 0}
+        lambda: {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "total_tokens": 0,
+            "count": 0,
+        }
     )
     by_tool: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"count": 0, "attributed_input": 0}
+        lambda: {"count": 0, "attributed_input": 0, "input_growth": 0}
     )
     sessions = 0
+    deduped_rows = 0
     for path in jsonl_files:
-        # Skip tool-results blobs that aren't session transcripts if huge — still parse usage if present
         rows = _parse_claude_jsonl(path)
-        if rows:
+        usage_rows = [r for r in rows if r.get("has_usage")]
+        if usage_rows:
             sessions += 1
-        for r in rows:
+        deduped_rows += len(usage_rows)
+        for r in usage_rows:
             m = by_model[r["model"]]
             m["input"] += r["input"]
             m["output"] += r["output"]
@@ -246,21 +508,29 @@ def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
             m["cache_write"] += r["cache_write"]
             m["total_tokens"] += r["input"] + r["output"] + r["cache_read"] + r["cache_write"]
             m["count"] += 1
-            for t in r["tools"]:
-                by_tool[t]["count"] += 1
-                by_tool[t]["attributed_input"] += r["input"]
+        for name, stats in _attribute_tools(rows).items():
+            by_tool[name]["count"] += stats["count"]
+            by_tool[name]["attributed_input"] += stats["attributed_input"]
+            by_tool[name]["input_growth"] += stats.get("input_growth", 0)
 
     return {
         "source": "local_jsonl",
         "transcript_files": len(jsonl_files),
         "sessions_with_usage": sessions,
-        "by_model": {k: dict(v) for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])},
-        "by_tool": {k: dict(v) for k, v in sorted(by_tool.items(), key=lambda kv: -kv[1]["count"])},
+        "usage_rows_deduped": deduped_rows,
+        "by_model": {
+            k: dict(v)
+            for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])
+        },
+        "by_tool": {
+            k: dict(v) for k, v in sorted(by_tool.items(), key=lambda kv: -kv[1]["count"])
+        },
         "estimate": False,
         "notes": [
             "Local session JSONL only — cloud/web Console usage is not on disk.",
+            "Usage deduped by message.id / requestId (split responses).",
+            "Tool cost attributed to the request carrying tool_result (input growth).",
             "Dollar figures omitted; rank by tokens. List-price $ is not your bill.",
-            "Transcripts expire after cleanupPeriodDays (default 30).",
         ],
     }
 
@@ -268,21 +538,23 @@ def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
 def collect_cursor_tokens(
     roots: Roots,
     csv_path: Optional[Path] = None,
-    use_admin_api: bool = True,
+    use_admin_api: bool = False,
+    admin_start: Optional[str] = None,
+    admin_end: Optional[str] = None,
 ) -> dict[str, Any]:
     notes = [
         "No local token data in the IDE DB — use a dashboard Usage CSV (cloud agents + automations).",
         "Never scrape session tokens from state.vscdb.",
+        "Cloud usage is the priority; local/IDE rows are secondary.",
     ]
     csv_data = None
     if csv_path:
         csv_data = parse_cursor_usage_csv(Path(csv_path))
     else:
-        # Look for usage.csv under --root / fixtures / cwd
         for candidate in (
             roots.project / "usage.csv",
             Path.cwd() / "usage.csv",
-            (Path(roots.home) / "usage.csv"),
+            roots.home / "usage.csv",
         ):
             if candidate.is_file():
                 csv_data = parse_cursor_usage_csv(candidate)
@@ -290,12 +562,14 @@ def collect_cursor_tokens(
 
     admin = None
     if use_admin_api:
-        admin = fetch_cursor_admin_usage()
+        admin = fetch_cursor_admin_usage(start_date=admin_start, end_date=admin_end)
         if admin and admin.get("error"):
-            notes.append(f"Admin API skipped/failed: {admin['error']}")
+            notes.append(f"Admin API failed: {admin['error']}")
             admin = None
         elif admin:
-            notes.append("Included optional Admin API usage-events (key from env).")
+            notes.append("Included opt-in Admin API usage-events (Basic auth).")
+    else:
+        notes.append("Admin API not used (pass --cursor-admin-api to opt in).")
 
     if csv_data and not csv_data.get("error"):
         primary = csv_data
@@ -308,6 +582,8 @@ def collect_cursor_tokens(
             "source": "none",
             "estimate": False,
             "by_model": {},
+            "by_kind": {},
+            "by_max_mode": {},
             "by_tool": {},
             "notes": notes
             + [
@@ -320,6 +596,8 @@ def collect_cursor_tokens(
         "source": source,
         "estimate": False,
         "by_model": primary.get("by_model") or {},
+        "by_kind": primary.get("by_kind") or {},
+        "by_max_mode": primary.get("by_max_mode") or {},
         "by_tool": {},
         "event_count": primary.get("event_count", 0),
         "csv": csv_data.get("source") if csv_data else None,
@@ -328,31 +606,89 @@ def collect_cursor_tokens(
     }
 
 
-def collect_grok_tokens(roots: Roots) -> dict[str, Any]:
-    """
-    Usage page only shows totals. Estimate per bot from message volume in
-    search-index.db (counts + lengths only — never message body text in output)
-    and routine placeholders.
-    """
+def _estimate_runs_per_week(cron: str) -> float:
+    """Rough weekly run count from a cron expression (5-field)."""
+    parts = (cron or "").split()
+    if len(parts) < 5:
+        return 0.0
+    minute, hour, dom, month, dow = parts[:5]
+
+    def _count_field(field: str, max_n: int) -> float:
+        if field == "*":
+            return float(max_n)
+        if "/" in field:
+            # */n
+            base, _, step = field.partition("/")
+            try:
+                step_n = int(step)
+            except ValueError:
+                return 1.0
+            span = max_n if base in ("*", "") else 1
+            return max(1.0, span / step_n)
+        return float(len(field.split(",")))
+
+    per_hour = _count_field(minute, 60) if minute != "*" else 1.0
+    # If minute is */n, runs per hour = 60/n; if specific minutes, count them.
+    if minute == "*":
+        per_hour = 1.0
+    elif minute.startswith("*/"):
+        try:
+            per_hour = 60 / int(minute[2:])
+        except ValueError:
+            per_hour = 1.0
+    else:
+        per_hour = float(len(minute.split(",")))
+
+    if hour == "*":
+        per_day = per_hour * 24
+    elif hour.startswith("*/"):
+        try:
+            per_day = per_hour * (24 / int(hour[2:]))
+        except ValueError:
+            per_day = per_hour
+    else:
+        per_day = per_hour * len(hour.split(","))
+
+    if dow not in ("*", "?"):
+        # Specific weekdays
+        days = len(dow.split(","))
+        return per_day * days
+    if dom not in ("*", "?"):
+        return per_day * len(dom.split(","))  # per month ≈ treat as weekly/4 later
+    return per_day * 7
+
+
+def collect_grok_tokens(
+    roots: Roots,
+    usage_total: Optional[float] = None,
+    usage_period: Optional[str] = None,
+    routines: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
     sand = roots.sand_data
     notes = [
         "ESTIMATE: Grok Bot Usage & Billing shows weekly totals only — no per-bot/tool/model breakdown on disk.",
         "Model choice is host-picked; 'cheaper model' is not a user lever here.",
-        "Lead with 'run routines less often' — docs name schedule as the top lever.",
+        "Ask the user for Usage page numbers (--usage-total / --usage-period) and list routines (--routines-json).",
     ]
     by_bot: dict[str, dict[str, float]] = {}
     if sand and (sand / "search-index.db").is_file():
         db_path = sand / "search-index.db"
+        tmp_copy = None
         try:
-            # Read-only URI
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            # immutable=1 avoids rewriting -shm; fall back to a temp copy.
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
+            except sqlite3.Error:
+                tmp_copy = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+                tmp_copy.close()
+                shutil.copy2(db_path, tmp_copy.name)
+                con = sqlite3.connect(f"file:{tmp_copy.name}?mode=ro", uri=True)
             try:
                 cur = con.execute(
                     "SELECT agent_id, COUNT(*), COALESCE(SUM(LENGTH(body)), 0) "
                     "FROM messages GROUP BY agent_id"
                 )
                 for agent_id, count, total_len in cur.fetchall():
-                    # Do not store message text — only aggregates
                     by_bot[str(agent_id)] = {
                         "message_count": float(count),
                         "chars": float(total_len),
@@ -362,106 +698,160 @@ def collect_grok_tokens(roots: Roots) -> dict[str, Any]:
                 con.close()
         except sqlite3.Error as e:
             notes.append(f"search-index.db unreadable: {type(e).__name__}")
+        finally:
+            if tmp_copy is not None:
+                try:
+                    os.unlink(tmp_copy.name)
+                except OSError:
+                    pass
 
-    # Routine inventory: agents/*/automations may be empty; still report structure
-    routine_count = 0
+    routine_files = 0
     if sand and (sand / "agents").is_dir():
         for auto_dir in (sand / "agents").glob("*/automations"):
             if auto_dir.is_dir():
-                routine_count += sum(1 for _ in auto_dir.iterdir())
+                routine_files += sum(1 for _ in auto_dir.iterdir())
 
-    # Estimate relative cost share by message volume
+    routines = routines or []
+    routine_estimates: list[dict[str, Any]] = []
+    for r in routines:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or r.get("id") or "routine")
+        cron = str(r.get("cron") or r.get("schedule") or "")
+        runs = _estimate_runs_per_week(cron) if cron else float(r.get("runs_per_week") or 0)
+        routine_estimates.append(
+            {"name": name, "cron": cron, "est_runs_per_week": runs}
+        )
+
     total_tokens = sum(v["est_tokens"] for v in by_bot.values()) or 1.0
     for v in by_bot.values():
         v["share"] = round(v["est_tokens"] / total_tokens, 4)
+
+    if usage_total is not None:
+        notes.append(
+            f"User-provided usage total: {usage_total}"
+            + (f" ({usage_period})" if usage_period else "")
+        )
 
     return {
         "source": "estimate_message_volume",
         "estimate": True,
         "by_bot": dict(sorted(by_bot.items(), key=lambda kv: -kv[1]["est_tokens"])),
         "by_model": {},
+        "by_kind": {},
         "by_tool": {},
-        "routine_files_on_disk": routine_count,
-        "notes": notes
-        + [
-            "Ask the user (or bot) for weekly Usage % and routine schedules; multiply routine count × frequency for ranking.",
-            "Ask the bot to list routines from its info pane — they are server-side.",
-        ],
+        "routine_files_on_disk": routine_files,
+        "routines": routine_estimates,
+        "usage_total": usage_total,
+        "usage_period": usage_period,
+        "notes": notes,
     }
 
 
 def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
+    """Only emit numbered savings when measured. Ask-items have saving=0 and ask=True."""
     wins: list[Win] = []
 
     by_model = data.get("by_model") or {}
+    by_kind = data.get("by_kind") or {}
+
+    if by_kind:
+        # Cloud first
+        for kind in ("cloud_agent", "automation", "local"):
+            m = by_kind.get(kind)
+            if not m:
+                continue
+            total = int(m.get("total_tokens") or 0)
+            count = int(m.get("count") or 0)
+            if total <= 0:
+                continue
+            label = {
+                "cloud_agent": "cloud agents",
+                "automation": "automations",
+                "local": "local/IDE",
+            }[kind]
+            wins.append(
+                Win(
+                    title=f"Review {label} spend",
+                    saving_est_tokens=total,
+                    measured=f"{total} tokens across {count} events (kind={kind})",
+                    rationale="Measured from usage CSV/API breakdown by kind",
+                    suggestion=(
+                        "Run less often / narrow triggers"
+                        if kind != "local"
+                        else "Trim context; prefer cheaper models for IDE chats."
+                    ),
+                )
+            )
+
     if by_model:
-        # Sort models by total tokens
         ranked = sorted(by_model.items(), key=lambda kv: -float(kv[1].get("total_tokens") or 0))
         if ranked:
             top_model, top = ranked[0]
-            total = float(top.get("total_tokens") or 0)
+            total = int(top.get("total_tokens") or 0)
+            count = int(top.get("count") or 0)
             if total > 0:
                 wins.append(
                     Win(
-                        title=f"Reduce use of expensive/high-volume model `{top_model}`",
-                        saving_est_tokens=int(total * 0.3),
-                        measured=f"{int(total)} tokens across {int(top.get('count') or 0)} events",
-                        rationale="Highest token volume by model in the usage window",
+                        title=f"Highest-volume model `{top_model}`",
+                        saving_est_tokens=total,
+                        measured=f"{total} tokens across {count} events",
+                        rationale="Measured token volume by model",
                         suggestion="Prefer a cheaper model for routine/automation work when quality allows.",
                     )
                 )
-            # Cache miss opportunity
             for model, m in ranked[:3]:
                 cr = float(m.get("cache_read") or 0)
                 inp = float(m.get("input") or 0)
-                if inp > 0 and cr / max(inp + cr, 1) < 0.2 and inp > 1000:
+                count = int(m.get("count") or 0)
+                if (
+                    count >= CACHE_HIT_MIN_EVENTS
+                    and inp > 1000
+                    and cr / max(inp + cr, 1) < 0.2
+                ):
+                    # Measured gap: input that could have been cache-read
+                    gap = int(inp - cr)
                     wins.append(
                         Win(
-                            title=f"Improve prompt-cache hit rate ({model})",
-                            saving_est_tokens=int(inp * 0.2),
-                            measured=f"cache_read={int(cr)} vs input={int(inp)}",
-                            rationale="Low cache-read share means repeated static context is re-billed",
+                            title=f"Low prompt-cache share ({model})",
+                            saving_est_tokens=max(0, gap),
+                            measured=f"cache_read={int(cr)} vs input={int(inp)} over {count} events",
+                            rationale="Measured cache-read vs input (min sample size applied)",
                             suggestion="Stabilize always-on context; trim volatile prefixes.",
                         )
                     )
 
-        # Automation / cloud agent intensity (admin API fields)
-        auto_events = sum(float(m.get("automations") or 0) for m in by_model.values())
-        cloud_events = sum(float(m.get("cloud_agents") or 0) for m in by_model.values())
-        if auto_events >= 3:
-            wins.append(
-                Win(
-                    title="Run automations less often / narrow triggers",
-                    saving_est_tokens=int(sum(float(m.get("total_tokens") or 0) for m in by_model.values()) * 0.25),
-                    measured=f"{int(auto_events)} automation-linked events",
-                    rationale="Each automation run resends full context",
-                    suggestion="Widen schedule intervals; drop chatty triggers.",
-                )
+    by_max = data.get("by_max_mode") or {}
+    if by_max.get("on") and int(by_max["on"].get("total_tokens") or 0) > 0:
+        total = int(by_max["on"]["total_tokens"])
+        wins.append(
+            Win(
+                title="Max Mode spend",
+                saving_est_tokens=total,
+                measured=f"{total} tokens with Max Mode on ({int(by_max['on'].get('count') or 0)} events)",
+                rationale="Measured Max Mode breakdown from usage CSV",
+                suggestion="Disable Max Mode for routine tasks.",
             )
-        if cloud_events >= 3:
-            wins.append(
-                Win(
-                    title="Tighten cloud-agent usage",
-                    saving_est_tokens=int(sum(float(m.get("total_tokens") or 0) for m in by_model.values()) * 0.2),
-                    measured=f"{int(cloud_events)} cloud-agent/headless events",
-                    rationale="Cloud agents are a primary cloud cost driver",
-                    suggestion="Batch work; avoid repeating the same large context.",
-                )
-            )
+        )
 
     by_tool = data.get("by_tool") or {}
     if by_tool:
-        top_tools = sorted(by_tool.items(), key=lambda kv: -float(kv[1].get("count") or 0))[:3]
+        top_tools = sorted(
+            by_tool.items(),
+            key=lambda kv: -float(kv[1].get("input_growth") or kv[1].get("attributed_input") or 0),
+        )[:3]
         for name, t in top_tools:
-            if float(t.get("count") or 0) < 3:
+            growth = int(t.get("input_growth") or 0)
+            count = int(t.get("count") or 0)
+            if count < 1 or growth <= 0:
                 continue
             wins.append(
                 Win(
-                    title=f"Reduce heavy tool `{name}`",
-                    saving_est_tokens=int(float(t.get("attributed_input") or 0) * 0.15),
-                    measured=f"{int(t.get('count') or 0)} uses; attributed input ~{int(t.get('attributed_input') or 0)}",
-                    rationale="Tool results feed the next request's input tokens",
-                    suggestion="Cache results; prefer smaller tool outputs.",
+                    title=f"Tool `{name}` input growth",
+                    saving_est_tokens=growth,
+                    measured=f"{count} uses; ~{growth} tokens input growth on tool_result requests",
+                    rationale="Attributed to the request carrying the tool_result",
+                    suggestion="Prefer smaller tool outputs; cache results.",
                 )
             )
 
@@ -469,37 +859,72 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
     if by_bot:
         ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
         for agent_id, b in ranked_bots[:3]:
+            est = int(b.get("est_tokens") or 0)
+            if est <= 0:
+                continue
+            label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
             wins.append(
                 Win(
-                    title=f"Lower traffic for bot `{agent_id[:12]}…`" if len(agent_id) > 12 else f"Lower traffic for bot `{agent_id}`",
-                    saving_est_tokens=int(float(b.get("est_tokens") or 0) * 0.3),
-                    measured=f"{int(b.get('message_count') or 0)} messages; ~{int(b.get('est_tokens') or 0)} est. tokens (from text length)",
-                    rationale="Estimated from search-index message volume (not billed tokens)",
-                    suggestion="Narrow routine schedules and chat triggers for this bot.",
+                    title=f"Message volume for bot `{label}`",
+                    saving_est_tokens=est,
+                    measured=f"{int(b.get('message_count') or 0)} messages; ~{est} est. tokens from text length",
+                    rationale="Estimated from search-index aggregates (not billed tokens)",
+                    suggestion="Narrow chat triggers for this bot.",
                 )
             )
-        # Always surface the routine lever for Grok
+
+    routines = data.get("routines") or []
+    if routines:
+        total_runs = sum(float(r.get("est_runs_per_week") or 0) for r in routines)
+        if total_runs > 0:
+            # When user also gave usage_total, allocate proportionally as measured input.
+            usage_total = data.get("usage_total")
+            if usage_total:
+                wins.append(
+                    Win(
+                        title="Routine schedule × count",
+                        saving_est_tokens=int(float(usage_total)),
+                        measured=(
+                            f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week; "
+                            f"usage total {usage_total}"
+                            + (f" ({data.get('usage_period')})" if data.get("usage_period") else "")
+                        ),
+                        rationale="Measured from provided usage total + routine schedules",
+                        suggestion="Widen intervals; drop chatty triggers; skip test runs.",
+                    )
+                )
+            else:
+                wins.append(
+                    Win(
+                        title="Routine schedule × count",
+                        saving_est_tokens=int(total_runs),
+                        measured=f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week",
+                        rationale="Measured from provided --routines-json schedules",
+                        suggestion="Provide --usage-total to convert runs into token/cost share.",
+                    )
+                )
+    elif host == "grok":
+        # No routines provided and none on disk with schedules → ask item, no number.
         wins.append(
             Win(
-                title="Run routines less often / narrow triggers",
-                saving_est_tokens=max(
-                    100,
-                    int(sum(float(b.get("est_tokens") or 0) for b in by_bot.values()) * 0.4),
-                ),
-                measured=f"routine files on disk={data.get('routine_files_on_disk', 0)} (server-side routines may be higher)",
-                rationale="Docs: hourly schedules or busy chat triggers can burn a week of usage in a day",
-                suggestion="Ask the bot to list routines; reduce frequency; skip test runs.",
+                title="List routines and Usage totals",
+                saving_est_tokens=0,
+                measured="no routine schedules provided",
+                rationale="Grok docs name schedule as the top lever, but no measured routine data yet",
+                suggestion="Ask the bot to list routines; ask the user for Usage page numbers; re-run with --routines-json and --usage-total.",
+                ask=True,
             )
         )
 
     if data.get("missing_csv"):
         wins.append(
             Win(
-                title="Provide Cursor Usage CSV to unlock cloud ranking",
+                title="Provide Cursor Usage CSV",
                 saving_est_tokens=0,
                 measured="no CSV / Admin API data",
                 rationale="Cloud usage is the priority source for Cursor",
                 suggestion="Download Usage CSV from the dashboard and re-run with --csv.",
+                ask=True,
             )
         )
 
@@ -509,14 +934,30 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
 def run_token_audit(
     roots: Roots,
     csv_path: Optional[Path] = None,
-    use_admin_api: bool = True,
+    use_admin_api: bool = False,
+    admin_start: Optional[str] = None,
+    admin_end: Optional[str] = None,
+    usage_total: Optional[float] = None,
+    usage_period: Optional[str] = None,
+    routines: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     if roots.host == "claude":
         data = collect_claude_tokens(roots)
     elif roots.host == "cursor":
-        data = collect_cursor_tokens(roots, csv_path=csv_path, use_admin_api=use_admin_api)
+        data = collect_cursor_tokens(
+            roots,
+            csv_path=csv_path,
+            use_admin_api=use_admin_api,
+            admin_start=admin_start,
+            admin_end=admin_end,
+        )
     else:
-        data = collect_grok_tokens(roots)
+        data = collect_grok_tokens(
+            roots,
+            usage_total=usage_total,
+            usage_period=usage_period,
+            routines=routines,
+        )
 
     wins = rank_token_wins(roots.host, data)
     summary: dict[str, Any] = {
@@ -527,12 +968,22 @@ def run_token_audit(
         summary["events"] = data["event_count"]
     if data.get("sessions_with_usage") is not None:
         summary["sessions_with_usage"] = data["sessions_with_usage"]
+    if data.get("usage_rows_deduped") is not None:
+        summary["usage_rows_deduped"] = data["usage_rows_deduped"]
     if data.get("by_model"):
         summary["models"] = len(data["by_model"])
-        top = next(iter(data["by_model"].items()))
+        top = max(data["by_model"].items(), key=lambda kv: kv[1].get("total_tokens") or 0)
         summary["top_model"] = f"{top[0]} ({int(top[1].get('total_tokens') or 0)} tokens)"
+    if data.get("by_kind"):
+        summary["by_kind"] = {
+            k: int(v.get("total_tokens") or 0) for k, v in data["by_kind"].items()
+        }
     if data.get("by_bot"):
         summary["bots"] = len(data["by_bot"])
+    if data.get("usage_total") is not None:
+        summary["usage_total"] = data["usage_total"]
+        if data.get("usage_period"):
+            summary["usage_period"] = data["usage_period"]
 
     return {
         "audit": "token",

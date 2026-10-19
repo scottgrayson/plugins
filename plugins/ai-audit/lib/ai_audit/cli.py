@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -33,6 +34,18 @@ def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_routines(path: Optional[str]) -> Optional[list]:
+    if not path:
+        return None
+    text = Path(path).read_text(encoding="utf-8")
+    data = json.loads(text)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("routines"), list):
+        return data["routines"]
+    raise SystemExit(f"--routines-json must be a list or {{routines: [...]}}: {path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ai-audit",
@@ -53,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument(
             "--root",
             default=None,
-            help="Fixture/root dir containing home/, project/, and/or sand-data/",
+            help="Fixture/root dir containing home/, project/, and/or sand-data/ "
+            "(fully isolates detection — no /home/box fallback)",
         )
         sp.add_argument("--json-only", action="store_true")
         sp.add_argument("--md-only", action="store_true")
@@ -69,9 +83,27 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(t)
     t.add_argument("--csv", default=None, help="Cursor dashboard Usage CSV path")
     t.add_argument(
-        "--no-admin-api",
+        "--cursor-admin-api",
         action="store_true",
-        help="Do not call Cursor Admin API even if CURSOR_ADMIN_API_KEY is set",
+        help="Opt in to Cursor Admin API (also needs CURSOR_ADMIN_API_KEY). Off by default.",
+    )
+    t.add_argument("--admin-start", default=None, help="Admin API startDate (ISO)")
+    t.add_argument("--admin-end", default=None, help="Admin API endDate (ISO)")
+    t.add_argument(
+        "--usage-total",
+        type=float,
+        default=None,
+        help="Pasted Usage page total (e.g. weekly %% or dollars) for Grok estimates",
+    )
+    t.add_argument(
+        "--usage-period",
+        default=None,
+        help="Label for --usage-total (e.g. 'week of 2026-10-13')",
+    )
+    t.add_argument(
+        "--routines-json",
+        default=None,
+        help="JSON file of routines [{name, cron}] from the bot's own list",
     )
 
     f = sub.add_parser("facts", help="Audit memory/facts for stale/duplicate/conflict/orphan")
@@ -104,7 +136,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         payload = run_token_audit(
             roots,
             csv_path=Path(args.csv) if args.csv else None,
-            use_admin_api=not args.no_admin_api,
+            use_admin_api=bool(args.cursor_admin_api),
+            admin_start=args.admin_start,
+            admin_end=args.admin_end,
+            usage_total=args.usage_total,
+            usage_period=args.usage_period,
+            routines=_load_routines(args.routines_json),
         )
         return _emit(payload, token_markdown(payload), args)
 

@@ -1,6 +1,7 @@
 {
   "skills": [
-    {"id": "1", "name": "deploy", "description": "Deploy helper cached description"},
-    {"id": "2", "name": "short-one", "description": "Short"}
+    {"id": "1", "name": "deploy", "description": "Deploy helper cached description that duplicates the workflow"},
+    {"id": "2", "name": "short-one", "description": "Short"},
+    {"id": "3", "name": "cache-only-skill", "description": "Only in managed cache, not in workflows folder"}
   ]
 }

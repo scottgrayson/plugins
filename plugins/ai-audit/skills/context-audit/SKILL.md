@@ -10,19 +10,18 @@ Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, p
 ## Locate the core
 
 ```bash
-AI_AUDIT_BIN="$PWD/plugins/ai-audit/bin/ai-audit"
-# or the installed plugin's bin/ai-audit
-chmod +x "$AI_AUDIT_BIN"
+# From a marketplace checkout:
+bash plugins/ai-audit/bin/ai-audit context --help
+# or: PYTHONPATH=plugins/ai-audit/lib python3 -m ai_audit context --help
 ```
 
 ## Run
 
 ```bash
-"$AI_AUDIT_BIN" context --host auto
-# Force a host / fixture root:
-"$AI_AUDIT_BIN" context --host claude --root path/to/fixture
-"$AI_AUDIT_BIN" context --host cursor --project .
-"$AI_AUDIT_BIN" context --host grok
+bash plugins/ai-audit/bin/ai-audit context --host auto
+bash plugins/ai-audit/bin/ai-audit context --host claude --root path/to/fixture
+bash plugins/ai-audit/bin/ai-audit context --host cursor --project .
+bash plugins/ai-audit/bin/ai-audit context --host grok
 ```
 
 Show the markdown report to the user. Proposed fixes are **suggestions only** — present as a diff; never edit files.

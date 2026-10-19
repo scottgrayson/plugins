@@ -65,20 +65,19 @@ class InventoryItem:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        if not d["meta"]:
-            d.pop("meta", None)
-        return d
+        # Always include meta (may be {}) so consumers can use .get safely.
+        return asdict(self)
 
 
 @dataclass
 class Win:
     title: str
-    saving_est_tokens: int
+    saving_est_tokens: int  # 0 means "ask / check" — no invented number
     measured: str
     rationale: str
     suggestion: str = ""
     path: str = ""
+    ask: bool = False  # True = guidance item without a measured saving
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -226,8 +225,16 @@ def similarity(a: str, b: str) -> float:
 
 
 def rank_wins(wins: Iterable[Win], limit: int = 5) -> list[Win]:
-    ordered = sorted(wins, key=lambda w: (-w.saving_est_tokens, w.title))
-    return ordered[: max(3, min(limit, len(ordered))) ] if ordered else []
+    """Measured savings first (desc), then ask/check items. Never invent numbers."""
+    wins_list = list(wins)
+    measured = [w for w in wins_list if not w.ask and w.saving_est_tokens > 0]
+    asks = [w for w in wins_list if w.ask or w.saving_est_tokens <= 0]
+    measured_sorted = sorted(measured, key=lambda w: (-w.saving_est_tokens, w.title))
+    asks_sorted = sorted(asks, key=lambda w: w.title)
+    ordered = measured_sorted + asks_sorted
+    if not ordered:
+        return []
+    return ordered[: min(limit, len(ordered))]
 
 
 def today_utc() -> date:

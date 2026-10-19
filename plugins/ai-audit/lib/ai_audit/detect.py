@@ -16,6 +16,7 @@ class Roots:
     sand_data: Optional[Path] = None
     claude_home: Optional[Path] = None
     cursor_home: Optional[Path] = None
+    isolated: bool = False  # True when --root fully isolates detection
 
     def to_dict(self) -> dict:
         return {
@@ -25,6 +26,7 @@ class Roots:
             "sand_data": str(self.sand_data) if self.sand_data else None,
             "claude_home": str(self.claude_home) if self.claude_home else None,
             "cursor_home": str(self.cursor_home) if self.cursor_home else None,
+            "isolated": self.isolated,
         }
 
 
@@ -44,58 +46,60 @@ def detect_host(
     """
     Resolve host and filesystem roots.
 
-    --root can point at a fixture that contains home/, project/, and/or sand-data/.
+    --root points at a fixture/root that contains home/, project/, and/or
+    sand-data/. When set, detection is fully isolated: no fallback to
+    /home/box/*, real $HOME, or env sand-data outside that tree.
     """
-    home_path = Path(home or os.environ.get("HOME", "/")).expanduser()
-    project_path = Path(project or os.getcwd()).resolve()
+    isolated = root is not None
+    sand: Optional[Path] = None
 
-    sand = None
-    claude_home = None
-    cursor_home = None
+    if isolated:
+        root_path = Path(root).resolve()
+        # Fixture layouts only — never leave the root.
+        if (root_path / "home").is_dir():
+            home_path = root_path / "home"
+        elif (root_path / ".claude").is_dir() or (root_path / ".cursor").is_dir():
+            home_path = root_path
+        else:
+            # Do not fall back to real $HOME — stay inside --root.
+            home_path = root_path
 
-    if root is not None:
-        root = Path(root).resolve()
-        # Fixture layouts:
-        #   root/home/.claude  root/project/...
-        #   root/sand-data/...
-        #   root/.claude (treat root as home)
-        if (root / "home").is_dir():
-            home_path = root / "home"
-        elif (root / ".claude").is_dir() or (root / ".cursor").is_dir():
-            home_path = root
-        if (root / "project").is_dir():
-            project_path = root / "project"
-        if (root / "sand-data").is_dir():
-            sand = root / "sand-data"
-        elif (root / "workflows").is_dir() and (root / "agents").is_dir():
-            sand = root
+        if (root_path / "project").is_dir():
+            project_path = root_path / "project"
+        else:
+            project_path = root_path
 
-    # Env overrides for sand-data / box paths.
-    env_sand = os.environ.get("AI_AUDIT_SAND_DATA") or os.environ.get("GROK_BOT_DATA")
-    if env_sand:
-        sand = Path(env_sand)
+        if (root_path / "sand-data").is_dir():
+            sand = root_path / "sand-data"
+        elif (root_path / "workflows").is_dir() and (root_path / "agents").is_dir():
+            sand = root_path
+        # Intentionally ignore AI_AUDIT_SAND_DATA / /home/box/* when isolated.
+    else:
+        home_path = Path(home or os.environ.get("HOME", "/")).expanduser()
+        project_path = Path(project or os.getcwd()).resolve()
 
-    # Well-known Grok Bot paths (feature-detect; may change).
-    if sand is None:
-        sand = _exists_dir(
-            Path("/home/box/sand-data"),
-            Path("/home/box/agent-data"),
-            home_path / "sand-data",
-        )
+        env_sand = os.environ.get("AI_AUDIT_SAND_DATA") or os.environ.get("GROK_BOT_DATA")
+        if env_sand:
+            sand = Path(env_sand)
+        else:
+            sand = _exists_dir(
+                Path("/home/box/sand-data"),
+                Path("/home/box/agent-data"),
+                home_path / "sand-data",
+            )
 
     claude_home = home_path / ".claude"
     cursor_home = home_path / ".cursor"
 
     forced = (host or "auto").lower().strip()
     if forced in ("claude", "claude-code", "anthropic"):
-        return Roots("claude", home_path, project_path, sand, claude_home, cursor_home)
+        return Roots("claude", home_path, project_path, sand, claude_home, cursor_home, isolated)
     if forced in ("cursor",):
-        return Roots("cursor", home_path, project_path, sand, claude_home, cursor_home)
+        return Roots("cursor", home_path, project_path, sand, claude_home, cursor_home, isolated)
     if forced in ("grok", "grok-bot", "bot"):
-        return Roots("grok", home_path, project_path, sand, claude_home, cursor_home)
+        return Roots("grok", home_path, project_path, sand, claude_home, cursor_home, isolated)
 
-    # Auto-detect priority: explicit sand-data with workflows → grok;
-    # else .claude denser than .cursor → claude; else cursor if present; else claude.
+    # Auto-detect from roots only (already isolated when --root set).
     score = {"claude": 0, "cursor": 0, "grok": 0}
     if sand and (sand / "workflows").is_dir():
         score["grok"] += 5
@@ -107,7 +111,7 @@ def detect_host(
         score["claude"] += 2
         if (claude_home / "projects").is_dir():
             score["claude"] += 2
-        if list(claude_home.glob("CLAUDE.md")) or (project_path / "CLAUDE.md").is_file():
+        if (claude_home / "CLAUDE.md").is_file() or (project_path / "CLAUDE.md").is_file():
             score["claude"] += 1
     if cursor_home.is_dir():
         score["cursor"] += 2
@@ -121,4 +125,4 @@ def detect_host(
     best = max(score, key=lambda k: score[k])
     if score[best] == 0:
         best = "claude"
-    return Roots(best, home_path, project_path, sand, claude_home, cursor_home)
+    return Roots(best, home_path, project_path, sand, claude_home, cursor_home, isolated)

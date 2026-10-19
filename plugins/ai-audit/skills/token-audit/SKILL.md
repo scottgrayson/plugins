@@ -5,53 +5,54 @@ description: Find where token cost comes from by bot/agent, routine/automation, 
 
 # token-audit
 
-Attribute token cost and rank 3–5 wins (run less often, cheaper model, trim context). **Priority: cloud usage first, local second.**
+Attribute token cost and rank 3–5 wins. **Priority: cloud usage first, local second.** Never invent savings numbers — measured wins only; otherwise ask/check items.
 
 ## Locate the core
 
+From a marketplace checkout:
+
 ```bash
-AI_AUDIT_BIN="$PWD/plugins/ai-audit/bin/ai-audit"
-chmod +x "$AI_AUDIT_BIN"
+python3 -m ai_audit token --help
+# or:
+bash plugins/ai-audit/bin/ai-audit token --help
 ```
+
+Set `PYTHONPATH=plugins/ai-audit/lib` when invoking `python3 -m ai_audit`.
 
 ## Run by host
 
 ### Cursor (cloud CSV first)
 
-Ask the user to download the Usage CSV from the Cursor dashboard (covers cloud agents and automations; there is no local token data). Then:
+Ask the user to download the Usage CSV from the Cursor dashboard, then:
 
 ```bash
-"$AI_AUDIT_BIN" token --host cursor --csv ~/Downloads/usage.csv --no-admin-api
+bash plugins/ai-audit/bin/ai-audit token --host cursor --csv ~/Downloads/usage.csv
 ```
 
-Optional team Admin API: if `CURSOR_ADMIN_API_KEY` is set, the core may call `filtered-usage-events`. **Never require it.** Never scrape session tokens from `state.vscdb`.
+Optional Admin API (opt-in only): `--cursor-admin-api` **and** `CURSOR_ADMIN_API_KEY`. Uses Basic auth, supports `--admin-start` / `--admin-end`, paginates. Never scrape `state.vscdb`.
 
 ### Grok Bot (estimate)
 
-Usage page shows totals only. The core estimates per-bot cost from message volume × routine schedule and **labels it as an estimate**:
+Ask the user for Usage & Billing numbers, and list the bot's own routines. Then:
 
 ```bash
-"$AI_AUDIT_BIN" token --host grok
+bash plugins/ai-audit/bin/ai-audit token --host grok \
+  --usage-total 72 --usage-period "week of 2026-10-13" \
+  --routines-json /tmp/routines.json
 ```
 
-Ask for weekly Usage % / on-demand numbers and for the bot to list routine schedules.
+`routines.json` shape: `[{"name":"hourly","cron":"0 * * * *"}]`. Without these, the report asks you to collect them (no invented token number).
 
-### Claude Code (local JSONL + optional cloud)
+### Claude Code
 
 ```bash
-"$AI_AUDIT_BIN" token --host claude
+bash plugins/ai-audit/bin/ai-audit token --host claude
 ```
 
-Parses `~/.claude/projects/**/*.jsonl` usage fields. Ask the user to paste `/usage` or Console/web figures when they want cloud attribution.
-
-## Rules
-
-- Read-only; suggestions only.
-- Never print API keys or secret config values.
-- Rank by measured tokens (or clearly labeled estimates).
+Parses local JSONL (deduped by message.id/requestId). Tool cost is attributed to the request that carries the tool_result.
 
 ## Schedule as a routine
 
-- **Grok Bot:** weekly routine: “Run token-audit; lead with routine-frequency wins; label estimates.”
-- **Cursor:** weekly automation after the user drops a fresh Usage CSV into a known path, or remind them to export first.
-- **Claude Code:** scheduled task running `ai-audit token --host claude` and summarizing top models/tools.
+- **Grok Bot:** weekly: “Run token-audit; ask for Usage totals and list routines; label estimates.”
+- **Cursor:** weekly after a fresh Usage CSV export.
+- **Claude Code:** scheduled task running `ai_audit token --host claude`.

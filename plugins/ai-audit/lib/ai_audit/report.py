@@ -18,12 +18,16 @@ def wins_markdown(wins: list[dict[str, Any]], heading: str = "Biggest wins") -> 
         return lines
     for i, w in enumerate(wins, 1):
         title = w.get("title") or "win"
-        saving = w.get("saving_est_tokens", 0)
+        saving = int(w.get("saving_est_tokens") or 0)
+        ask = bool(w.get("ask")) or saving <= 0
         measured = w.get("measured") or ""
         rationale = w.get("rationale") or ""
         suggestion = w.get("suggestion") or ""
         path = w.get("path") or ""
-        lines.append(f"{i}. **{title}** — ~{saving} est. tokens")
+        if ask and saving <= 0:
+            lines.append(f"{i}. **{title}** — ask / check (no measured saving)")
+        else:
+            lines.append(f"{i}. **{title}** — ~{saving} est. tokens")
         if measured:
             lines.append(f"   - Measured: {measured}")
         if path:
@@ -72,6 +76,7 @@ def token_markdown(payload: dict[str, Any]) -> str:
     host = payload.get("host", "unknown")
     wins = payload.get("wins") or []
     summary = payload.get("summary") or {}
+    notes = payload.get("notes") or []
     estimate = bool(payload.get("estimate"))
     lines = [
         f"# Token audit ({host})",
@@ -90,15 +95,18 @@ def token_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- {k}: {v}")
         lines.append("")
     lines.extend(wins_markdown(wins))
-    lines.extend(
-        [
-            "## Notes",
-            "",
-            "- Priority: cloud/dashboard usage first, local transcripts second.",
-            "- Never scrape login tokens from app databases; use a downloaded CSV or optional Admin API key via env.",
-            "",
-        ]
-    )
+    lines.append("## Notes")
+    lines.append("")
+    if notes:
+        for n in notes:
+            lines.append(f"- {n}")
+    else:
+        lines.append("- Priority: cloud/dashboard usage first, local transcripts second.")
+        lines.append(
+            "- Never scrape login tokens from app databases; use a downloaded CSV "
+            "or opt-in Admin API (`--cursor-admin-api`)."
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -127,6 +135,9 @@ def facts_markdown(payload: dict[str, Any]) -> str:
             detail = iss.get("detail", "")
             when = iss.get("date") or ""
             extra = f" ({when})" if when else ""
+            # detail already truncated by collector; keep a hard cap
+            if len(detail) > 200:
+                detail = detail[:199] + "…"
             lines.append(f"- `{kind}`{extra}: {detail}")
             if path:
                 lines.append(f"  - `{path}`")
@@ -136,6 +147,7 @@ def facts_markdown(payload: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- Read-only: propose edits as a diff; do not edit memory without approval.",
+            "- Fact quotes are capped (~80 chars) for public-repo safety.",
             "",
         ]
     )

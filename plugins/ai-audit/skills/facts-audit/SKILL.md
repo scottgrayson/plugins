@@ -10,17 +10,17 @@ Scan saved memory/facts for stale dates, duplicates, conflicts, and orphans. Out
 ## Locate the core
 
 ```bash
-AI_AUDIT_BIN="$PWD/plugins/ai-audit/bin/ai-audit"
-chmod +x "$AI_AUDIT_BIN"
+bash plugins/ai-audit/bin/ai-audit facts --help
+# or: PYTHONPATH=plugins/ai-audit/lib python3 -m ai_audit facts --help
 ```
 
 ## Run
 
 ```bash
-"$AI_AUDIT_BIN" facts --host auto --stale-days 30
-"$AI_AUDIT_BIN" facts --host grok --stale-days 14
-"$AI_AUDIT_BIN" facts --host claude
-"$AI_AUDIT_BIN" facts --host cursor --memories path/to/exported-memories.mdc
+bash plugins/ai-audit/bin/ai-audit facts --host auto --stale-days 30
+bash plugins/ai-audit/bin/ai-audit facts --host grok --stale-days 14
+bash plugins/ai-audit/bin/ai-audit facts --host claude
+bash plugins/ai-audit/bin/ai-audit facts --host cursor --memories path/to/exported-memories.mdc
 ```
 
 ### Host notes
