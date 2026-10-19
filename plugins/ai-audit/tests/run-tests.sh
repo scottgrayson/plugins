@@ -208,6 +208,9 @@ assert_ge "pnpm/npm conflict from prose" \
 assert_ge "non-bullet fact from package-policy" \
   "$(py_get "$TMP/claude-facts.json" 'sum(1 for f in data["facts"] if "package-policy" in f["path"] and "pnpm" in f["text"].lower())')" \
   1
+assert_eq "short prose line Use pnpm, not npm." \
+  "$(py_get "$TMP/claude-facts.json" 'sum(1 for f in data["facts"] if f["text"].strip()=="Use pnpm, not npm.")')" \
+  "1"
 
 py_check "polarity word-boundary" <<PY
 import sys
@@ -334,6 +337,12 @@ echo "== E. Grok cache wins not user-editable =="
 assert_contains "cache win suggests uninstall" \
   "$(py_get "$TMP/grok-context.json" 'next((w.get("suggestion","") for w in data["wins"] if "plugin" in w["title"].lower() or "managed" in w["title"].lower() or "Unload" in w["title"]), "")')" \
   "Uninstall"
+assert_contains "cache win saving depends on uninstall" \
+  "$(py_get "$TMP/grok-context.json" 'next((w.get("method","") for w in data["wins"] if "Unload" in w["title"] or "managed" in w["title"].lower() or "plugin" in w["title"].lower()), "")')" \
+  "depends on which you uninstall"
+assert_eq "cache win does not claim full listing" \
+  "$(py_get "$TMP/grok-context.json" 'next((w["saving_est_tokens"]==0 for w in data["wins"] if "Unload" in w["title"]), False)')" \
+  "True"
 assert_contains "bot desc suggests edit bot" \
   "$(py_get "$TMP/grok-context.json" 'next((w.get("suggestion","") for w in data["wins"] if "bot description" in w["title"].lower()), "")')" \
   "bot description"
@@ -345,6 +354,109 @@ assert_eq "max mode is ask/unknown" \
 assert_contains "max mode method mentions surcharge" \
   "$(py_get "$TMP/cursor-token.json" 'next(w.get("method","") for w in data["wins"] if "Max Mode" in w["title"])')" \
   "surcharge"
+
+echo "== round3: ledger / same-model / tool fraction / grok bot =="
+py_check "savings sum never exceeds total (fixtures + synthetic)" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from pathlib import Path
+from ai_audit.detect import detect_host
+from ai_audit.token_audit import (
+    rank_token_wins,
+    run_token_audit,
+    TOOL_RESULT_TRIM_FRAC,
+    _token_volume_budget,
+)
+
+FIX = Path("$FIX")
+
+def check(label, data, wins):
+    budget = _token_volume_budget(data)
+    total = sum(int(w.get("saving_est_tokens") or 0) for w in wins)
+    assert total <= budget, f"{label}: savings {total} > budget {budget}"
+
+# Synthetic: without a shared ledger, model half + 100% tool growth would exceed total.
+synthetic = {
+    "by_model": {"opus": {"total_tokens": 10000, "count": 2, "input": 8000, "cache_read": 0}},
+    "by_kind": {},
+    "by_tool": {
+        "Read": {"input_growth": 9000, "count": 1},
+        "Bash": {"input_growth": 8000, "count": 1},
+    },
+}
+sw = [w.to_dict() for w in rank_token_wins("claude", synthetic)]
+check("synthetic", synthetic, sw)
+tool_wins = [w for w in sw if "Shrink tool" in w["title"]]
+assert tool_wins, sw
+for w in tool_wins:
+    assert "trim tool result size by ~50%" in (w.get("method") or ""), w
+    # Must not claim 100% of growth
+    assert w["saving_est_tokens"] < 9000 or TOOL_RESULT_TRIM_FRAC < 1.0
+# Without ledger: 5000 + 9000 + 8000 = 22000 > 10000
+assert sum(w["saving_est_tokens"] for w in sw) <= 10000
+
+for host, extra in (
+    ("claude", {}),
+    ("cursor", {"csv_path": FIX / "cursor" / "usage.csv"}),
+    ("grok", {}),
+):
+    roots = detect_host(host, root=FIX / host)
+    out = run_token_audit(roots, **extra)
+    check(host, out["data"], out["wins"])
+PY
+
+# Cursor model residual must ignore other-model automation claims
+py_check "cursor model overlap is same-model only" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from pathlib import Path
+from ai_audit.token_audit import parse_cursor_usage_csv, rank_token_wins
+
+d = parse_cursor_usage_csv(Path("$FIX/cursor/usage.csv"))
+# Attach by_model_kind as collect_cursor_tokens would
+data = {
+    "by_model": d["by_model"],
+    "by_kind": d["by_kind"],
+    "by_max_mode": d["by_max_mode"],
+    "by_model_kind": d["by_model_kind"],
+    "by_tool": {},
+}
+wins = rank_token_wins("cursor", data)
+model_win = next(w for w in wins if "cheaper model" in w.title and "gpt-5" in w.title)
+# Same-model kind claims for gpt-5:
+# cloud all gpt-5: 39300/2=19650; gpt-5 automation 5400 → portion of automation saving
+auto_saving = int(d["by_kind"]["automation"]["total_tokens"]) // 2
+gpt5_auto = float(d["by_model_kind"]["gpt-5"].get("automation") or 0)
+auto_total = float(d["by_kind"]["automation"]["total_tokens"])
+same = 19650 + int(round(auto_saving * (gpt5_auto / auto_total)))
+# Must NOT subtract full automation saving (which includes claude-sonnet)
+wrong_same = 19650 + auto_saving
+assert same < wrong_same, (same, wrong_same)
+residual = int(d["by_model"]["gpt-5"]["total_tokens"]) - same
+expected = residual // 2
+# Allow ledger cap vs other wins; saving should be based on same-model residual, not wrong_same
+assert "same-model" in (model_win.overlaps or model_win.method), model_win
+assert model_win.saving_est_tokens == expected or model_win.saving_est_tokens <= expected, (
+    model_win.saving_est_tokens, expected, same, wrong_same
+)
+PY
+
+assert_contains "grok bot win uses context x messages" \
+  "$(py_get "$TMP/grok-token.json" 'next((w.get("method","") for w in data["wins"] if "context" in w["title"].lower() or "bot" in w["title"].lower()), "")')" \
+  "message count"
+assert_eq "grok bot win not arbitrary half volume" \
+  "$(py_get "$TMP/grok-token.json" 'any("cut message volume ~50%" in (w.get("method") or "") for w in data["wins"])')" \
+  "False"
+
+assert_contains "claude tool win claims fraction not 100%" \
+  "$(py_get "$TMP/claude-token.json" 'next((w.get("method","") for w in data["wins"] if "Shrink tool" in w["title"]), "")')" \
+  "trim tool result size by ~50%"
+assert_eq "claude savings sum <= total" \
+  "$(py_get "$TMP/claude-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())')" \
+  "True"
+assert_eq "cursor savings sum <= total" \
+  "$(py_get "$TMP/cursor-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())')" \
+  "True"
 
 echo "== baseline =="
 assert_ge "claude inventory" "$(py_get "$TMP/claude-context.json" 'len(data["inventory"])')" 8

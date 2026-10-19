@@ -17,11 +17,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .common import Win, est_tokens, is_secret_path, rank_wins, safe_read_text
+from .common import (
+    Win,
+    est_tokens,
+    is_secret_path,
+    load_json_safe,
+    rank_wins,
+    safe_read_text,
+)
 from .detect import Roots
 
 # Minimum events before suggesting a cache-hit win (avoid single-subagent noise).
 CACHE_HIT_MIN_EVENTS = 5
+# Fraction of measured tool-result prompt growth claimed as a trim saving.
+TOOL_RESULT_TRIM_FRAC = 0.5
 
 
 def _norm_header(h: str) -> str:
@@ -117,6 +126,7 @@ def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
     by_model: dict[str, dict[str, float]] = defaultdict(empty)
     by_kind: dict[str, dict[str, float]] = defaultdict(empty)
     by_max_mode: dict[str, dict[str, float]] = defaultdict(empty)
+    by_model_kind: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
     for raw in reader:
         row = {_norm_header(k or ""): (v or "").strip() for k, v in raw.items()}
@@ -199,6 +209,7 @@ def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
             m["total_tokens"] += total
             m["cost"] += cost
             m["count"] += 1
+        by_model_kind[model][kind] += total
 
     def _sorted(d: dict) -> dict:
         return {
@@ -213,6 +224,9 @@ def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
         "by_model": _sorted(by_model),
         "by_kind": _sorted(by_kind),
         "by_max_mode": _sorted(by_max_mode),
+        "by_model_kind": {
+            m: dict(kinds) for m, kinds in sorted(by_model_kind.items())
+        },
     }
 
 
@@ -247,6 +261,7 @@ def fetch_cursor_admin_usage(
     }
     by_model: dict[str, dict[str, float]] = defaultdict(empty)
     by_kind: dict[str, dict[str, float]] = defaultdict(empty)
+    by_model_kind: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     all_events: list = []
     page = 1
     page_size = 100
@@ -295,19 +310,21 @@ def fetch_cursor_admin_usage(
                 kind = "automation"
             elif ev.get("cloudAgentId") or ev.get("isHeadless"):
                 kind = "cloud_agent"
+            row_total = inp + out + cr + cw
             for bucket, key_name in ((by_model, model), (by_kind, kind)):
                 m = bucket[key_name]
                 m["input"] += inp
                 m["output"] += out
                 m["cache_read"] += cr
                 m["cache_write"] += cw
-                m["total_tokens"] += inp + out + cr + cw
+                m["total_tokens"] += row_total
                 m["cost"] += cost
                 m["count"] += 1
                 if kind == "automation":
                     m["automations"] = m.get("automations", 0) + 1
                 if kind == "cloud_agent":
                     m["cloud_agents"] = m.get("cloud_agents", 0) + 1
+            by_model_kind[model][kind] += row_total
 
         # Stop when a short page arrives or pagination metadata says done.
         total_pages = data.get("totalPages") or data.get("pageCount")
@@ -332,6 +349,9 @@ def fetch_cursor_admin_usage(
         "event_count": len(all_events),
         "by_model": clean_model,
         "by_kind": clean_kind,
+        "by_model_kind": {
+            m: dict(kinds) for m, kinds in sorted(by_model_kind.items())
+        },
         "by_max_mode": {},
         "events": [],
         "pages_fetched": page,
@@ -636,6 +656,7 @@ def collect_cursor_tokens(
         "by_model": primary.get("by_model") or {},
         "by_kind": primary.get("by_kind") or {},
         "by_max_mode": primary.get("by_max_mode") or {},
+        "by_model_kind": primary.get("by_model_kind") or {},
         "by_tool": {},
         "event_count": primary.get("event_count", 0),
         "csv": csv_data.get("source") if csv_data else None,
@@ -760,6 +781,23 @@ def collect_grok_tokens(
             {"name": name, "cron": cron, "est_runs_per_week": runs}
         )
 
+    # Always-loaded context per bot (description + that bot's memory) × messages
+    # is a measurable lever for "trim this bot's context".
+    if sand:
+        for agent_id, stats in by_bot.items():
+            always_bytes = 0
+            profile = sand / "agents" / agent_id / "profile.json"
+            pdata = load_json_safe(profile) if profile.is_file() else None
+            if isinstance(pdata, dict):
+                always_bytes += len(str(pdata.get("description") or "").encode("utf-8"))
+            mem = sand / "user-memory" / "by-agent" / agent_id / "profile.md"
+            if mem.is_file():
+                always_bytes += mem.stat().st_size
+            always_tok = float(est_tokens(always_bytes))
+            msg_n = float(stats.get("message_count") or 0)
+            stats["always_context_tokens"] = always_tok
+            stats["context_x_messages"] = always_tok * msg_n
+
     total_tokens = sum(v["est_tokens"] for v in by_bot.values()) or 1.0
     for v in by_bot.values():
         v["share"] = round(v["est_tokens"] / total_tokens, 4)
@@ -785,16 +823,55 @@ def collect_grok_tokens(
     }
 
 
+def _token_volume_budget(data: dict[str, Any]) -> int:
+    """Total measured token volume used as the savings ceiling."""
+    by_model = data.get("by_model") or {}
+    if by_model:
+        return int(sum(float(v.get("total_tokens") or 0) for v in by_model.values()))
+    if data.get("usage_total") is not None:
+        return max(0, int(float(data["usage_total"])))
+    by_bot = data.get("by_bot") or {}
+    if by_bot:
+        return int(sum(float(v.get("est_tokens") or 0) for v in by_bot.values()))
+    by_kind = data.get("by_kind") or {}
+    return int(sum(float(v.get("total_tokens") or 0) for v in by_kind.values()))
+
+
+class _ClaimedLedger:
+    """Shared savings ledger so reported savings never exceed measured volume."""
+
+    def __init__(self, budget: int) -> None:
+        self.budget = max(0, int(budget))
+        self.claimed = 0
+        self.by_model: dict[str, int] = defaultdict(int)
+
+    def remaining(self) -> int:
+        return max(0, self.budget - self.claimed)
+
+    def claim(self, amount: int, *, model: Optional[str] = None) -> int:
+        amt = max(0, int(amount))
+        amt = min(amt, self.remaining())
+        self.claimed += amt
+        if model and amt:
+            self.by_model[model] += amt
+        return amt
+
+    def same_model_claimed(self, model: str) -> int:
+        return int(self.by_model.get(model, 0))
+
+
 def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
     """
     Emit savings that estimate what a change would save (with method stated),
-    not raw totals. Overlapping volumes are not double-counted as savings.
+    not raw totals. Every positive saving goes through one claimed-tokens ledger
+    so the sum of savings can never exceed measured total volume.
     """
     wins: list[Win] = []
-    claimed = 0  # tokens already claimed as savings (overlap guard)
+    ledger = _ClaimedLedger(_token_volume_budget(data))
 
     by_model = data.get("by_model") or {}
     by_kind = data.get("by_kind") or {}
+    by_model_kind: dict[str, dict[str, float]] = data.get("by_model_kind") or {}
 
     # Cloud / automation first: estimate halving frequency.
     for kind in ("cloud_agent", "automation"):
@@ -806,8 +883,18 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
         if total <= 0:
             continue
         label = "cloud agents" if kind == "cloud_agent" else "automations"
-        saving = max(0, total // 2)
-        claimed += saving
+        desired = max(0, total // 2)
+        saving = ledger.claim(desired)
+        # Attribute the *actual* claim to models that contributed (same-model overlap only).
+        if by_model_kind and total > 0 and saving > 0:
+            for model, kinds in by_model_kind.items():
+                share = float(kinds.get(kind) or 0)
+                if share <= 0:
+                    continue
+                ledger.by_model[model] += int(round(saving * (share / total)))
+        overlaps = ""
+        if saving < desired:
+            overlaps = f"capped by ledger (wanted {desired})"
         wins.append(
             Win(
                 title=f"Run {label} less often",
@@ -816,6 +903,7 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 rationale="Cloud usage is the priority lever",
                 suggestion="Widen schedules; drop chatty triggers; skip test runs.",
                 method="estimate: cut run frequency ~50% → ~half of measured volume",
+                overlaps=overlaps,
             )
         )
 
@@ -859,10 +947,22 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
         total = int(top.get("total_tokens") or 0)
         count = int(top.get("count") or 0)
         if total > 0:
-            # Cheaper-model delta unknown without prices; estimate half of *unclaimed* volume.
-            residual = max(0, total - claimed)
+            # Only subtract overlap claimed against *this* model (not other models' kind wins).
+            same_claimed = ledger.same_model_claimed(top_model)
+            residual = max(0, total - same_claimed)
             if residual > 0:
-                saving = residual // 2
+                desired = residual // 2
+                saving = ledger.claim(desired, model=top_model)
+                overlaps = (
+                    f"overlaps same-model kind wins by ~{same_claimed} tokens"
+                    if same_claimed
+                    else "Overlap ~0"
+                )
+                if saving < desired:
+                    overlaps = (
+                        (overlaps + "; " if overlaps else "")
+                        + f"capped by ledger (wanted {desired})"
+                    )
                 wins.append(
                     Win(
                         title=f"Move some `{top_model}` work to a cheaper model",
@@ -871,10 +971,10 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                         rationale="Highest token volume by model",
                         suggestion="Prefer a cheaper model for routine/automation work when quality allows.",
                         method=(
-                            "estimate: move ~half of residual volume (after kind wins) "
+                            "estimate: move ~half of residual volume (after same-model kind wins) "
                             "to a cheaper model; price delta unknown so tokens≈proxy"
                         ),
-                        overlaps=f"overlaps kind wins by ~{min(total, claimed)} tokens already claimed",
+                        overlaps=overlaps,
                     )
                 )
             else:
@@ -883,11 +983,11 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                         title=f"Highest-volume model `{top_model}`",
                         saving_est_tokens=0,
                         measured=f"total volume {total} tokens across {count} events",
-                        rationale="Volume already covered by kind/frequency wins",
+                        rationale="Volume already covered by same-model kind/frequency wins",
                         suggestion="Prefer a cheaper model when quality allows.",
-                        method="saving unknown — overlaps prior kind wins",
+                        method="saving unknown — overlaps prior same-model kind wins",
                         ask=True,
-                        overlaps="fully overlapped by kind savings claims",
+                        overlaps=f"fully overlapped by same-model claims (~{same_claimed})",
                     )
                 )
         for model, m in ranked[:3]:
@@ -900,14 +1000,20 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 and cr / max(inp + cr, 1) < 0.2
             ):
                 gap = int(inp - cr)
+                desired = max(0, gap)
+                saving = ledger.claim(desired, model=model)
+                overlaps = ""
+                if saving < desired:
+                    overlaps = f"capped by ledger (wanted {desired}); overlaps prior claims"
                 wins.append(
                     Win(
                         title=f"Improve prompt-cache hit rate ({model})",
-                        saving_est_tokens=max(0, gap),
+                        saving_est_tokens=saving,
                         measured=f"cache_read={int(cr)} vs input={int(inp)} over {count} events",
                         rationale="Low cache-read share means repeated static context is re-billed",
                         suggestion="Stabilize always-on context; trim volatile prefixes.",
                         method="estimate: cache_read gap (input − cache_read) if hit rate approaches input",
+                        overlaps=overlaps,
                     )
                 )
 
@@ -917,52 +1023,48 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
             by_tool.items(),
             key=lambda kv: -float(kv[1].get("input_growth") or kv[1].get("attributed_input") or 0),
         )[:3]
+        pct = int(TOOL_RESULT_TRIM_FRAC * 100)
         for name, t in top_tools:
             growth = int(t.get("input_growth") or 0)
             count = int(t.get("count") or 0)
             if count < 1 or growth <= 0:
                 continue
+            desired = int(growth * TOOL_RESULT_TRIM_FRAC)
+            saving = ledger.claim(desired)
+            overlaps = ""
+            if saving < desired:
+                overlaps = f"capped by ledger (wanted {desired}); overlaps prior claims"
             wins.append(
                 Win(
                     title=f"Shrink tool `{name}` results",
-                    saving_est_tokens=growth,
-                    measured=f"{count} uses; ~{growth} prompt-token growth on tool_result requests",
-                    rationale="Attributed to the request carrying the tool_result (incl. cache tokens)",
-                    suggestion="Prefer smaller tool outputs; cache results.",
-                    method="measured: next-request prompt growth (input+cache_read+cache_write)",
-                )
-            )
-
-    by_bot = data.get("by_bot") or {}
-    if by_bot:
-        ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
-        for agent_id, b in ranked_bots[:2]:
-            est = int(b.get("est_tokens") or 0)
-            if est <= 0:
-                continue
-            label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
-            saving = est // 2
-            wins.append(
-                Win(
-                    title=f"Lower traffic for bot `{label}`",
                     saving_est_tokens=saving,
                     measured=(
-                        f"{int(b.get('message_count') or 0)} messages; "
-                        f"~{est} est. tokens from text length"
+                        f"{count} uses; ~{growth} prompt-token growth on tool_result requests "
+                        f"(total volume); claiming ~{pct}% trim"
                     ),
-                    rationale="Estimated from search-index aggregates (not billed tokens)",
-                    suggestion="Narrow chat triggers for this bot.",
-                    method="estimate: cut message volume ~50%",
+                    rationale="Attributed to the request carrying the tool_result (incl. cache tokens)",
+                    suggestion="Prefer smaller tool outputs; cache results.",
+                    method=(
+                        f"estimate: trim tool result size by ~{pct}% of measured "
+                        "prompt growth (input+cache_read+cache_write)"
+                    ),
+                    overlaps=overlaps,
                 )
             )
 
+    # Routines before per-bot wins: schedule is Grok's top lever, and when
+    # --usage-total is set it defines the ledger budget.
     routines = data.get("routines") or []
     if routines:
         total_runs = sum(float(r.get("est_runs_per_week") or 0) for r in routines)
         if total_runs > 0:
             usage_total = data.get("usage_total")
             if usage_total:
-                saving = int(float(usage_total) * 0.5)
+                desired = int(float(usage_total) * 0.5)
+                saving = ledger.claim(desired)
+                overlaps = ""
+                if saving < desired:
+                    overlaps = f"capped by ledger (wanted {desired})"
                 wins.append(
                     Win(
                         title="Widen routine schedules",
@@ -975,6 +1077,7 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                         rationale="Docs name schedule as the top lever",
                         suggestion="Widen intervals; drop chatty triggers; skip test runs.",
                         method="estimate: cut routine-driven usage ~50% of provided usage total",
+                        overlaps=overlaps,
                     )
                 )
             else:
@@ -1004,6 +1107,53 @@ def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
                 ask=True,
             )
         )
+
+    by_bot = data.get("by_bot") or {}
+    if by_bot:
+        ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
+        for agent_id, b in ranked_bots[:2]:
+            label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
+            msg_n = int(b.get("message_count") or 0)
+            always_tok = int(b.get("always_context_tokens") or 0)
+            cxm = int(b.get("context_x_messages") or 0)
+            if cxm > 0 and always_tok > 0:
+                desired = cxm // 2
+                saving = ledger.claim(desired)
+                overlaps = ""
+                if saving < desired:
+                    overlaps = f"capped by ledger (wanted {desired})"
+                wins.append(
+                    Win(
+                        title=f"Trim always-loaded context for bot `{label}`",
+                        saving_est_tokens=saving,
+                        measured=(
+                            f"{always_tok} always-loaded context tokens × {msg_n} messages "
+                            f"= {cxm} context·message tokens"
+                        ),
+                        rationale="Each message re-pays always-on bot context",
+                        suggestion="Shorten this bot's description and memory; drop unused always-on skills.",
+                        method=(
+                            "estimate: trim always-loaded context ~50% × message count "
+                            "(context tokens × messages)"
+                        ),
+                        overlaps=overlaps,
+                    )
+                )
+            else:
+                wins.append(
+                    Win(
+                        title=f"Review traffic for bot `{label}`",
+                        saving_est_tokens=0,
+                        measured=(
+                            f"{msg_n} messages; ~{int(b.get('est_tokens') or 0)} est. tokens "
+                            "from text length; always-loaded context not measured"
+                        ),
+                        rationale="Estimated from search-index aggregates (not billed tokens)",
+                        suggestion="Shorten this bot's description/memory; narrow chat triggers.",
+                        method="saving unknown — need always-loaded context × message count",
+                        ask=True,
+                    )
+                )
 
     if data.get("missing_csv"):
         wins.append(

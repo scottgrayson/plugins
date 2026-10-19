@@ -91,13 +91,13 @@ def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
                 Fact(host=host, path=str(path), text=s.lstrip("- ").strip(), source=source)
             )
             continue
-        # Non-bullet prose: keep substantial lines (and split on sentence boundaries).
-        if len(s) > 20 and not s.startswith(("```", "<!--")):
+        # Non-bullet prose: same 8-char minimum as bullets (catch short policy lines).
+        if len(s) > 8 and not s.startswith(("```", "<!--")):
             # Prefer whole line when short; otherwise split sentences.
             parts = re.split(r"(?<=[.!?])\s+", s) if len(s) > 120 else [s]
             for part in parts:
                 p = part.strip()
-                if len(p) > 20:
+                if len(p) > 8:
                     facts.append(Fact(host=host, path=str(path), text=p, source=source))
     return facts
 

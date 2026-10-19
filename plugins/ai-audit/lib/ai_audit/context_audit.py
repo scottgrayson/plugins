@@ -643,6 +643,7 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
         skills = data.get("skills") or []
         desc_bytes = 0
         counted = 0
+        per_skill: list[dict[str, Any]] = []
         for s in skills:
             if not isinstance(s, dict):
                 continue
@@ -650,8 +651,19 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
             name = str(s.get("name") or sid)
             if name in workflow_skill_names or sid in workflow_skill_names:
                 continue
-            desc_bytes += _utf8_bytes(str(s.get("description") or ""))
+            sb = _utf8_bytes(str(s.get("description") or ""))
+            desc_bytes += sb
             counted += 1
+            plugin = str(s.get("pluginName") or s.get("plugin") or s.get("connector") or "")
+            per_skill.append(
+                {
+                    "name": name,
+                    "bytes": sb,
+                    "est_tokens": est_tokens(sb),
+                    "plugin": plugin,
+                }
+            )
+        per_skill.sort(key=lambda x: -int(x.get("bytes") or 0))
         if counted:
             items.append(
                 _item(
@@ -667,6 +679,7 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
                     ),
                     skill_count=counted,
                     not_user_editable=True,
+                    top_skills=per_skill[:5],
                 )
             )
 
@@ -801,15 +814,35 @@ def rank_context_wins(items: list[InventoryItem]) -> list[Win]:
             continue
         # App-managed / plugin caches: not user-editable (surface even when small).
         if it.kind in ("managed_skill_cache", "plugin_skill_cache"):
+            label = "managed" if "managed" in it.kind else "plugin"
+            top = it.meta.get("top_skills") or []
+            biggest = []
+            for s in top[:3]:
+                if not isinstance(s, dict):
+                    continue
+                nm = str(s.get("name") or "?")
+                plug = str(s.get("plugin") or "")
+                who = f"{plug}/{nm}" if plug else nm
+                biggest.append(f"{who} (~{int(s.get('est_tokens') or 0)} tok)")
+            biggest_note = (
+                f"; biggest by size: {', '.join(biggest)}" if biggest else ""
+            )
             wins.append(
                 Win(
-                    title=f"Unload unused {'managed' if 'managed' in it.kind else 'plugin'} skills",
-                    saving_est_tokens=it.est_tokens,
-                    measured=f"{it.bytes} bytes (~{it.est_tokens} tokens) always listed",
+                    title=f"Unload unused {label} skills",
+                    saving_est_tokens=0,
+                    measured=(
+                        f"total listing {it.bytes} bytes (~{it.est_tokens} tokens) always listed"
+                        f"{biggest_note}"
+                    ),
                     rationale="App-managed or plugin skill catalog — not a user-editable file",
-                    suggestion="Uninstall unused plugins/connectors; do not edit cache.json.",
+                    suggestion=(
+                        "Uninstall unused plugins/connectors; do not edit cache.json. "
+                        "Saving depends on which you uninstall."
+                    ),
                     path=it.path,
-                    method="estimate: remove unused catalog entries → full listing size",
+                    method="saving depends on which you uninstall — total volume shown",
+                    ask=True,
                 )
             )
             continue
