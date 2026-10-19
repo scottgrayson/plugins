@@ -7,3 +7,4 @@ __pycache__/
 *.pyo
 examples/preview/greeting.txt
 
+dev/.bin/

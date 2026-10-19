@@ -7,6 +7,17 @@ LIB="$PLUGIN/lib"
 PASS=0
 FAIL=0
 
+# mikefarah yq (workflow YAML assertions). Install if missing or not mikefarah.
+if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -qi mikefarah; then
+  YQ_BIN="$ROOT/dev/.bin/yq"
+  mkdir -p "$(dirname "$YQ_BIN")"
+  if [[ ! -x "$YQ_BIN" ]]; then
+    curl -fsSL -o "$YQ_BIN"       https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+    chmod +x "$YQ_BIN"
+  fi
+  export PATH="$(dirname "$YQ_BIN"):$PATH"
+fi
+
 assert_eq() {
   local name="$1" got="$2" want="$3"
   if [[ "$got" == "$want" ]]; then
@@ -577,6 +588,23 @@ if [[ -f "$ROOT/.github/dependabot.yml" ]] && grep -q 'package-ecosystem: github
   PASS=$((PASS + 1))
 else
   echo "FAIL missing dependabot github-actions config"
+  FAIL=$((FAIL + 1))
+fi
+
+# Agent-mode E2E (examples/preview): detach, tiny-cap survival, busy-port, stop cleanup.
+echo
+echo "== agent-mode e2e =="
+E2E_OUT="$(bash "$ROOT/dev/run-e2e-agent.sh" 2>&1)" || true
+printf '%s\n' "$E2E_OUT"
+E2E_PASS="$(printf '%s\n' "$E2E_OUT" | grep -cE '^PASS ' || true)"
+E2E_FAIL="$(printf '%s\n' "$E2E_OUT" | grep -cE '^FAIL ' || true)"
+PASS=$((PASS + E2E_PASS))
+FAIL=$((FAIL + E2E_FAIL))
+if [[ "$E2E_FAIL" -eq 0 && "$E2E_PASS" -gt 0 ]]; then
+  echo "PASS agent-mode e2e suite ($E2E_PASS checks)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL agent-mode e2e suite (pass=$E2E_PASS fail=$E2E_FAIL)"
   FAIL=$((FAIL + 1))
 fi
 
