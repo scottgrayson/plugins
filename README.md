@@ -2,10 +2,10 @@
 
 MIT-licensed plugins by Scott Grayson. This marketplace ships:
 
-- **preview** — temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`).
-- **ai-audit** — read-only audits of agent context, token cost, and saved facts (Claude Code, Cursor, Grok Bot). Package: [`plugins/ai-audit/`](plugins/ai-audit/).
+- **preview** — temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`). Package: [`plugins/preview/`](plugins/preview/).
+- **ai-audit** — read-only audits of agent context, token cost, and saved facts. Package: [`plugins/ai-audit/`](plugins/ai-audit/). Skills: `context-audit`, `token-audit`, `facts-audit`. Installs on **Claude Code**, **Cursor**, and **Grok Bot** (see [ai-audit install](#install--ai-audit) below).
 
-Two modes share the same scripts:
+Two modes share the same scripts for **preview**:
 
 1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
 2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (localhost by default; never ticks the Actions checkbox).
@@ -162,6 +162,36 @@ preview up --agent --share --config .preview/config.json --workdir .
 ```
 
 See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
+
+---
+
+## Install — ai-audit
+
+Read-only context / token / facts audits. Details: [`plugins/ai-audit/README.md`](plugins/ai-audit/README.md).
+
+### Claude Code
+
+```text
+/plugin marketplace add scottgrayson/plugins
+/plugin install ai-audit@scottgrayson-plugins
+```
+
+`${CLAUDE_PLUGIN_ROOT}` is substituted in skill **text only** (not exported to the Bash tool). Skills must use the braced form. Cache layout: `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.
+
+### Cursor
+
+1. Dashboard → Plugins & MCPs → Team Marketplaces → add `https://github.com/scottgrayson/plugins`
+2. Customize → install **ai-audit**
+3. Or local copy: `~/.cursor/plugins/local/ai-audit` (must include `.cursor-plugin/plugin.json`)
+
+Cloud automations ([cursor.com/automations](https://cursor.com/automations), Agents window, `/automate`) do not see local `~/.cursor` or downloaded CSVs — schedule only repo-level context/facts; run token-audit locally (or with Admin API opt-in).
+
+### Grok Bot
+
+1. Ask the bot to clone this repo (or a branch) onto its computer.
+2. Follow each skill’s **Locate the CLI option B** (`SKILL_MD` → `scripts/locate-cli.sh` → `bash "$AI_AUDIT" …`).
+3. Optional: copy skill folders into the bot’s skills only if `../../bin/ai-audit` still resolves.
+4. Schedule by asking in chat (e.g. “run the ai-audit facts audit every Monday at 9am…”). View routines via the bot name in the chat header → info pane → Routines.
 
 ### Optional: repo agent rules
 

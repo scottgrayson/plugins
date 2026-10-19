@@ -9,15 +9,15 @@ Scan saved memory/facts for stale dates, duplicates, conflicts, and orphans. Out
 
 ## Locate the CLI
 
-Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path — that only works inside this marketplace checkout. Resolve the installed plugin copy:
+Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path. Always invoke with `bash …/bin/ai-audit` (read-only; do not `chmod +x`).
 
-1. **Claude Code:** `"${CLAUDE_PLUGIN_ROOT}/bin/ai-audit"`.
-2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` when set; else `~/.cursor/plugins/local/ai-audit`, the plugin cache, or `../..` from this skill file.
-3. **Grok Bot:** `../../bin/ai-audit` relative to this skill folder.
+1. **Claude Code:** braced `${CLAUDE_PLUGIN_ROOT}` only (substituted in skill *text*; not in the Bash tool env). An unbraced dollar-var plus slash path fails.
+2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` / local / cache / `SKILL_MD` relative.
+3. **Grok Bot:** option B (`SKILL_MD` → `../../bin/ai-audit`).
 
 ```bash
-# A) Claude Code:
-AI_AUDIT="$(bash "$CLAUDE_PLUGIN_ROOT/scripts/locate-cli.sh")"
+# A) Claude Code — braced ${CLAUDE_PLUGIN_ROOT} only:
+AI_AUDIT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 # B) Skill-file relative — set SKILL_MD to THIS file:
 export SKILL_MD="/absolute/path/to/skills/facts-audit/SKILL.md"
@@ -25,7 +25,7 @@ AI_AUDIT="$(bash "$(dirname "$SKILL_MD")/../../scripts/locate-cli.sh")"
 
 # C) Explicit install root:
 export AI_AUDIT_PLUGIN_ROOT="${HOME}/.cursor/plugins/local/ai-audit"
-AI_AUDIT="$(bash "$AI_AUDIT_PLUGIN_ROOT/scripts/locate-cli.sh")"
+AI_AUDIT="$(bash "${AI_AUDIT_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 bash "$AI_AUDIT" facts --help
 ```
@@ -61,17 +61,17 @@ Memory drifts slowly — monthly is usually enough. Never edit memory without ap
 
 ### Claude Code
 
-1. Scheduled task or `/loop` monthly.
-2. Prompt: `Run the facts-audit skill via CLAUDE_PLUGIN_ROOT. Execute ai-audit facts --host claude --stale-days 30. List stale/duplicate/conflict/orphan wins. Propose diffs only — do not edit memory.`
+- **`/loop`** is session-scoped (~7 day expiry). **Cloud Routines** cannot see local auto-memory under `~/.claude`.
+- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**, using braced `${CLAUDE_PLUGIN_ROOT}` and `bash …/bin/ai-audit facts --host claude --stale-days 30`.
+- Cloud routines only fit **repo-only** facts (e.g. `AGENTS.md` / rules committed in the repo).
 
 ### Cursor
 
-1. Create a monthly **Automation**.
-2. Prompt: `Invoke facts-audit. Resolve the plugin CLI, scan rules/AGENTS.md, and if a memories export path is provided run with --memories. Summarize cleanup wins; do not edit files.`
-3. Optionally remind the user to **Export memories** before the run.
+- Entry points: [cursor.com/automations](https://cursor.com/automations), the **Agents** window, or `/automate`. Do **not** invent a Customize-sidebar Automations menu.
+- Cloud automations see the **attached repo**, not local `~/.cursor` or a memories export on disk.
+- Schedule **repo-level** facts audits (rules / `AGENTS.md` in the repo). For exported memories `.mdc`, run facts-audit **locally** with `--memories`.
 
 ### Grok Bot
 
-1. Create a monthly **Routine**.
-2. Message: `Run facts-audit. Resolve ../../bin/ai-audit from this skill folder. List stale/duplicate/orphan wins. Do not edit profile.md.`
-3. Confirm the routine is enabled on the active bot.
+- Ask the bot **in chat**: e.g. `Run the ai-audit facts audit every Monday at 9am and send me the top wins. Do not edit profile.md.`
+- View routines via the bot name in the chat header → info pane → **Routines** list.

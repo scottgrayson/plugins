@@ -25,7 +25,7 @@ Version: **0.1.0**. Full marketplace install guide: [root README](../../README.m
 /plugin install ai-audit@scottgrayson-plugins
 ```
 
-Claude sets `CLAUDE_PLUGIN_ROOT` for installed plugin skills. Skills call `"${CLAUDE_PLUGIN_ROOT}/bin/ai-audit"` (or `scripts/locate-cli.sh`).
+`${CLAUDE_PLUGIN_ROOT}` is **substituted in skill text only** — it is **not** exported to the Bash tool environment. Skills must use the braced form `${CLAUDE_PLUGIN_ROOT}` (never unbraced `$CLAUDE_PLUGIN_ROOT/…`). Installed copies live under `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.
 
 ### Cursor
 
@@ -42,9 +42,11 @@ Cursor documents `${CURSOR_PLUGIN_ROOT}` for `mcp.json`. Skills also try `~/.cur
 
 ### Grok Bot
 
-1. Install the full plugin package (must include `bin/`, `lib/`, `scripts/`, and `skills/` — not a single skill folder alone).
-2. Register or copy skills into the bot's workflows / skill catalog so each skill folder remains under the plugin tree (`…/skills/<name>/SKILL.md` next to `…/bin/ai-audit`).
-3. From a skill, resolve the CLI as `../../bin/ai-audit` or run `scripts/locate-cli.sh` with `SKILL_MD` set to that skill file.
+Path that works:
+
+1. Ask the bot to **clone this repo** (or a branch) onto its computer.
+2. Follow the skill’s **Locate the CLI option B**: set `SKILL_MD` to the absolute path of the skill’s `SKILL.md` under the clone (`…/plugins/ai-audit/skills/<name>/SKILL.md`), then run `scripts/locate-cli.sh` and `bash "$AI_AUDIT" …`.
+3. **Optional:** copy only the three skill folders into the bot’s skills catalog **if** `bin/` (and `lib/` / `scripts/`) stay resolvable via `../../bin/ai-audit` from each skill folder — otherwise prefer the full clone + option B.
 
 ---
 
@@ -53,12 +55,14 @@ Cursor documents `${CURSOR_PLUGIN_ROOT}` for `mcp.json`. Skills also try `~/.cur
 Skills must not hard-code `plugins/ai-audit/bin/…` (checkout-only). Use `scripts/locate-cli.sh`, which tries in order:
 
 1. `$AI_AUDIT_PLUGIN_ROOT/bin/ai-audit`
-2. `$CLAUDE_PLUGIN_ROOT/bin/ai-audit`
+2. `$CLAUDE_PLUGIN_ROOT/bin/ai-audit` (when that env is actually set)
 3. `$CURSOR_PLUGIN_ROOT/bin/ai-audit`
 4. `$(dirname $SKILL_MD)/../../bin/ai-audit`
 5. `~/.cursor/plugins/local/ai-audit/bin/ai-audit`
-6. `~/.claude/plugins/ai-audit/bin/ai-audit`
+6. `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/bin/ai-audit` (newest first)
 7. Cursor plugin cache globs under `~/.cursor/plugins/`
+
+The locator is **read-only** (no `chmod`). Always invoke:
 
 ```bash
 export SKILL_MD=/path/to/ai-audit/skills/context-audit/SKILL.md
@@ -73,18 +77,16 @@ bash "$AI_AUDIT" detect
 From an **installed** plugin root (or after locate):
 
 ```bash
-chmod +x bin/ai-audit scripts/locate-cli.sh
-./bin/ai-audit detect
-./bin/ai-audit context --host auto
-./bin/ai-audit token --host cursor --csv path/to/usage.csv
-./bin/ai-audit facts --host grok --stale-days 30
+bash bin/ai-audit detect
+bash bin/ai-audit context --host auto
+bash bin/ai-audit token --host cursor --csv path/to/usage.csv
+bash bin/ai-audit facts --host grok --stale-days 30
 ```
 
 From a marketplace **checkout** (dev only):
 
 ```bash
-AI_AUDIT_BIN="$PWD/plugins/ai-audit/bin/ai-audit"
-"$AI_AUDIT_BIN" detect
+bash "$PWD/plugins/ai-audit/bin/ai-audit" detect
 ```
 
 Useful flags:
@@ -112,12 +114,12 @@ Useful flags:
 
 ## Scheduling as a routine
 
-Each skill's `SKILL.md` has a **Schedule as a routine** section with concrete steps for:
+Each skill’s `SKILL.md` has accurate host-specific steps. Summary:
 
-| Host | Mechanism |
+| Host | What works |
 | --- | --- |
-| Claude Code | Scheduled task / `/loop` prompt that locates the CLI via `CLAUDE_PLUGIN_ROOT` |
-| Cursor | Cloud Agent / Automation with cron + skill invoke |
-| Grok Bot | Bot Routine with cron message to run the skill |
+| Claude Code | Prefer **Claude Desktop → Routines → New routine → Local**. `/loop` is session-scoped (~7 days). Cloud `/schedule` routines cannot see local files (repo-only audits only). |
+| Cursor | Use [cursor.com/automations](https://cursor.com/automations), the Agents window, or `/automate`. Cloud automations lack local `~/.cursor`, the local plugin, and downloaded CSVs — fine for **repo-level** context/facts; token audits need a **local** run or explicit Admin API opt-in. |
+| Grok Bot | Ask the bot **in chat** to schedule (plain words). View via bot name → info pane → **Routines**. Scheduled token audits must not ask for Usage numbers (report saving unknown + note). |
 
-The core stays read-only either way — routines summarize wins and never apply edits without approval.
+The core stays read-only — routines summarize wins and never apply edits without approval.

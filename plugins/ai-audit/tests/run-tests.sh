@@ -546,74 +546,122 @@ assert_eq "cursor memories short prose Ship small." \
   "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if f["source"]=="memories_export" and f["text"].strip()=="Ship small.")')" \
   "1"
 
-echo "== round5: installed-copy locate + schedule + README =="
-# Skills must not hard-code checkout-only paths
+echo "== round5/6: installed-copy locate + schedule + README =="
+# Skills must not hard-code checkout-only paths; Claude must use braced ${CLAUDE_PLUGIN_ROOT}
 for skill in context-audit token-audit facts-audit; do
+  sk="$PLUGIN/skills/$skill/SKILL.md"
   assert_not_contains "skill $skill has no checkout path" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
+    "$(cat "$sk")" \
     "bash plugins/ai-audit/bin/ai-audit"
-  assert_contains "skill $skill has Locate the CLI" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "Locate the CLI"
-  assert_contains "skill $skill mentions CLAUDE_PLUGIN_ROOT" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "CLAUDE_PLUGIN_ROOT"
-  assert_contains "skill $skill has Schedule as a routine" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "Schedule as a routine"
-  assert_contains "skill $skill schedules Claude Code" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "### Claude Code"
-  assert_contains "skill $skill schedules Cursor" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "### Cursor"
-  assert_contains "skill $skill schedules Grok Bot" \
-    "$(cat "$PLUGIN/skills/$skill/SKILL.md")" \
-    "### Grok Bot"
+  assert_contains "skill $skill has Locate the CLI" "$(cat "$sk")" "Locate the CLI"
+  assert_contains "skill $skill uses braced CLAUDE_PLUGIN_ROOT" \
+    "$(cat "$sk")" '${CLAUDE_PLUGIN_ROOT}'
+  # Unbraced $CLAUDE_PLUGIN_ROOT/… must not appear (braced ${…} is required).
+  # Negative lookbehind via ([^{]|^) so ${CLAUDE_PLUGIN_ROOT}/ is allowed.
+  if grep -nE '(^|[^{])\$CLAUDE_PLUGIN_ROOT/' "$sk" >/dev/null; then
+    echo "FAIL skill $skill has unbraced \$CLAUDE_PLUGIN_ROOT/"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS skill $skill has no unbraced \$CLAUDE_PLUGIN_ROOT/"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "skill $skill has Schedule as a routine" "$(cat "$sk")" "Schedule as a routine"
+  assert_contains "skill $skill schedules Claude Code" "$(cat "$sk")" "### Claude Code"
+  assert_contains "skill $skill schedules Cursor" "$(cat "$sk")" "### Cursor"
+  assert_contains "skill $skill schedules Grok Bot" "$(cat "$sk")" "### Grok Bot"
+  assert_contains "skill $skill mentions Desktop Local routine" "$(cat "$sk")" "Local"
+  assert_contains "skill $skill mentions cursor.com/automations" "$(cat "$sk")" "cursor.com/automations"
+  assert_not_contains "skill $skill omits Customize Automations menu" "$(cat "$sk")" "Customize → Automations"
+  assert_contains "skill $skill rejects invented Automations menu" "$(cat "$sk")" "Customize-sidebar"
+  assert_contains "skill $skill Grok chat scheduling" "$(cat "$sk")" "in chat"
+  assert_contains "skill $skill Grok info pane" "$(cat "$sk")" "info pane"
 done
 
+assert_contains "token skill scheduled saving unknown" \
+  "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "saving unknown"
 assert_contains "README install Claude Code" "$(cat "$PLUGIN/README.md")" "### Claude Code"
 assert_contains "README install Cursor" "$(cat "$PLUGIN/README.md")" "### Cursor"
 assert_contains "README install Grok Bot" "$(cat "$PLUGIN/README.md")" "### Grok Bot"
+assert_contains "README CLAUDE_PLUGIN_ROOT skill text only" \
+  "$(cat "$PLUGIN/README.md")" "skill text only"
+assert_contains "README Grok clone + option B" "$(cat "$PLUGIN/README.md")" "option B"
+assert_contains "README Claude cache layout" "$(cat "$PLUGIN/README.md")" \
+  ".claude/plugins/cache"
+assert_contains "root README has ai-audit install" "$(cat "$ROOT/README.md")" "Install — ai-audit"
+assert_contains "root README Grok Bot install" "$(cat "$ROOT/README.md")" "### Grok Bot"
+
+# locate-cli: no chmod +x; real Claude cache glob; read-only invoke
+if grep -nE 'chmod \+x|chmod \+[a-z]*x' "$PLUGIN/scripts/locate-cli.sh" >/dev/null; then
+  echo "FAIL locate-cli must not chmod +x"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS locate-cli has no chmod +x"
+  PASS=$((PASS + 1))
+fi
+assert_contains "locate-cli globs Claude cache" "$(cat "$PLUGIN/scripts/locate-cli.sh")" \
+  ".claude/plugins/cache"
+if grep -nE '\.claude/plugins/ai-audit/bin' "$PLUGIN/scripts/locate-cli.sh" >/dev/null; then
+  echo "FAIL locate-cli still has fake ~/.claude/plugins/ai-audit path"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS locate-cli omits fake ~/.claude/plugins/ai-audit"
+  PASS=$((PASS + 1))
+fi
 
 # Copy plugin outside the repo; run CLI from an unrelated cwd the way skills instruct
 INSTALL_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-install.XXXXXX")"
 UNRELATED="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-cwd.XXXXXX")"
-trap 'rm -rf "$INSTALL_PARENT" "$UNRELATED"' RETURN
+FAKE_CLAUDE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-claude-cache.XXXXXX")"
+trap 'rm -rf "$INSTALL_PARENT" "$UNRELATED" "$FAKE_CLAUDE_CACHE"' RETURN
 cp -a "$PLUGIN" "$INSTALL_PARENT/ai-audit"
-chmod +x "$INSTALL_PARENT/ai-audit/bin/ai-audit" "$INSTALL_PARENT/ai-audit/scripts/locate-cli.sh"
+# Simulate Claude cache layout: ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/
+# (we override HOME for this subshell)
+mkdir -p "$FAKE_CLAUDE_CACHE/.claude/plugins/cache/scottgrayson-plugins/ai-audit/0.0.1"
+mkdir -p "$FAKE_CLAUDE_CACHE/.claude/plugins/cache/scottgrayson-plugins/ai-audit/0.1.0"
+cp -a "$PLUGIN/." "$FAKE_CLAUDE_CACHE/.claude/plugins/cache/scottgrayson-plugins/ai-audit/0.0.1/"
+cp -a "$PLUGIN/." "$FAKE_CLAUDE_CACHE/.claude/plugins/cache/scottgrayson-plugins/ai-audit/0.1.0/"
+# Make 0.1.0 newer
+touch "$FAKE_CLAUDE_CACHE/.claude/plugins/cache/scottgrayson-plugins/ai-audit/0.1.0/bin/ai-audit"
 
 (
   cd "$UNRELATED"
-  # B) Skill-file relative bootstrap from SKILL.md
+  # B) Skill-file relative bootstrap from SKILL.md — invoke via bash (no chmod)
   export SKILL_MD="$INSTALL_PARENT/ai-audit/skills/context-audit/SKILL.md"
   AI_AUDIT="$(bash "$(dirname "$SKILL_MD")/../../scripts/locate-cli.sh")"
-  test -x "$AI_AUDIT" || test -f "$AI_AUDIT"
-  # Must not depend on repo checkout path
+  test -f "$AI_AUDIT"
   case "$AI_AUDIT" in
     "$INSTALL_PARENT"/*) ;;
     *) echo "locate returned unexpected path: $AI_AUDIT" >&2; exit 1 ;;
   esac
-  # Run from unrelated cwd against fixtures (absolute --root)
   bash "$AI_AUDIT" detect --root "$FIX/claude" --json-only >"$TMP/install-detect.json"
   bash "$AI_AUDIT" context --host claude --root "$FIX/claude" --json-only >"$TMP/install-context.json"
-  # A) CLAUDE_PLUGIN_ROOT style
+  # A) braced-style env (variable actually set in this shell for the test)
   unset SKILL_MD
   export CLAUDE_PLUGIN_ROOT="$INSTALL_PARENT/ai-audit"
-  AI_AUDIT2="$(bash "$CLAUDE_PLUGIN_ROOT/scripts/locate-cli.sh")"
+  AI_AUDIT2="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/locate-cli.sh")"
   bash "$AI_AUDIT2" facts --host claude --root "$FIX/claude" --json-only >"$TMP/install-facts.json"
-  # C) AI_AUDIT_PLUGIN_ROOT / local Cursor layout
+  # C) AI_AUDIT_PLUGIN_ROOT
   unset CLAUDE_PLUGIN_ROOT
   export AI_AUDIT_PLUGIN_ROOT="$INSTALL_PARENT/ai-audit"
-  AI_AUDIT3="$(bash "$AI_AUDIT_PLUGIN_ROOT/scripts/locate-cli.sh")"
+  AI_AUDIT3="$(bash "${AI_AUDIT_PLUGIN_ROOT}/scripts/locate-cli.sh")"
   bash "$AI_AUDIT3" token --host claude --root "$FIX/claude" --json-only >"$TMP/install-token.json"
-  # Fail clearly when nothing is configured (strict: ignore script-relative sibling)
+  # Claude cache under HOME (newest version)
   unset AI_AUDIT_PLUGIN_ROOT SKILL_MD CLAUDE_PLUGIN_ROOT CURSOR_PLUGIN_ROOT
+  export HOME="$FAKE_CLAUDE_CACHE"
+  AI_AUDIT4="$(AI_AUDIT_LOCATE_STRICT=1 bash "$INSTALL_PARENT/ai-audit/scripts/locate-cli.sh")"
+  case "$AI_AUDIT4" in
+    */0.1.0/bin/ai-audit) ;;
+    *) echo "expected newest cache 0.1.0, got: $AI_AUDIT4" >&2; exit 1 ;;
+  esac
+  bash "$AI_AUDIT4" detect --root "$FIX/claude" --json-only >"$TMP/install-cache-detect.json"
+  # Fail clearly when nothing is configured (strict + empty HOME cache)
+  export HOME="$UNRELATED"
   if AI_AUDIT_LOCATE_STRICT=1 bash "$INSTALL_PARENT/ai-audit/scripts/locate-cli.sh" 2>"$TMP/locate-fail.txt"; then
     echo "locate should have failed without env" >&2
     exit 1
   fi
   grep -q "ai-audit CLI not found" "$TMP/locate-fail.txt"
+  grep -q ".claude/plugins/cache" "$TMP/locate-fail.txt"
 ) || { echo "FAIL installed-copy locate/run"; FAIL=$((FAIL + 1)); }
 
 if [[ -f "$TMP/install-detect.json" ]]; then
@@ -621,6 +669,7 @@ if [[ -f "$TMP/install-detect.json" ]]; then
   assert_ge "install-copy context inventory" "$(py_get "$TMP/install-context.json" 'len(data["inventory"])')" 8
   assert_ge "install-copy facts scanned" "$(py_get "$TMP/install-facts.json" 'len(data.get("facts") or [])')" 1
   assert_eq "install-copy token audit" "$(py_get "$TMP/install-token.json" 'data["audit"]')" "token"
+  assert_eq "claude-cache newest version" "$(py_get "$TMP/install-cache-detect.json" 'data["host"]')" "claude"
   assert_contains "locate fails clearly" "$(cat "$TMP/locate-fail.txt")" "ai-audit CLI not found"
   echo "PASS installed-copy locate + run from unrelated cwd"
   PASS=$((PASS + 1))

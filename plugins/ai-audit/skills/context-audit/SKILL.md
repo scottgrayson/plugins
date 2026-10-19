@@ -9,17 +9,15 @@ Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, p
 
 ## Locate the CLI
 
-Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path — that only works inside this marketplace checkout. Resolve the installed plugin copy:
+Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path — that only works inside this marketplace checkout. Resolve the installed plugin copy. Always invoke with `bash …/bin/ai-audit` (read-only; do not `chmod +x`).
 
-1. **Claude Code:** prefer `"${CLAUDE_PLUGIN_ROOT}/bin/ai-audit"` (Claude substitutes `CLAUDE_PLUGIN_ROOT` in plugin skills).
-2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` is documented for `mcp.json`; if unset, try `~/.cursor/plugins/local/ai-audit`, then the plugin cache under `~/.cursor/plugins/`, or derive the plugin root from this skill file (`skills/context-audit/SKILL.md` → `../..`).
-3. **Grok Bot:** skills ship as folders under the plugin; resolve relative to this skill file: `../../bin/ai-audit`.
-
-Run the locator (fails clearly if nothing matches). Pick one bootstrap:
+1. **Claude Code:** Claude substitutes **only** the braced form `${CLAUDE_PLUGIN_ROOT}` in skill *text*. It is **not** exported to the Bash tool environment, so an unbraced dollar-var plus slash path becomes `/scripts/…` and fails. Always write `${CLAUDE_PLUGIN_ROOT}`.
+2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` is documented for `mcp.json`; if unset, try `~/.cursor/plugins/local/ai-audit`, the plugin cache, or derive the plugin root from this skill file (`skills/context-audit/SKILL.md` → `../..`).
+3. **Grok Bot:** resolve relative to this skill file: `../../bin/ai-audit` (option B below).
 
 ```bash
-# A) Claude Code — CLAUDE_PLUGIN_ROOT is substituted for plugin skills:
-AI_AUDIT="$(bash "$CLAUDE_PLUGIN_ROOT/scripts/locate-cli.sh")"
+# A) Claude Code — braced ${CLAUDE_PLUGIN_ROOT} is substituted in skill text only:
+AI_AUDIT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 # B) Skill-file relative (Cursor / Grok / any host) — set SKILL_MD to THIS file:
 export SKILL_MD="/absolute/path/to/skills/context-audit/SKILL.md"
@@ -27,12 +25,10 @@ AI_AUDIT="$(bash "$(dirname "$SKILL_MD")/../../scripts/locate-cli.sh")"
 
 # C) Explicit install root (e.g. local Cursor plugin):
 export AI_AUDIT_PLUGIN_ROOT="${HOME}/.cursor/plugins/local/ai-audit"
-AI_AUDIT="$(bash "$AI_AUDIT_PLUGIN_ROOT/scripts/locate-cli.sh")"
+AI_AUDIT="$(bash "${AI_AUDIT_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 bash "$AI_AUDIT" context --help
 ```
-
-Once located, you can also call `"$AI_AUDIT"` directly (the `bin/ai-audit` wrapper sets `PYTHONPATH`).
 
 ## Run
 
@@ -50,7 +46,7 @@ Show the markdown report to the user. Proposed fixes are **suggestions only** �
 | Gap | Ask for |
 | --- | --- |
 | Cursor user / team rules | Paste from Customize → Rules (not on disk) |
-| Grok routines / connectors | Bot can list routines and fetch connector schemas; or open the info pane |
+| Grok routines / connectors | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
 | Claude live breakdown | Paste `/context` output to calibrate |
 
 Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases.
@@ -61,19 +57,18 @@ Keep the audit on a cadence so context bloat is caught early. The core stays rea
 
 ### Claude Code
 
-1. Open a scheduled task / cron-style reminder (or `/loop` on an interval the user approves).
-2. Prompt: `Run the context-audit skill. Locate the CLI via CLAUDE_PLUGIN_ROOT, run ai-audit context --host claude, and reply with the top 5 wins only. Do not edit files.`
-3. Prefer a weekly schedule (e.g. Monday morning).
+- **`/loop` is session-scoped** and expires after ~7 days — not a durable schedule.
+- **Cloud Routines** (`/schedule`) run remotely and **cannot see local files** (no home `.claude`, no local plugin cache). Use them only for **repo-only** context audits on a connected repository.
+- **Preferred:** Claude Desktop → **Routines** page → **New routine** → **Local**. Local routines can see the installed plugin and project files.
+- Example local routine prompt: `Run the context-audit skill. Locate the CLI with braced ${CLAUDE_PLUGIN_ROOT}, run bash …/bin/ai-audit context --host claude, reply with the top 5 wins. Do not edit files.`
 
 ### Cursor
 
-1. Create a **Cloud Agent / Automation** (Customize → Automations, or the Automations UI).
-2. Schedule: weekly cron (e.g. `0 9 * * 1`).
-3. Prompt: `Invoke the context-audit skill in a clean chat. Resolve the plugin CLI (local install or cache), run context --host cursor, summarize the top 5 wins. Suggestions only — do not apply edits.`
-4. Attach any required repo; do not rely on a marketplace checkout path.
+- Entry points (documented): [cursor.com/automations](https://cursor.com/automations), the **Agents** window, or the `/automate` skill. Do **not** invent a Customize-sidebar Automations menu.
+- Automations run as **cloud agents**: they do **not** see local `~/.cursor`, a local plugin copy, or a downloaded Usage CSV.
+- Therefore scheduling suits **repo-level** context audits (project rules/skills in the attached repo). For anything that needs the local plugin install, run the skill in a local agent session instead.
 
 ### Grok Bot
 
-1. In the bot settings, create a **Routine** with a weekly cron.
-2. Message: `Run context-audit. Resolve ../../bin/ai-audit from this skill folder (or use locate-cli.sh). Reply with the top 5 wins only. Do not edit files.`
-3. Confirm the routine appears under the bot's automations list.
+- Create a routine by asking the bot **in chat** in plain words, e.g. `Run the ai-audit context audit every Monday at 9am and send me the top wins. Do not edit files.`
+- View routines by clicking the **bot’s name** in the chat header — that opens the info pane with a **Routines** list. Do not look under “bot settings” or an “automations list”.

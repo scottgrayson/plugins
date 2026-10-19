@@ -9,15 +9,15 @@ Attribute token cost and rank 3–5 wins. **Priority: cloud usage first, local s
 
 ## Locate the CLI
 
-Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path — that only works inside this marketplace checkout. Resolve the installed plugin copy:
+Do **not** use a repo-relative `plugins/ai-audit/bin/ai-audit` path. Always invoke with `bash …/bin/ai-audit` (read-only; do not `chmod +x`).
 
-1. **Claude Code:** `"${CLAUDE_PLUGIN_ROOT}/bin/ai-audit"`.
-2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` when set; else `~/.cursor/plugins/local/ai-audit`, the plugin cache, or `../..` from this skill file.
-3. **Grok Bot:** `../../bin/ai-audit` relative to this skill folder.
+1. **Claude Code:** use braced `${CLAUDE_PLUGIN_ROOT}` only — Claude substitutes it in skill *text*; it is **not** in the Bash tool environment. An unbraced dollar-var plus slash path becomes `/scripts/…` and fails.
+2. **Cursor:** `${CURSOR_PLUGIN_ROOT}` when set; else local/cache/`SKILL_MD` relative.
+3. **Grok Bot:** option B (`SKILL_MD` → `../../bin/ai-audit`).
 
 ```bash
-# A) Claude Code:
-AI_AUDIT="$(bash "$CLAUDE_PLUGIN_ROOT/scripts/locate-cli.sh")"
+# A) Claude Code — braced ${CLAUDE_PLUGIN_ROOT} only:
+AI_AUDIT="$(bash "${CLAUDE_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 # B) Skill-file relative — set SKILL_MD to THIS file:
 export SKILL_MD="/absolute/path/to/skills/token-audit/SKILL.md"
@@ -25,7 +25,7 @@ AI_AUDIT="$(bash "$(dirname "$SKILL_MD")/../../scripts/locate-cli.sh")"
 
 # C) Explicit install root:
 export AI_AUDIT_PLUGIN_ROOT="${HOME}/.cursor/plugins/local/ai-audit"
-AI_AUDIT="$(bash "$AI_AUDIT_PLUGIN_ROOT/scripts/locate-cli.sh")"
+AI_AUDIT="$(bash "${AI_AUDIT_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 
 bash "$AI_AUDIT" token --help
 ```
@@ -64,23 +64,22 @@ Parses local JSONL (deduped by message.id/requestId). Tool cost is attributed to
 
 ## Schedule as a routine
 
-Keep spend visible on a cadence. Label estimates; never invent numbers.
+Label estimates; never invent numbers. Prefer local runs for anything that needs disk or a CSV.
 
 ### Claude Code
 
-1. Scheduled task or `/loop` (interval the user approves).
-2. Prompt: `Run the token-audit skill via CLAUDE_PLUGIN_ROOT. Execute ai-audit token --host claude and summarize measured wins only.`
-3. Weekly is enough for most teams.
+- **`/loop` is session-scoped** (~7 day expiry). **Cloud Routines** (`/schedule`) cannot see local session JSONL or the plugin cache.
+- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**, with a prompt that uses braced `${CLAUDE_PLUGIN_ROOT}` and `bash …/bin/ai-audit token --host claude`.
+- Cloud routines are only suitable if you intentionally limit the audit to repo-checked-in artifacts (unusual for token audit).
 
 ### Cursor
 
-1. Create a weekly **Automation** / Cloud Agent.
-2. Before each run, ask the user for a fresh Usage CSV (or store a known download path).
-3. Prompt: `Invoke token-audit. Resolve the plugin CLI, run token --host cursor --csv <path>, report the top wins with methods. Do not invent savings.`
-4. Optional: only when the user opts in, pass `--cursor-admin-api` with `CURSOR_ADMIN_API_KEY`.
+- Entry points: [cursor.com/automations](https://cursor.com/automations), the **Agents** window, or `/automate`. Do **not** invent a Customize-sidebar Automations menu.
+- Automations are **cloud agents**: no local `~/.cursor`, no local plugin copy, no downloaded Usage CSV.
+- **Do not schedule token-audit as a cloud automation** unless you opt into the Admin API (`--cursor-admin-api` + `CURSOR_ADMIN_API_KEY`). Otherwise run token-audit in a **local** agent session with a CSV path the machine can read.
 
 ### Grok Bot
 
-1. Create a weekly **Routine**.
-2. Message: `Run token-audit. Ask me for Usage & Billing totals and list your routines; write routines.json; run ai-audit token --host grok with --usage-total / --routines-json. Label estimates.`
-3. Confirm the routine schedule under the bot's automations.
+- Ask the bot **in chat**: e.g. `Every Monday at 9am, run the ai-audit token audit and send me the top wins. Do not ask me for Usage numbers; report with saving unknown and a short note that Usage totals were not provided.`
+- View routines via the bot name in the chat header → info pane → **Routines** list.
+- A **scheduled** token audit must **not** prompt for Usage numbers; it reports with **saving unknown** and a note. Interactive runs may still ask for Usage / routines when a human is present.
