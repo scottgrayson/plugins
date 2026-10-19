@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Preview unit / contract tests.
+# CI runs this via the `tests` job. Agent-mode e2e is a separate `e2e-agent` job
+# (`dev/run-e2e-agent.sh`). Locally run both with:
+#   bash dev/run-tests.sh --with-e2e
+# or:
+#   bash dev/run-tests.sh && bash dev/run-e2e-agent.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -6,6 +12,22 @@ PLUGIN="$ROOT/plugins/preview"
 LIB="$PLUGIN/lib"
 PASS=0
 FAIL=0
+
+WITH_E2E=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-e2e) WITH_E2E=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--with-e2e]"
+      echo "  --with-e2e  Also run dev/run-e2e-agent.sh (default CI runs e2e separately)."
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg (try --help)" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # ripgrep for brand-ban / workflow greps (not always on ubuntu-latest).
 if ! command -v rg >/dev/null 2>&1; then
@@ -609,21 +631,23 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Agent-mode E2E (examples/preview): detach, tiny-cap survival, busy-port, stop cleanup.
-echo
-echo "== agent-mode e2e =="
-E2E_OUT="$(bash "$ROOT/dev/run-e2e-agent.sh" 2>&1)" || true
-printf '%s\n' "$E2E_OUT"
-E2E_PASS="$(printf '%s\n' "$E2E_OUT" | grep -cE '^PASS ' || true)"
-E2E_FAIL="$(printf '%s\n' "$E2E_OUT" | grep -cE '^FAIL ' || true)"
-PASS=$((PASS + E2E_PASS))
-FAIL=$((FAIL + E2E_FAIL))
-if [[ "$E2E_FAIL" -eq 0 && "$E2E_PASS" -gt 0 ]]; then
-  echo "PASS agent-mode e2e suite ($E2E_PASS checks)"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL agent-mode e2e suite (pass=$E2E_PASS fail=$E2E_FAIL)"
-  FAIL=$((FAIL + 1))
+if [[ "$WITH_E2E" -eq 1 ]]; then
+  # Optional local full suite (CI runs e2e in the separate e2e-agent job).
+  echo
+  echo "== agent-mode e2e =="
+  E2E_OUT="$(bash "$ROOT/dev/run-e2e-agent.sh" 2>&1)" || true
+  printf '%s\n' "$E2E_OUT"
+  E2E_PASS="$(printf '%s\n' "$E2E_OUT" | grep -cE '^PASS ' || true)"
+  E2E_FAIL="$(printf '%s\n' "$E2E_OUT" | grep -cE '^FAIL ' || true)"
+  PASS=$((PASS + E2E_PASS))
+  FAIL=$((FAIL + E2E_FAIL))
+  if [[ "$E2E_FAIL" -eq 0 && "$E2E_PASS" -gt 0 ]]; then
+    echo "PASS agent-mode e2e suite ($E2E_PASS checks)"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL agent-mode e2e suite (pass=$E2E_PASS fail=$E2E_FAIL)"
+    FAIL=$((FAIL + 1))
+  fi
 fi
 
 echo

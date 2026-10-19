@@ -28,5 +28,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep curl >/dev/null
+          # mikefarah yq (workflow YAML assertions in run-tests.sh)
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
       - name: Run preview unit tests
         run: bash dev/run-tests.sh
+
+  e2e-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install e2e dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # curl/python3 are used by run-e2e-agent.sh; ripgrep kept available for
+          # any follow-on greps. yq matches the tests job toolchain for local parity.
+          sudo apt-get install -y -qq ripgrep curl python3 >/dev/null
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      - name: Run agent-mode e2e
+        run: bash dev/run-e2e-agent.sh
