@@ -22,23 +22,25 @@ usage() {
   cat <<'EOF'
 Usage: preview <command>
 
-  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent] [--share]
+  up [--config PATH] [--labels CSV] [--workdir DIR] [--agent] [--share] [--detach]
   share [--config PATH] [--labels CSV] [--workdir DIR]
   url
   status
   stop [reason]
   wait
 
-  --agent  Agent mode: no idle timer; only totalCapSeconds applies.
+  --agent  Agent mode: no idle timer and no total cap.
            Default: app + local proxy only (localhost URL, no tunnel).
   --share  Open a Cloudflare quick tunnel and print the public URL.
            Implied for Actions/CLI (non-agent). With --agent, opt-in only.
+  --detach Agent mode only: exit 0 once READY (URL on stdout); leave
+           app/proxy/tunnel running. Tear down with preview stop.
   share    Same as: up --agent --share
 EOF
 }
 
 cmd_up() {
-  local config="" labels="" workdir="" agent=0 share=0
+  local config="" labels="" workdir="" agent=0 share=0 detach=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --config) config="$2"; shift 2 ;;
@@ -46,9 +48,14 @@ cmd_up() {
       --workdir) workdir="$2"; shift 2 ;;
       --agent) agent=1; shift ;;
       --share) share=1; shift ;;
+      --detach) detach=1; shift ;;
       *) preview_die "unknown argument: $1" ;;
     esac
   done
+
+  if (( detach )) && (( ! agent )); then
+    preview_die "--detach requires --agent"
+  fi
 
   if [[ -n "$workdir" ]]; then
     cd "$workdir"
@@ -90,6 +97,9 @@ cmd_up() {
   else
     preview_write share "0"
   fi
+  if (( detach )); then
+    preview_write detach "1"
+  fi
 
   preview_load_config "${config:-$(preview_default_config_path)}"
 
@@ -97,6 +107,12 @@ cmd_up() {
 
   local app_port proxy_port
   app_port="$PREVIEW_PORT"
+  # Fail fast if the configured app port is already taken — otherwise
+  # wait_port would READY against a leftover process (wrong app).
+  if preview_port_in_use 127.0.0.1 "$app_port"; then
+    preview_cleanup "port-in-use"
+    preview_die "port $app_port is already in use; stop the other process or change config port"
+  fi
   proxy_port="$(preview_free_port)"
   preview_write app_port "$app_port"
   preview_write proxy_port "$proxy_port"
@@ -118,11 +134,20 @@ cmd_up() {
       --port "$app_port" \
       >"$(preview_state_dir)/app.log" 2>&1 &
   else
+    preview_cleanup "bad-config"
     preview_die "type '$PREVIEW_TYPE' requires a start command"
   fi
   local app_pid=$!
   preview_write app_pid "$app_pid"
-  preview_wait_port 127.0.0.1 "$app_port" || preview_die "app did not open port $app_port"
+  local wait_rc=0
+  preview_wait_port 127.0.0.1 "$app_port" "$app_pid" || wait_rc=$?
+  if (( wait_rc == 2 )); then
+    preview_cleanup "app-exit"
+    preview_die "app exited before READY on port $app_port (see $(preview_state_dir)/app.log)"
+  elif (( wait_rc != 0 )); then
+    preview_cleanup "port-timeout"
+    preview_die "app did not open port $app_port"
+  fi
 
   python3 "$PREVIEW_PLUGIN_ROOT/lib/proxy.py" \
     --listen-port "$proxy_port" \
@@ -142,11 +167,26 @@ cmd_up() {
     preview_write url "$url"
     preview_log "agent mode: local only (no tunnel); pass --share for a public URL"
   fi
-  preview_wait_ready "$url" >/dev/null
+  wait_rc=0
+  preview_wait_ready "$url" >/dev/null || wait_rc=$?
+  if (( wait_rc == 2 )); then
+    preview_cleanup "app-exit"
+    preview_die "app exited before READY on port $app_port (see $(preview_state_dir)/app.log)"
+  elif (( wait_rc != 0 )); then
+    preview_cleanup "not-ready"
+    preview_die "URL never answered HTTP: $url"
+  fi
 
   # Seed idle clock: READY itself is not user traffic.
   preview_write status watching
   printf '%s\n' "$url"
+
+  if (( detach )); then
+    # Agent owns the machine; no timers. Leave app/proxy/(tunnel) running.
+    # Non-interactive shells do not SIGHUP background jobs on exit.
+    preview_log "detached; run preview stop to tear down"
+    return 0
+  fi
 
   preview_watchdog
   local reason
@@ -174,8 +214,12 @@ cmd_status() {
   reason="$(preview_read reason)"
   url="$(preview_read url)"
   printf 'status=%s\n' "${st:-unknown}"
-  [[ -n "$url" ]] && printf 'url=%s\n' "$url"
-  [[ -n "$reason" ]] && printf 'reason=%s\n' "$reason"
+  if [[ -n "$url" ]]; then
+    printf 'url=%s\n' "$url"
+  fi
+  if [[ -n "$reason" ]]; then
+    printf 'reason=%s\n' "$reason"
+  fi
 }
 
 cmd_stop() {

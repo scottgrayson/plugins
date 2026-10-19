@@ -35,9 +35,14 @@ preview_http_ok() {
 preview_wait_ready() {
   local url="${1:-$(preview_read url)}"
   [[ -n "$url" ]] || preview_die "no preview URL"
-  local i mode
+  local i mode app_pid
+  app_pid="$(preview_read app_pid)"
   preview_log "waiting for URL to answer: $url"
   for i in $(seq 1 90); do
+    # Return 2 if our app died — caller fails with a clear port-named error.
+    if [[ -n "$app_pid" ]] && ! kill -0 "$app_pid" 2>/dev/null; then
+      return 2
+    fi
     if mode="$(preview_http_ok "$url")"; then
       preview_write ready_at "$(date +%s)"
       preview_write status ready
@@ -48,5 +53,5 @@ preview_wait_ready() {
     fi
     sleep 1
   done
-  preview_die "URL never answered HTTP: $url"
+  return 1
 }

@@ -7,6 +7,17 @@ LIB="$PLUGIN/lib"
 PASS=0
 FAIL=0
 
+# mikefarah yq (workflow YAML assertions). Install if missing or not mikefarah.
+if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -qi mikefarah; then
+  YQ_BIN="$ROOT/dev/.bin/yq"
+  mkdir -p "$(dirname "$YQ_BIN")"
+  if [[ ! -x "$YQ_BIN" ]]; then
+    curl -fsSL -o "$YQ_BIN"       https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+    chmod +x "$YQ_BIN"
+  fi
+  export PATH="$(dirname "$YQ_BIN"):$PATH"
+fi
+
 assert_eq() {
   local name="$1" got="$2" want="$3"
   if [[ "$got" == "$want" ]]; then
@@ -87,11 +98,24 @@ popd >/dev/null
 export PREVIEW_STATE_DIR="$TMP/state-defaults"
 mkdir -p "$PREVIEW_STATE_DIR"
 pushd "$TMP" >/dev/null
+unset PREVIEW_IDLE_SECONDS PREVIEW_TOTAL_CAP_SECONDS PREVIEW_PORT PREVIEW_TYPE PREVIEW_START PREVIEW_ROOT PREVIEW_DEFAULT_STEPS PREVIEW_IGNORE_PATHS || true
 preview_load_config "$TMP/missing.json"
 assert_eq "default idle 5m" "$PREVIEW_IDLE_SECONDS" "300"
 assert_eq "default cap 15m" "$PREVIEW_TOTAL_CAP_SECONDS" "900"
 assert_eq "default type" "$PREVIEW_TYPE" "static"
 popd >/dev/null
+
+# Pre-set env wins over config.json (config.env must not clobber).
+export PREVIEW_STATE_DIR="$TMP/state-env-win"
+mkdir -p "$PREVIEW_STATE_DIR"
+export PREVIEW_TOTAL_CAP_SECONDS=42
+pushd "$TMP/app" >/dev/null
+preview_load_config "$TMP/app/.preview/config.json"
+assert_eq "pre-set PREVIEW_TOTAL_CAP_SECONDS wins" "$PREVIEW_TOTAL_CAP_SECONDS" "42"
+# Port still comes from config (not pre-set).
+assert_eq "config port still loaded" "$PREVIEW_PORT" "4321"
+popd >/dev/null
+unset PREVIEW_TOTAL_CAP_SECONDS
 
 export PREVIEW_STATE_DIR="$TMP/state-steps"
 mkdir -p "$PREVIEW_STATE_DIR"
@@ -141,7 +165,7 @@ print("proxy helpers ok")
 PY
 assert_eq "proxy generic ignore helpers" "ok" "ok"
 
-# Agent mode: idle disabled (idle=0); total cap still applies.
+# Agent mode: no timers — tiny idle + tiny cap must not stop the watchdog.
 export PREVIEW_STATE_DIR="$TMP/state-agent"
 mkdir -p "$PREVIEW_STATE_DIR"
 preview_ensure_state
@@ -149,23 +173,41 @@ preview_write started_at "$(date +%s)"
 preview_write ready_at "$(date +%s)"
 preview_write status watching
 : >"$PREVIEW_STATE_DIR/requests.log"
-# Simulate counted traffic so a non-agent idle would reset — agent must ignore idle.
-python3 - <<'PY'
-import time
-from datetime import datetime, timezone
-log = __import__("os").environ["PREVIEW_STATE_DIR"] + "/requests.log"
-ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-with open(log, "a", encoding="utf-8") as f:
-    f.write(f"{ts}\tGET\t/\t1\tuser\n")
-PY
 export PREVIEW_AGENT_MODE=1
-export PREVIEW_IDLE_SECONDS=2
-export PREVIEW_TOTAL_CAP_SECONDS=5
-# Foreground: past idle (2s) it must still be running until total-cap (5s).
+export PREVIEW_IDLE_SECONDS=1
+export PREVIEW_TOTAL_CAP_SECONDS=2
+preview_watchdog &
+agent_wd_pid=$!
+sleep 4
+if kill -0 "$agent_wd_pid" 2>/dev/null; then
+  echo "PASS agent mode still alive past tiny cap"
+  PASS=$((PASS + 1))
+  preview_write reason "stop"
+  preview_write stop "1"
+  wait "$agent_wd_pid" 2>/dev/null || true
+  reason="$(preview_read reason)"
+  assert_eq "agent mode stop reason is stop not total-cap" "$reason" "stop"
+else
+  echo "FAIL agent mode died on timer (reason=$(preview_read reason))"
+  FAIL=$((FAIL + 1))
+  wait "$agent_wd_pid" 2>/dev/null || true
+fi
+unset PREVIEW_AGENT_MODE
+
+# Human mode: total cap still enforced.
+export PREVIEW_STATE_DIR="$TMP/state-human-cap"
+mkdir -p "$PREVIEW_STATE_DIR"
+preview_ensure_state
+preview_write started_at "$(date +%s)"
+preview_write ready_at "$(date +%s)"
+preview_write status watching
+: >"$PREVIEW_STATE_DIR/requests.log"
+unset PREVIEW_AGENT_MODE || true
+export PREVIEW_IDLE_SECONDS=600
+export PREVIEW_TOTAL_CAP_SECONDS=3
 preview_watchdog
 reason="$(preview_read reason)"
-assert_eq "agent mode stops on total-cap not idle" "$reason" "total-cap"
-unset PREVIEW_AGENT_MODE
+assert_eq "human mode still stops on total-cap" "$reason" "total-cap"
 
 # Non-agent: idle fires when no counted requests after READY.
 export PREVIEW_STATE_DIR="$TMP/state-idle"
@@ -284,9 +326,10 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# Agent CLI: --share / share documented; agent default is local-only
+# Agent CLI: --share / --detach documented; agent default is local-only
 help_out="$("$PLUGIN/bin/preview" --help 2>&1 || true)"
 assert_contains "help mentions --share" "$help_out" "--share"
+assert_contains "help mentions --detach" "$help_out" "--detach"
 assert_contains "help mentions share command" "$help_out" "share    Same as"
 # Agent without --share must not start a tunnel (gate in bin/preview)
 if grep -q 'use_tunnel=0' "$PLUGIN/bin/preview" \
@@ -360,6 +403,137 @@ fi
 wait "$smoke_pid" 2>/dev/null || true
 unset PREVIEW_STATE_DIR
 
+# Busy-port fail-fast: leftover listener on config port must not READY.
+BUSY_DIR="$TMP/busy-port"
+mkdir -p "$BUSY_DIR/.preview"
+busy_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+# Hold the port with a decoy listener.
+python3 - "$busy_port" <<'PY' &
+import socket, sys, time
+port = int(sys.argv[1])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(1)
+time.sleep(60)
+PY
+busy_holder=$!
+# Give the decoy a moment to bind.
+for _ in $(seq 1 20); do
+  python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.2); s.connect(('127.0.0.1', int(sys.argv[1]))); s.close()" "$busy_port" 2>/dev/null && break
+  sleep 0.1
+done
+cat >"$BUSY_DIR/.preview/config.json" <<JSON
+{
+  "type": "static",
+  "start": "python3 -c 'import time; time.sleep(30)'",
+  "port": $busy_port,
+  "totalCapSeconds": 60
+}
+JSON
+export PREVIEW_STATE_DIR="$BUSY_DIR/.preview/run"
+rm -rf "$PREVIEW_STATE_DIR"
+busy_out="$("$PLUGIN/bin/preview" up --agent --detach --config "$BUSY_DIR/.preview/config.json" --workdir "$BUSY_DIR" 2>&1)" && busy_rc=0 || busy_rc=$?
+if [[ $busy_rc -ne 0 && "$busy_out" == *"port $busy_port is already in use"* ]]; then
+  echo "PASS busy-port fail-fast"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL busy-port fail-fast (rc=$busy_rc)"
+  echo "  out: $busy_out"
+  FAIL=$((FAIL + 1))
+fi
+kill "$busy_holder" 2>/dev/null || true
+wait "$busy_holder" 2>/dev/null || true
+unset PREVIEW_STATE_DIR
+
+# App exits before READY: clear error naming the port.
+DIE_DIR="$TMP/app-exit"
+mkdir -p "$DIE_DIR/.preview"
+die_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+cat >"$DIE_DIR/.preview/config.json" <<JSON
+{
+  "type": "static",
+  "start": "python3 -c 'import sys; sys.exit(1)'",
+  "port": $die_port,
+  "totalCapSeconds": 60
+}
+JSON
+export PREVIEW_STATE_DIR="$DIE_DIR/.preview/run"
+rm -rf "$PREVIEW_STATE_DIR"
+die_out="$("$PLUGIN/bin/preview" up --agent --detach --config "$DIE_DIR/.preview/config.json" --workdir "$DIE_DIR" 2>&1)" && die_rc=0 || die_rc=$?
+if [[ $die_rc -ne 0 && "$die_out" == *"app exited before READY on port $die_port"* ]]; then
+  echo "PASS app-exit-before-ready"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL app-exit-before-ready (rc=$die_rc)"
+  echo "  out: $die_out"
+  FAIL=$((FAIL + 1))
+fi
+unset PREVIEW_STATE_DIR
+
+# --detach: exits 0 with URL; stop cleans up all pids.
+DETACH_DIR="$TMP/detach"
+mkdir -p "$DETACH_DIR/.preview"
+cp "$ROOT/examples/preview/serve.py" "$ROOT/examples/preview/index.html" "$DETACH_DIR/"
+detach_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+cat >"$DETACH_DIR/.preview/config.json" <<JSON
+{
+  "type": "static",
+  "start": "python3 serve.py",
+  "port": $detach_port,
+  "idleSeconds": 300,
+  "totalCapSeconds": 5
+}
+JSON
+export PREVIEW_STATE_DIR="$DETACH_DIR/.preview/run"
+rm -rf "$PREVIEW_STATE_DIR"
+detach_out="$("$PLUGIN/bin/preview" up --agent --detach --config "$DETACH_DIR/.preview/config.json" --workdir "$DETACH_DIR" 2>"$TMP/detach.stderr")" && detach_rc=0 || detach_rc=$?
+detach_url="$(echo "$detach_out" | tail -1)"
+if [[ $detach_rc -eq 0 && "$detach_url" == http://127.0.0.1:* ]]; then
+  echo "PASS --detach returns 0 with URL"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL --detach (rc=$detach_rc url=$detach_url)"
+  echo "  stderr: $(tail -5 "$TMP/detach.stderr" 2>/dev/null || true)"
+  FAIL=$((FAIL + 1))
+fi
+app_pid="$(cat "$PREVIEW_STATE_DIR/app_pid" 2>/dev/null || true)"
+proxy_pid="$(cat "$PREVIEW_STATE_DIR/proxy_pid" 2>/dev/null || true)"
+if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null \
+  && [[ -n "$proxy_pid" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+  echo "PASS --detach left app+proxy running"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL --detach processes not running (app=$app_pid proxy=$proxy_pid)"
+  FAIL=$((FAIL + 1))
+fi
+# Tiny totalCapSeconds must not kill detached agent preview.
+sleep 6
+if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
+  echo "PASS detached agent still alive past config totalCapSeconds"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL detached agent died on cap"
+  FAIL=$((FAIL + 1))
+fi
+"$PLUGIN/bin/preview" stop detach-test >/dev/null 2>&1 || true
+sleep 0.5
+leftover=0
+for pid in "$app_pid" "$proxy_pid"; do
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    leftover=1
+  fi
+done
+if [[ $leftover -eq 0 ]]; then
+  echo "PASS --detach stop cleans up pids"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL --detach stop left processes (app=$app_pid proxy=$proxy_pid)"
+  FAIL=$((FAIL + 1))
+  kill "$app_pid" "$proxy_pid" 2>/dev/null || true
+fi
+unset PREVIEW_STATE_DIR
+
 # Release pinning: consumer docs @v1; Actions SHA-pinned; cloudflared version+sha256
 if grep -n 'preview-reusable.yml@main' "$ROOT/README.md" "$PLUGIN/README.md" >/dev/null 2>&1; then
   echo "FAIL consumer README still pins @main"
@@ -414,6 +588,23 @@ if [[ -f "$ROOT/.github/dependabot.yml" ]] && grep -q 'package-ecosystem: github
   PASS=$((PASS + 1))
 else
   echo "FAIL missing dependabot github-actions config"
+  FAIL=$((FAIL + 1))
+fi
+
+# Agent-mode E2E (examples/preview): detach, tiny-cap survival, busy-port, stop cleanup.
+echo
+echo "== agent-mode e2e =="
+E2E_OUT="$(bash "$ROOT/dev/run-e2e-agent.sh" 2>&1)" || true
+printf '%s\n' "$E2E_OUT"
+E2E_PASS="$(printf '%s\n' "$E2E_OUT" | grep -cE '^PASS ' || true)"
+E2E_FAIL="$(printf '%s\n' "$E2E_OUT" | grep -cE '^FAIL ' || true)"
+PASS=$((PASS + E2E_PASS))
+FAIL=$((FAIL + E2E_FAIL))
+if [[ "$E2E_FAIL" -eq 0 && "$E2E_PASS" -gt 0 ]]; then
+  echo "PASS agent-mode e2e suite ($E2E_PASS checks)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL agent-mode e2e suite (pass=$E2E_PASS fail=$E2E_FAIL)"
   FAIL=$((FAIL + 1))
 fi
 

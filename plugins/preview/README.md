@@ -42,12 +42,12 @@ Commit next to your app:
 | `start` | Shell command to boot the app (receives `PORT`) |
 | `port` | App listen port |
 | `idleSeconds` | Idle timeout after READY (Actions/CLI). Ignored in agent mode |
-| `totalCapSeconds` | Hard max lifetime; **always wins** over idle |
+| `totalCapSeconds` | Hard max lifetime in Actions/CLI; **always wins** over idle. Ignored in agent mode |
 | `defaultSteps` | Step names to run when the PR has no `preview:<step>` labels |
 | `ignorePaths` | Extra fnmatch patterns never counted as usage (merged with built-in `*poll*` + static assets) |
 | `root` | Doc root for `type: static` when `start` is empty |
 
-**Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run.
+**Steps** (optional): `.preview/steps/<name>.sh`. JSON never embeds commands. PR label `preview:migrate` runs `.preview/steps/migrate.sh`. Unknown labels fail with the valid list. With no labels, `defaultSteps` run. Steps rerun on every `preview up`, so they must be safe to repeat.
 
 **Optional `.preview/README.md`**: human check notes.
 
@@ -135,17 +135,19 @@ Local smoke-test: copy this plugin to `~/.cursor/plugins/local/preview` and relo
 ### Run in a consumer repo
 
 ```bash
-preview up --agent --config .preview/config.json --workdir .
-# localhost only — no tunnel
+preview up --agent --detach --config .preview/config.json --workdir .
+# localhost only — no tunnel; exits 0 once READY
 ```
 
 From a checkout of this marketplace:
 
 ```bash
-bin/preview up --agent --config /path/to/app/.preview/config.json --workdir /path/to/app
+bin/preview up --agent --detach --config /path/to/app/.preview/config.json --workdir /path/to/app
 ```
 
-`--agent` is localhost-only, disables idle, and still applies `totalCapSeconds`. For a public link (when a human asks): `preview up --agent --share` or `preview share`. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
+`--agent` is localhost-only with **no timers** (no idle, no total cap). `--detach` returns once READY and leaves the preview running; tear down with `preview stop`. For a public link (when a human asks): `preview up --agent --share` or `preview share`. See [`skills/preview/SKILL.md`](skills/preview/SKILL.md).
+
+Pre-set `PREVIEW_*` environment variables win over `.preview/config.json` (config load skips keys already in the environment).
 
 ### Optional: repo agent rules
 
@@ -165,8 +167,8 @@ The skill sets `disable-model-invocation: true`, so it never auto-fires from its
 | --- | --- | --- |
 | Tunnel | Always (`*.trycloudflare.com`) | Off unless `--share` / `preview share` |
 | Idle after READY | **5 minutes** (`300`) | **Off** |
-| Total max | **15 minutes** (`900`) | Same — safety net |
-| Cap vs idle | Cap always wins | Cap only |
+| Total max | **15 minutes** (`900`) | **Off** |
+| Cap vs idle | Cap always wins | No timers |
 
 Built-in ignore: `*poll*` + static assets. Single idle timer from READY; resets on counted requests only.
 
@@ -193,11 +195,15 @@ CLI only (no plugin install): run `bin/preview` from this package. Consumers pin
 After merge to `main` (do not tag from a PR branch):
 
 ```bash
-git tag v1.0.0 && git tag -f v1
-git push origin v1.0.0 && git push origin -f v1
+git tag v1.1.0 && git tag -f v1
+git push origin v1.1.0 && git push origin -f v1
 ```
 
-Later: tag `v1.0.x`, then move `v1` again. Actions are SHA-pinned (`# vX.Y.Z` comments); Dependabot refreshes them. `cloudflared` version + sha256 live in `lib/tunnel.sh` — bump both together from the upstream release notes.
+Later: tag `v1.1.x`, then move `v1` again. Actions are SHA-pinned (`# vX.Y.Z` comments); Dependabot refreshes them. `cloudflared` version + sha256 live in `lib/tunnel.sh` — bump both together from the upstream release notes.
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## v2
 
