@@ -36,23 +36,26 @@ PY
 }
 
 preview_watchdog() {
-  # Agent mode disables idle; only the total cap applies as a safety net.
+  # Human/Actions: idle + total cap (cap wins). Agent mode: no timers at all.
   local idle="${PREVIEW_IDLE_SECONDS:-300}"
   local cap="${PREVIEW_TOTAL_CAP_SECONDS:-900}"
   local started ready_at now last_active idle_age
+  local agent=0
   if [[ "${PREVIEW_AGENT_MODE:-}" == "1" || "${PREVIEW_AGENT_MODE:-}" == "true" ]]; then
+    agent=1
     idle=0
+    cap=0
   fi
   started="$(preview_read started_at)"
   [[ -n "$started" ]] || started="$(date +%s)"
 
   preview_write status watching
-  preview_log "watchdog idle=${idle}s total_cap=${cap}s agent=${PREVIEW_AGENT_MODE:-0}"
+  preview_log "watchdog idle=${idle}s total_cap=${cap}s agent=${agent}"
 
   while true; do
     now="$(date +%s)"
-    # Total cap always wins.
-    if (( now - started >= cap )); then
+    # Total cap (human/Actions only). cap=0 disables it.
+    if (( cap > 0 )) && (( now - started >= cap )); then
       preview_write reason "total-cap"
       preview_log "total cap reached (${cap}s)"
       return 0

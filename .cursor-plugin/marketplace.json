@@ -12,12 +12,16 @@
       "name": "preview",
       "source": "preview",
       "description": "Temporary Cloudflare quick-tunnel previews for any branch or PR",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": {
         "name": "Scott Grayson"
       },
       "license": "MIT",
-      "keywords": ["preview", "cloudflare", "tunnel"]
+      "keywords": [
+        "preview",
+        "cloudflare",
+        "tunnel"
+      ]
     }
   ]
 }

@@ -42,7 +42,7 @@ Commit these next to your app:
 | `start` | Shell command to boot the app (receives `PORT`) |
 | `port` | App listen port |
 | `idleSeconds` | Idle timeout after READY (Actions/CLI). Ignored in agent mode |
-| `totalCapSeconds` | Hard max lifetime; **always wins** over idle |
+| `totalCapSeconds` | Hard max lifetime in Actions/CLI; **always wins** over idle. Ignored in agent mode |
 | `defaultSteps` | Step names to run when the PR has no `preview:<step>` labels |
 | `ignorePaths` | Extra fnmatch patterns never counted as usage (merged with built-in `*poll*` + static assets) |
 | `root` | Doc root for `type: static` when `start` is empty |
@@ -138,24 +138,24 @@ For local smoke-testing without a team marketplace, copy the plugin into `~/.cur
 2. Ask the agent to preview the PR/branch, or run the CLI from the installed plugin (skill locates `bin/preview`):
 
 ```bash
-preview up --agent --config .preview/config.json --workdir .
-# prints http://127.0.0.1:<proxy-port> — no Cloudflare tunnel
+preview up --agent --detach --config .preview/config.json --workdir .
+# prints http://127.0.0.1:<proxy-port> — no Cloudflare tunnel; exits 0 once READY
 ```
 
 From a checkout of this marketplace (without installing):
 
 ```bash
-plugins/preview/bin/preview up --agent --config .preview/config.json --workdir path/to/app
+plugins/preview/bin/preview up --agent --detach --config .preview/config.json --workdir path/to/app
 ```
 
-`up --agent` is localhost-only (app + proxy), disables idle, and still applies `totalCapSeconds`. When a human asks for a public link:
+`up --agent` is localhost-only (app + proxy) with **no timers** (no idle, no total cap). `--detach` returns once READY and leaves the preview running; tear down with `preview stop`. When a human asks for a public link:
 
 ```bash
 preview up --agent --share --config .preview/config.json --workdir .
 # or: preview share --config .preview/config.json --workdir .
 ```
 
-Stay in the turn until it stops, then report the reason. See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
+See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
 
 ### Optional: repo agent rules
 
@@ -175,8 +175,8 @@ The skill sets `disable-model-invocation: true`, so it never auto-fires from its
 | --- | --- | --- |
 | Tunnel | Always (`*.trycloudflare.com`) | Off unless `--share` / `preview share` |
 | Idle after READY | **5 minutes** (`idleSeconds: 300`) | **Off** |
-| Total max | **15 minutes** (`totalCapSeconds: 900`) | Same — safety net |
-| Cap vs idle | Cap always wins | Cap only |
+| Total max | **15 minutes** (`totalCapSeconds: 900`) | **Off** |
+| Cap vs idle | Cap always wins | No timers |
 
 Built-in ignore (always on): path wildcard `*poll*` plus static assets. Add more via `ignorePaths`. Single idle timer starts at READY and resets on counted requests only — no grace period.
 

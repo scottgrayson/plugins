@@ -57,18 +57,20 @@ with open(json_path, "w", encoding="utf-8") as f:
 def sh_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
-lines = [
-    f"PREVIEW_TYPE={sh_quote(data['type'])}",
-    f"PREVIEW_START={sh_quote(data['start'])}",
-    f"PREVIEW_PORT={data['port']}",
-    f"PREVIEW_IDLE_SECONDS={data['idleSeconds']}",
-    f"PREVIEW_TOTAL_CAP_SECONDS={data['totalCapSeconds']}",
-    f"PREVIEW_ROOT={sh_quote(data['root'])}",
-    f"PREVIEW_DEFAULT_STEPS={sh_quote(json.dumps(data['defaultSteps']))}",
-    f"PREVIEW_IGNORE_PATHS={sh_quote(json.dumps(data['ignorePaths']))}",
+# Pre-set env vars win over config.json (do not write those keys into config.env).
+pairs = [
+    ("PREVIEW_TYPE", sh_quote(data["type"])),
+    ("PREVIEW_START", sh_quote(data["start"])),
+    ("PREVIEW_PORT", str(data["port"])),
+    ("PREVIEW_IDLE_SECONDS", str(data["idleSeconds"])),
+    ("PREVIEW_TOTAL_CAP_SECONDS", str(data["totalCapSeconds"])),
+    ("PREVIEW_ROOT", sh_quote(data["root"])),
+    ("PREVIEW_DEFAULT_STEPS", sh_quote(json.dumps(data["defaultSteps"]))),
+    ("PREVIEW_IGNORE_PATHS", sh_quote(json.dumps(data["ignorePaths"]))),
 ]
+lines = [f"{k}={v}" for k, v in pairs if k not in os.environ]
 with open(env_path, "w", encoding="utf-8") as f:
-    f.write("\n".join(lines) + "\n")
+    f.write("\n".join(lines) + ("\n" if lines else ""))
 PY
 
   # shellcheck disable=SC1090
