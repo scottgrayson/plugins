@@ -60,7 +60,9 @@ Keep the audit on a cadence so context bloat is caught early. The core stays rea
 - **`/loop` is session-scoped** and expires after ~7 days — not a durable schedule.
 - **Cloud Routines** (`/schedule`) run remotely and **cannot see local files** (no home `.claude`, no local plugin cache). Use them only for **repo-only** context audits on a connected repository.
 - **Preferred:** Claude Desktop → **Routines** page → **New routine** → **Local**. Local routines can see the installed plugin and project files.
-- Example local routine prompt: `Run the context-audit skill. Locate the CLI with braced ${CLAUDE_PLUGIN_ROOT}, run bash …/bin/ai-audit context --host claude, reply with the top 5 wins. Do not edit files.`
+- Example local routine prompt: `Run /ai-audit:context-audit and reply with the top wins. Do not edit files.`
+  (`${CLAUDE_PLUGIN_ROOT}` is **not** substituted in routine prompts — use the slash-skill form.)
+- After creating the routine, click **Run now** once and choose **always allow** at the Bash permission prompt so scheduled runs do not stall in Manual permission mode.
 
 ### Cursor
 

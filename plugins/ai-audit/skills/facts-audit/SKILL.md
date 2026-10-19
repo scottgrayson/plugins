@@ -62,7 +62,10 @@ Memory drifts slowly — monthly is usually enough. Never edit memory without ap
 ### Claude Code
 
 - **`/loop`** is session-scoped (~7 day expiry). **Cloud Routines** cannot see local auto-memory under `~/.claude`.
-- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**, using braced `${CLAUDE_PLUGIN_ROOT}` and `bash …/bin/ai-audit facts --host claude --stale-days 30`.
+- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**.
+- Example local routine prompt: `Run /ai-audit:facts-audit and reply with the top wins. Do not edit files.`
+  (`${CLAUDE_PLUGIN_ROOT}` is **not** substituted in routine prompts — use the slash-skill form.)
+- After creating the routine, click **Run now** once and choose **always allow** at the Bash permission prompt so scheduled runs do not stall in Manual permission mode.
 - Cloud routines only fit **repo-only** facts (e.g. `AGENTS.md` / rules committed in the repo).
 
 ### Cursor

@@ -570,6 +570,8 @@ for skill in context-audit token-audit facts-audit; do
   assert_contains "skill $skill schedules Cursor" "$(cat "$sk")" "### Cursor"
   assert_contains "skill $skill schedules Grok Bot" "$(cat "$sk")" "### Grok Bot"
   assert_contains "skill $skill mentions Desktop Local routine" "$(cat "$sk")" "Local"
+  assert_contains "skill $skill routine uses slash skill" "$(cat "$sk")" "/ai-audit:"
+  assert_contains "skill $skill mentions always allow" "$(cat "$sk")" "always allow"
   assert_contains "skill $skill mentions cursor.com/automations" "$(cat "$sk")" "cursor.com/automations"
   assert_not_contains "skill $skill omits Customize Automations menu" "$(cat "$sk")" "Customize → Automations"
   assert_contains "skill $skill rejects invented Automations menu" "$(cat "$sk")" "Customize-sidebar"
@@ -674,6 +676,27 @@ if [[ -f "$TMP/install-detect.json" ]]; then
   echo "PASS installed-copy locate + run from unrelated cwd"
   PASS=$((PASS + 1))
 fi
+
+# Fresh copy: a run must not create __pycache__ under the install
+FRESH="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-fresh.XXXXXX")"
+cp -a "$PLUGIN" "$FRESH/ai-audit"
+# Ensure no pre-existing pycache from the workspace copy
+find "$FRESH/ai-audit" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+find "$FRESH/ai-audit" -type f -name '*.pyc' -delete 2>/dev/null || true
+bash "$FRESH/ai-audit/bin/ai-audit" detect --root "$FIX/claude" --json-only >/dev/null
+bash "$FRESH/ai-audit/bin/ai-audit" context --host claude --root "$FIX/claude" --json-only >/dev/null
+if find "$FRESH/ai-audit" \( -type d -name '__pycache__' -o -type f -name '*.pyc' \) | grep -q .; then
+  echo "FAIL fresh install left __pycache__ or .pyc"
+  find "$FRESH/ai-audit" \( -type d -name '__pycache__' -o -type f -name '*.pyc' \)
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS fresh install leaves no __pycache__"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$FRESH"
+
+assert_contains "bin sets PYTHONDONTWRITEBYTECODE" "$(cat "$PLUGIN/bin/ai-audit")" "PYTHONDONTWRITEBYTECODE=1"
+assert_contains "bin uses python3 -B" "$(cat "$PLUGIN/bin/ai-audit")" "python3 -B"
 
 echo "== baseline =="
 assert_ge "claude inventory" "$(py_get "$TMP/claude-context.json" 'len(data["inventory"])')" 8

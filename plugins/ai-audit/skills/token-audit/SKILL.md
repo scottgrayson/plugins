@@ -69,7 +69,10 @@ Label estimates; never invent numbers. Prefer local runs for anything that needs
 ### Claude Code
 
 - **`/loop` is session-scoped** (~7 day expiry). **Cloud Routines** (`/schedule`) cannot see local session JSONL or the plugin cache.
-- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**, with a prompt that uses braced `${CLAUDE_PLUGIN_ROOT}` and `bash …/bin/ai-audit token --host claude`.
+- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**.
+- Example local routine prompt: `Run /ai-audit:token-audit and reply with the top wins. Do not edit files.`
+  (`${CLAUDE_PLUGIN_ROOT}` is **not** substituted in routine prompts — use the slash-skill form.)
+- After creating the routine, click **Run now** once and choose **always allow** at the Bash permission prompt so scheduled runs do not stall in Manual permission mode.
 - Cloud routines are only suitable if you intentionally limit the audit to repo-checked-in artifacts (unusual for token audit).
 
 ### Cursor

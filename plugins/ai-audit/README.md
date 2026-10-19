@@ -118,7 +118,7 @@ Each skill’s `SKILL.md` has accurate host-specific steps. Summary:
 
 | Host | What works |
 | --- | --- |
-| Claude Code | Prefer **Claude Desktop → Routines → New routine → Local**. `/loop` is session-scoped (~7 days). Cloud `/schedule` routines cannot see local files (repo-only audits only). |
+| Claude Code | Prefer **Claude Desktop → Routines → New routine → Local** with prompt `Run /ai-audit:<skill> and reply with the top wins. Do not edit files.` (routine prompts do not expand `${CLAUDE_PLUGIN_ROOT}`). Click **Run now** once and choose **always allow** at the Bash prompt. `/loop` is session-scoped (~7 days). Cloud `/schedule` cannot see local files (repo-only only). |
 | Cursor | Use [cursor.com/automations](https://cursor.com/automations), the Agents window, or `/automate`. Cloud automations lack local `~/.cursor`, the local plugin, and downloaded CSVs — fine for **repo-level** context/facts; token audits need a **local** run or explicit Admin API opt-in. |
 | Grok Bot | Ask the bot **in chat** to schedule (plain words). View via bot name → info pane → **Routines**. Scheduled token audits must not ask for Usage numbers (report saving unknown + note). |
 
