@@ -605,9 +605,12 @@ else
   echo "PASS no floating actions/*@vN tags"
   PASS=$((PASS + 1))
 fi
-if grep -q 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0' "$ROOT/.github/workflows/ci.yml" \
-  && grep -q 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0' "$ROOT/.github/workflows/preview-reusable.yml"; then
-  echo "PASS actions/checkout pinned to SHA # v4.4.0"
+pin_re='uses: actions/checkout@[0-9a-f]{40} # v[0-9]'
+unpinned=$(grep -hE 'uses: actions/checkout@' "$ROOT/.github/workflows/ci.yml" "$ROOT/.github/workflows/preview-reusable.yml" | grep -vE "$pin_re" || true)
+if [ -z "$unpinned" ] \
+  && grep -qE "$pin_re" "$ROOT/.github/workflows/ci.yml" \
+  && grep -qE "$pin_re" "$ROOT/.github/workflows/preview-reusable.yml"; then
+  echo "PASS actions/checkout pinned to a full SHA"
   PASS=$((PASS + 1))
 else
   echo "FAIL actions/checkout not SHA-pinned"

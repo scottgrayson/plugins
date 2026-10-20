@@ -27,7 +27,7 @@ jobs:
       (github.event.action == 'opened' || github.event.action == 'reopened')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
@@ -182,11 +182,11 @@ jobs:
       stop_reason: ${{ steps.run.outputs.stop_reason }}
     steps:
       # Consumer checkout first so a later plugin checkout into _preview_plugin is not wiped.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.mark-loading.outputs.head_sha }}
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: scottgrayson/plugins
           path: _preview_plugin
