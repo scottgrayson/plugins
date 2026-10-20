@@ -557,6 +557,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-30 (product parenthesis allowlist) =="
+R30_OUT="$(python3 -B "$PLUGIN/tests/test_round30.py" 2>&1)" && R30_RC=0 || R30_RC=$?
+if [[ $R30_RC -eq 0 ]]; then
+  echo "PASS $R30_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round30 (rc=$R30_RC)"
+  echo "  $R30_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then

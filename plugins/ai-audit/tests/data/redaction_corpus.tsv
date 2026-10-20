@@ -687,3 +687,11 @@ redact	dashlane-x9y8z7	x9y8z7
 redact	keepassxc\t=\tx9	x9
 keep	Use 1Password to fetch the API key	
 keep	1Password.	
+redact	1password (hunter2)	hunter2
+redact	1Password (x9y8)	x9y8
+redact	lastpass (Hunter2Fake)	Hunter2Fake
+redact	1password [hunter2]	hunter2
+redact	1password {hunter2}	hunter2
+redact	bitwarden (pw: x9)	x9
+keep	1Password (password manager)	
+keep	user-1password (1 tool)	

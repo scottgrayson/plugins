@@ -935,9 +935,24 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
     return hits
 
 
+def _product_paren_spans(text: str) -> list[tuple[int, int]]:
+    """Source spans of safe parenthesised asides after a product name."""
+    folded, idx = _fold_with_map(text)
+    orig = _aligned(text, idx)
+    spans: list[tuple[int, int]] = []
+    for m in _PRODUCT_RE.finditer(folded):
+        n = _paren_end(folded[m.end() :], orig[m.end() :])
+        if n:
+            spans.append((idx[m.end()], idx[m.end() + n - 1] + 1))
+    return spans
+
+
 def _apply_assignment_redactions(text: str) -> str:
     secret_hits: list[_AssignHit] = []
+    safe_spans = _product_paren_spans(text)
     for h in _collect_assignments(text):
+        if any(a <= h.start < b for a, b in safe_spans):
+            continue
         following = text[h.end :]
         if should_redact_assignment(
             h.name, h.value, form=h.form, following=following
@@ -1034,6 +1049,11 @@ _BACKSTOP_PATH_KEYS = _PATH_FIELD_KEYS | {"source"}
 HIDDEN_MARKER = "…[hidden]"
 
 
+def _aligned(text: str, idx: list[int]) -> str:
+    """Original characters aligned one-to-one with the folded text."""
+    return "".join(text[i] for i in idx)
+
+
 def _fold_with_map(text: str) -> tuple[str, list[int]]:
     """NFKC + lowercase copy, dropping format chars; map each folded char to its source index."""
     chars: list[str] = []
@@ -1051,16 +1071,32 @@ def _fold_with_map(text: str) -> tuple[str, list[int]]:
 # allowlist of safe contexts. Anything else (any separator followed by a value)
 # makes the product name act as the secret word, so the rest is hidden.
 _ALPHA_WORD = r"[^\W\d_]+(?=$|\s|[.,;!?)\]])"
-_SAFE_PAREN_RE = re.compile(r"\s+\(")
+# Parenthesised aside: a tool count, or plain alphabetic words with single spaces.
+_SAFE_PAREN_RE = re.compile(
+    r"\s+\((?:\d+ tools?|[^\W\d_]+(?: [^\W\d_]+)*)\)(?=$|\s)"
+)
 _SAFE_WORD_RE = re.compile(r"\s+(?!(?:is|are)(?=\s|$))" + _ALPHA_WORD)
 _SAFE_CLOSE_RE = re.compile(r"[.,)\]]+(?:$|\s+" + _ALPHA_WORD + ")")
 _SAFE_TAIL_RE = re.compile(r"(?:[-_.]*[^\W\d_]+)+(?![^\W_])")
 
 
-def _safe_follow(rest: str, tail_ok: bool = True) -> bool:
+def _paren_end(rest: str, orig: str | None) -> int:
+    """End of a safe parenthesised aside at the start of rest, or 0."""
+    m = _SAFE_PAREN_RE.match(rest)
+    if not m:
+        return 0
+    if orig is not None:
+        # mixed-case words (hUnTer) look like random tokens, not prose
+        body = orig[: m.end()]
+        if any(w[1:] != w[1:].lower() for w in re.findall(r"[^\W\d_]+", body)):
+            return 0
+    return m.end() if _safe_follow(rest[m.end() :], tail_ok=False) else 0
+
+
+def _safe_follow(rest: str, tail_ok: bool = True, orig: str | None = None) -> bool:
     if not rest:
         return True
-    if _SAFE_PAREN_RE.match(rest) or _SAFE_WORD_RE.match(rest) or _SAFE_CLOSE_RE.match(rest):
+    if _paren_end(rest, orig) or _SAFE_WORD_RE.match(rest) or _SAFE_CLOSE_RE.match(rest):
         return True
     if tail_ok:
         # word-only glued tail (1password-dragonfly): the remainder must be safe too
@@ -1069,11 +1105,11 @@ def _safe_follow(rest: str, tail_ok: bool = True) -> bool:
     return False
 
 
-def _product_is_key(folded: str, end: int) -> bool:
-    return not _safe_follow(folded[end:])
+def _product_is_key(folded: str, end: int, orig: str | None = None) -> bool:
+    return not _safe_follow(folded[end:], orig=None if orig is None else orig[end:])
 
 
-def _strong_matches(folded: str) -> list["re.Match[str]"]:
+def _strong_matches(folded: str, orig: str | None = None) -> list["re.Match[str]"]:
     """Strong secret words, minus those inside a product name such as 1password.
 
     The exemption applies only when an allowlisted context follows the product name
@@ -1082,10 +1118,12 @@ def _strong_matches(folded: str) -> list["re.Match[str]"]:
     exempt: list[tuple[int, int]] = []
     keys: list["re.Match[str]"] = []
     for m in _PRODUCT_RE.finditer(folded):
-        if _product_is_key(folded, m.end()):
+        if _product_is_key(folded, m.end(), orig):
             keys.append(m)  # the product name itself acts as the secret word
         else:
-            exempt.append(m.span())
+            end = m.end()
+            end += _paren_end(folded[end:], None if orig is None else orig[end:])
+            exempt.append((m.start(), end))
     found = [
         m
         for m in _STRONG_SECRET_RE.finditer(folded)
@@ -1123,7 +1161,7 @@ def _tail_is_secret(tail: str) -> bool:
 def hide_after_strong_word(text: str) -> str:
     """Field-level backstop: keep text through the first strong secret word, hide the rest."""
     folded, idx = _fold_with_map(text)
-    found = _strong_matches(folded)
+    found = _strong_matches(folded, _aligned(text, idx))
     if not found:
         return text
     m = found[0]
@@ -1157,7 +1195,7 @@ def _hide_path_secret(text: str) -> str:
     password.X stay readable by design.
     """
     folded, idx = _fold_with_map(text)
-    for m in _strong_matches(folded):
+    for m in _strong_matches(folded, _aligned(text, idx)):
         end = _strong_tail_start(folded, m)
         nxt = folded[end : end + 1]
         if nxt and not (nxt in "/.-_" or nxt.isalpha()):
@@ -1180,7 +1218,7 @@ def _random_tail(tail: str) -> bool:
 
 def _bare_name_is_safe(text: str) -> bool:
     folded, idx = _fold_with_map(text)
-    for m in _strong_matches(folded):
+    for m in _strong_matches(folded, _aligned(text, idx)):
         end = _strong_tail_start(folded, m)
         if end < len(folded) and _tail_is_secret(text[idx[end] :]):
             return False
