@@ -702,13 +702,28 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
             ]
         )
 
+    seen_rules: set[Path] = set()
     for rules_dir, scope in (
         (home / "rules", "user"),
         (project / ".claude" / "rules", "project"),
     ):
         if not rules_dir.is_dir():
             continue
+        try:
+            rules_key = rules_dir.resolve()
+        except OSError:
+            rules_key = rules_dir
+        if rules_key in seen_rules:
+            continue
+        seen_rules.add(rules_key)
         for path in sorted(rules_dir.rglob("*.md")):
+            try:
+                path_key = path.resolve()
+            except OSError:
+                path_key = path
+            if path_key in seen_rules:
+                continue
+            seen_rules.add(path_key)
             text = safe_read_text(path) or ""
             meta, _ = parse_front_matter(text)
             paths_globs = meta.get("paths")
@@ -840,7 +855,22 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
     ):
         if not rules_dir.is_dir():
             continue
+        try:
+            rules_key = rules_dir.resolve()
+        except OSError:
+            rules_key = rules_dir
+        # When project == HOME, project/.cursor/rules == ~/.cursor/rules — scan once.
+        if rules_key in seen:
+            continue
+        seen.add(rules_key)
         for path in sorted(rules_dir.rglob("*.mdc")):
+            try:
+                path_key = path.resolve()
+            except OSError:
+                path_key = path
+            if path_key in seen:
+                continue
+            seen.add(path_key)
             text = safe_read_text(path) or ""
             meta, _ = parse_front_matter(text)
             load, notes = _cursor_rule_load(meta)

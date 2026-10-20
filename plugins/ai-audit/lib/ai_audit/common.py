@@ -52,7 +52,7 @@ SECRET_JSON_KEYS = frozenset(
 # Redaction: assignment scanner (name classify + value classify) + token pass
 # ---------------------------------------------------------------------------
 
-# Exact secret-ish names (normalized: lower, - → _). No bare "key" / primary_key.
+# Exact secret-ish names (normalized: lower, - → _, camelCase → snake). No bare "key".
 _SECRET_NAME_EXACT = frozenset(
     {
         "password",
@@ -68,6 +68,7 @@ _SECRET_NAME_EXACT = frozenset(
         "access_key",
         "access_token",
         "private_key",
+        "secret_key",
         "credentials",
         "credential",
         "x_api_key",
@@ -77,6 +78,19 @@ _SECRET_NAME_EXACT = frozenset(
         "authorization",
         "session",
         "cookie",
+        "sid",  # Set-Cookie: sid=…
+    }
+)
+_PASSWORD_FAMILY = frozenset(
+    {
+        "password",
+        "passwd",
+        "pass",
+        "passphrase",
+        "pwd",
+        "pw",
+        "db_pass",
+        "mysql_pwd",
     }
 )
 _SECRET_NAME_SUFFIX_RE = re.compile(
@@ -85,7 +99,10 @@ _SECRET_NAME_SUFFIX_RE = re.compile(
 )
 # Non-secret even if suffix matches TOKEN/SECRET (config knobs / UI counters).
 _NONSECRET_NAME_RE = re.compile(
-    r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT)_(?:TOKEN|SECRET|PASSWORD|PASS|PWD)$"
+    r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT|COUNT)_(?:TOKEN|SECRET|PASSWORD|PASS|PWD)$"
+)
+_KNOB_NAME_RE = re.compile(
+    r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT|COUNT)(?:_|$)|(?:^|_)(?:COUNT|LIMIT|MAX|MIN)$"
 )
 
 # Values after '=' may include URL colons; values after ':' must not swallow nested 'name:'
@@ -133,6 +150,15 @@ _PGP_PRIVATE_RE = re.compile(
 _BEARER_BASIC_RE = re.compile(
     r"(?i)\b(Bearer|Basic)\s+([A-Za-z0-9_\-\.=+/]{4,})"
 )
+# "Authorization: token <value>" (GitHub-style) — not Bearer/Basic
+_AUTHZ_TOKEN_RE = re.compile(
+    r"(?i)\b(Authorization\s*:\s*token)\s+([A-Za-z0-9_\-\.=+/]{4,})"
+)
+# "password is <value>" / "token is <value>"
+_NAME_IS_VALUE_RE = re.compile(
+    r"(?i)\b(password|passwd|passphrase|token|secret|api[_-]?key)\s+is\s+"
+    r"([^\s,;]+)"
+)
 
 _SECRET_TOKEN_RES = (
     (re.compile(r"(?i)\bsk-ant-[A-Za-z0-9_\-]{8,}\b"), "sk-ant-…REDACTED"),
@@ -143,7 +169,12 @@ _SECRET_TOKEN_RES = (
     (re.compile(r"(?i)\bsk_test_[A-Za-z0-9]{8,}\b"), "sk_test_…REDACTED"),
     (re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{16,}\b"), "sk-…REDACTED"),
     (re.compile(r"(?i)\bxai-[A-Za-z0-9_\-]{16,}\b"), "xai-…REDACTED"),
-    (re.compile(r"(?i)\b(ghp_|gho_|ghs_|github_pat_|glpat-)[A-Za-z0-9_\-]{8,}\b"), "gh-…REDACTED"),
+    (
+        re.compile(
+            r"(?i)\b(ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|glpat-)[A-Za-z0-9_\-]{8,}\b"
+        ),
+        "gh-…REDACTED",
+    ),
     (re.compile(r"(?i)\bhf_[A-Za-z0-9]{10,}\b"), "hf_…REDACTED"),
     (re.compile(r"(?i)\bnpm_[A-Za-z0-9]{10,}\b"), "npm_…REDACTED"),
     (re.compile(r"(?i)\bwhsec_[A-Za-z0-9_\-]{8,}\b"), "whsec_…REDACTED"),
@@ -192,9 +223,29 @@ _PATH_FIELD_KEYS = frozenset(
 )
 
 _PLACEHOLDER_VALUE_RE = re.compile(
-    r"(?i)^(?:\$\{[^}]+\}$|\$[A-Za-z_][A-Za-z0-9_]*$|<[^>]+>$|\*{3,}$|x{3,}$|changeme)$"
+    r"(?i)^(?:"
+    r"\$\{[^}]+\}|"
+    r"\$[A-Za-z_][A-Za-z0-9_]*|"
+    r"<[^>]+>|"
+    r"\*{3,}|"
+    r"x{3,}|"
+    r"changeme|"
+    r"your[\w-]*password[\w-]*|"
+    r"your[\w-]+here|"
+    r"redacted|"
+    r"placeholder"
+    r")$"
 )
-_MODEL_NAME_RE = re.compile(r"(?i)^(?:claude-|gpt-|grok-|gemini-|o1|o3)")
+# Exact model ids only (no bare o1/o3 prefix — password=o1secretXyz must redact).
+_MODEL_NAME_RE = re.compile(
+    r"(?i)^(?:"
+    r"claude-[\w.-]+|"
+    r"gpt-[\w.-]+|"
+    r"grok-[\w.-]+|"
+    r"gemini-[\w.-]+|"
+    r"o1|o1-mini|o1-preview|o3|o3-mini"
+    r")$"
+)
 _BOOLEAN_VALUE_RE = re.compile(
     r"(?i)^(?:true|false|yes|no|on|off|enabled|disabled)$"
 )
@@ -209,9 +260,11 @@ _UUID_RE = re.compile(
 )
 _GIT_SHA_RE = re.compile(r"(?i)^[0-9a-f]{7,40}$")
 _KNOWN_SECRET_PREFIX_RE = re.compile(
-    r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|ghs_|github_pat_|glpat-|npm_|whsec_|hf_|"
+    r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|glpat-|npm_|whsec_|hf_|"
     r"xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)"
 )
+# R8: single lowercase dictionary-like word, no digits (token: optional).
+_DICT_WORD_RE = re.compile(r"^[a-z]+(?:-[a-z]+)?$")
 
 
 def _strip_value_quotes(value: str) -> str:
@@ -222,7 +275,9 @@ def _strip_value_quotes(value: str) -> str:
 
 
 def _norm_name(name: str) -> str:
-    return name.lower().replace("-", "_")
+    # camelCase / PascalCase → snake_case, then lower; dashes → underscores.
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name or "")
+    return s.replace("-", "_").lower()
 
 
 def is_secret_name(name: str) -> bool:
@@ -234,21 +289,34 @@ def is_secret_name(name: str) -> bool:
     n = _norm_name(name)
     if n in _SECRET_NAME_EXACT:
         return True
-    if _SECRET_NAME_SUFFIX_RE.search(name):
+    if _SECRET_NAME_SUFFIX_RE.search(name) or _SECRET_NAME_SUFFIX_RE.search(n):
         # Reject bare *_key (primary_key, sort_key, cache_key, public_key, …)
-        if re.search(r"(?i)_key$", name) and not re.search(
-            r"(?i)(?:api_key|secret_key|access_key|private_key)$", name
+        if re.search(r"(?i)_key$", n) and not re.search(
+            r"(?i)(?:api_key|secret_key|access_key|private_key)$", n
         ):
             return False
         return True
     return False
 
 
+def _is_password_family(name: str) -> bool:
+    n = _norm_name(name)
+    if n in _PASSWORD_FAMILY:
+        return True
+    return bool(re.search(r"(?i)(?:PASSWORD|PASSWD|_PASS|_PWD)$", name or ""))
+
+
+def _is_knob_name(name: str) -> bool:
+    if _NONSECRET_NAME_RE.match(name or ""):
+        return True
+    return bool(_KNOB_NAME_RE.search(name or ""))
+
+
 def classify_value(value: str) -> str:
     """
     Classify a raw value atom.
     Returns one of: empty, placeholder, boolean, null, number, version, path,
-    uuid, gitsha, model, prose, secretlike.
+    uuid, gitsha, model, prose, dictword, secretlike.
     """
     raw = (value or "").strip()
     if not raw:
@@ -285,40 +353,80 @@ def classify_value(value: str) -> str:
     if quoted:
         # Quoted non-placeholder content is treated as a secret payload
         return "secretlike"
-    # Letter-only tokens: Titlecase / short lowercase English → prose;
-    # long lowercase or camelCase → secretlike (ghfake, FakeTok).
-    if re.fullmatch(r"[A-Za-z][A-Za-z\-]*", v):
-        if v[0].isupper() and v[1:].islower():
-            return "prose"  # Composer, Hunter (titlecase English)
-        if v.isupper() and len(v) <= 6:
-            return "prose"
-        if v.islower() and len(v) < 6:
-            return "prose"
-        return "secretlike"
+    # Single lowercase dictionary-like word, no digits, short (R8 keep after colon).
+    # Long lowercase blobs (Bearer abcdefghijklmnop) stay secretlike.
+    if _DICT_WORD_RE.match(v) and len(v) <= 12:
+        return "dictword"
+    # Titlecase English without digits (Composer). Password-family still redacts these.
+    if re.fullmatch(r"[A-Z][a-z]+", v):
+        return "titleword"
     return "secretlike"
 
 
-# uuid/gitsha are NOT safe here: hex-looking secrets (abc123def) must still redact.
-_SAFE_VALUE_KINDS = frozenset(
-    {
-        "empty",
-        "placeholder",
-        "boolean",
-        "null",
-        "number",
-        "version",
-        "path",
-        "model",
-        "prose",
-    }
-)
+# Always-safe kinds for any secret-ish name (leaked secret > redacted word).
+_ALWAYS_SAFE_KINDS = frozenset({"empty", "placeholder", "boolean", "null"})
 
 
-def should_redact_assignment(name: str, value: str) -> bool:
-    """Single decision: secret-ish name + non-safe value → redact."""
+def should_redact_assignment(
+    name: str,
+    value: str,
+    *,
+    form: str = "eq",
+    following: str = "",
+) -> bool:
+    """
+    Decide whether to redact one assignment.
+
+    Policy (owner): a leaked secret is worse than a redacted word.
+    Safe for secret-ish names: empty / placeholder / null / boolean.
+    Numbers only for knob names and pass=N fail=M test counts.
+    Colon form: multi-word prose and single lowercase dict words may stay (R8).
+    Paths only for pwd=. Model ids never safe for password-family names.
+    """
     if not is_secret_name(name):
         return False
-    return classify_value(value) not in _SAFE_VALUE_KINDS
+    kind = classify_value(value)
+    if kind in _ALWAYS_SAFE_KINDS:
+        return False
+
+    n = _norm_name(name)
+    pw_family = _is_password_family(name)
+
+    # pass=N fail=M / PASS=12 FAIL=0 test counters
+    if n == "pass" and kind == "number" and re.match(
+        r"(?i)\s+fail\s*=\s*\d+", following or ""
+    ):
+        return False
+
+    if _is_knob_name(name) and kind in {"number", "version", "model", "prose"}:
+        return False
+
+    # pwd=/Users/... filesystem paths (not password=/Secret123)
+    if n == "pwd" and kind == "path":
+        return False
+
+    # Exact model ids on non-password names (token: claude-sonnet-4-5)
+    if kind == "model" and not pw_family:
+        return False
+
+    if form == "colon":
+        # Multi-word instructional prose ("8+ chars required" / "none needed")
+        if kind == "prose":
+            return False
+        # R8: single lowercase dictionary word, no digits
+        if kind == "dictword":
+            return False
+        # Titlecase label words on non-password names (Default token: Composer …)
+        if kind == "titleword" and not pw_family:
+            return False
+        # Count/limit style after token:/secret: ("8192", "v2", "8+") — not password family
+        if not pw_family and kind in {"number", "version"}:
+            return False
+        # password: 1234 / password: Dragon → redact
+        return True
+
+    # eq / flag / query: anything else after a secret name is a secret
+    return True
 
 
 def looks_like_secret_value(value: str) -> bool:
@@ -346,15 +454,22 @@ def _auth_token_looks_credential(tok: str) -> bool:
         "enabled",
         "bad",
         "news",
+        "required",
     }:
         return False
     kind = classify_value(tok)
-    if kind in _SAFE_VALUE_KINDS:
+    if kind in _ALWAYS_SAFE_KINDS or kind in {
+        "dictword",
+        "prose",
+        "titleword",
+        "model",
+    }:
         return False
     # Long opaque tokens (incl. lowercase 16+ with no digit)
     if len(tok) >= 16 and re.fullmatch(r"[A-Za-z0-9_\-\.=+/]+", tok):
         return True
-    if re.search(r"\d", tok) or re.search(r"[+/=]", tok):
+    # Dotted bearer tokens (abc.def) and anything with digit / b64 punctuation
+    if re.search(r"\d", tok) or re.search(r"[+/=.]", tok):
         return True
     if _KNOWN_SECRET_PREFIX_RE.match(tok) or tok.startswith("eyJ"):
         return True
@@ -400,6 +515,7 @@ class _AssignHit:
     value_end: int
     value: str
     prefix: str  # text between name and value to keep (e.g. "=", ": ", "--password ")
+    form: str  # eq | colon | flag | query
 
 
 def _parse_value_at(
@@ -425,7 +541,7 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
             continue
         val, vs, ve = parsed
         prefix = text[m.start() : vs]
-        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix))
+        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "eq"))
 
     # Every name: occurrence (including nested password: inside A: password: x).
     # Skip when the atom is really the name of a nested name=value (Cookie: session=…).
@@ -438,7 +554,7 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         if ve < len(text) and text[ve] == "=":
             continue
         prefix = text[m.start() : vs]
-        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix))
+        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "colon"))
 
     for m in _ASSIGN_FLAG_RE.finditer(text):
         flag, name, sep, val = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -446,23 +562,31 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
             continue
         prefix = f"{flag}{sep}"
         hits.append(
-            _AssignHit(m.start(), m.end(), name, m.start(4), m.end(), val, prefix)
+            _AssignHit(
+                m.start(), m.end(), name, m.start(4), m.end(), val, prefix, "flag"
+            )
         )
 
     for m in _ASSIGN_QUERY_RE.finditer(text):
         amp, name, val = m.group(1), m.group(2), m.group(3)
         prefix = f"{amp}{name}="
         hits.append(
-            _AssignHit(m.start(), m.end(), name, m.start(3), m.end(), val, prefix)
+            _AssignHit(
+                m.start(), m.end(), name, m.start(3), m.end(), val, prefix, "query"
+            )
         )
 
     return hits
 
 
 def _apply_assignment_redactions(text: str) -> str:
-    secret_hits = [
-        h for h in _collect_assignments(text) if should_redact_assignment(h.name, h.value)
-    ]
+    secret_hits: list[_AssignHit] = []
+    for h in _collect_assignments(text):
+        following = text[h.end :]
+        if should_redact_assignment(
+            h.name, h.value, form=h.form, following=following
+        ):
+            secret_hits.append(h)
     if not secret_hits:
         return text
     # Prefer innermost: later-starting / shorter spans first, then drop outer wrappers
@@ -490,7 +614,7 @@ def redact_secrets(text: str) -> str:
 
     Pass 1: PEM/PGP blocks, URL userinfo.
     Pass 2: assignment scanner (name=value, name: value, --name, ?query=).
-    Pass 3: Bearer/Basic + known-prefix tokens + contextual AWS secrets.
+    Pass 3: password is X / Authorization: token / Bearer/Basic + known-prefix tokens.
     """
     if text is None:
         return ""
@@ -508,6 +632,24 @@ def redact_secrets(text: str) -> str:
     out = _URL_USERINFO_RE.sub(r"\1\2:…REDACTED@", out)
 
     out = _apply_assignment_redactions(out)
+
+    def _name_is_sub(m: re.Match[str]) -> str:
+        val = m.group(2)
+        if classify_value(val) in _ALWAYS_SAFE_KINDS:
+            return m.group(0)
+        return f"{m.group(1)} is …REDACTED"
+
+    out = _NAME_IS_VALUE_RE.sub(_name_is_sub, out)
+
+    def _authz_token_sub(m: re.Match[str]) -> str:
+        tok = m.group(2)
+        if _auth_token_looks_credential(tok) or classify_value(tok) == "secretlike":
+            return f"{m.group(1)} …REDACTED"
+        if classify_value(tok) in _ALWAYS_SAFE_KINDS or classify_value(tok) == "dictword":
+            return m.group(0)
+        return f"{m.group(1)} …REDACTED"
+
+    out = _AUTHZ_TOKEN_RE.sub(_authz_token_sub, out)
 
     def _auth_sub(m: re.Match[str]) -> str:
         kind, tok = m.group(1), m.group(2)

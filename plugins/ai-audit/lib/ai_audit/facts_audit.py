@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from .common import (
     FactIssue,
@@ -102,9 +102,42 @@ def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
     return facts
 
 
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
+    """Keep first occurrence of each resolved real path."""
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for p in paths:
+        key = _resolved(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _dedupe_facts(facts: list[Fact]) -> list[Fact]:
+    """Drop identical entries from the same resolved path (project == HOME double-scan)."""
+    seen: set[tuple[str, str, str, str]] = set()
+    out: list[Fact] = []
+    for f in facts:
+        key = (str(_resolved(Path(f.path))), f.text, f.date, f.source)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
 def _collect_imports(path: Path, seen: set[Path]) -> list[Path]:
     out: list[Path] = []
-    resolved = path.resolve()
+    resolved = _resolved(path)
     if resolved in seen or not path.is_file():
         return out
     seen.add(resolved)
@@ -115,7 +148,7 @@ def _collect_imports(path: Path, seen: set[Path]) -> list[Path]:
         rel = m.group(1).strip()
         if rel.startswith("http"):
             continue
-        cand = (base / rel).resolve()
+        cand = _resolved(base / rel)
         if cand.is_file():
             out.extend(_collect_imports(cand, seen))
     return out
@@ -177,6 +210,7 @@ def collect_grok_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], list[
                 )
             )
 
+    facts = _dedupe_facts(facts)
     _add_duplicates_and_conflicts(facts, issues)
     return facts, issues, notes
 
@@ -238,17 +272,20 @@ def collect_claude_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], lis
         roots.project / ".claude" / "CLAUDE.md",
         home / "CLAUDE.md",
     ]
-    for rules_dir in (home / "rules", roots.project / ".claude" / "rules"):
+    for rules_dir in _dedupe_paths(
+        [home / "rules", roots.project / ".claude" / "rules"]
+    ):
         if rules_dir.is_dir():
             seed_paths.extend(sorted(rules_dir.rglob("*.md")))
 
     seen: set[Path] = set()
-    for seed in seed_paths:
+    for seed in _dedupe_paths(seed_paths):
         for path in _collect_imports(seed, seen):
             text = safe_read_text(path) or ""
             _, body = parse_front_matter(text)
             facts.extend(_bullet_facts("claude", path, body or text, path.name))
 
+    facts = _dedupe_facts(facts)
     _add_duplicates_and_conflicts(facts, issues)
     return facts, issues, notes
 
@@ -289,27 +326,38 @@ def collect_cursor_facts(
             "No memories export provided. Ask the user to run Export memories and pass --memories PATH."
         )
 
-    for path in (
-        roots.project / "AGENTS.md",
-        roots.project / "CLAUDE.md",
-        roots.project / "CLAUDE.local.md"
+    for path in _dedupe_paths(
+        [
+            roots.project / "AGENTS.md",
+            roots.project / "CLAUDE.md",
+            roots.project / "CLAUDE.local.md",
+        ]
     ):
         text = safe_read_text(path)
         if not text:
             continue
         facts.extend(_bullet_facts("cursor", path, text, path.name))
 
-    rules_dirs = [
-        roots.project / ".cursor" / "rules",
-        (roots.cursor_home or roots.home / ".cursor") / "rules",
-    ]
+    rules_dirs = _dedupe_paths(
+        [
+            roots.project / ".cursor" / "rules",
+            (roots.cursor_home or roots.home / ".cursor") / "rules",
+        ]
+    )
+    seen_rule_files: set[Path] = set()
     for rules_dir in rules_dirs:
         if not rules_dir.is_dir():
             continue
         for path in sorted(rules_dir.rglob("*.mdc")):
+            key = _resolved(path)
+            if key in seen_rule_files:
+                continue
+            seen_rule_files.add(key)
             text = safe_read_text(path) or ""
             _, body = parse_front_matter(text)
             facts.extend(_bullet_facts("cursor", path, body, "rule"))
+
+    facts = _dedupe_facts(facts)
 
     for f in facts:
         if TIME_BOUND_WORDS.search(f.text):
@@ -370,20 +418,35 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
     for f in facts:
         by_hash.setdefault(fact_hash(f.text), []).append(f)
     for _h, group in by_hash.items():
-        if len(group) < 2:
+        # A fact can only duplicate a *different* entry (different resolved path
+        # or different line text). Same path + same text is a self-hit, not a dup.
+        distinct: list[Fact] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for g in group:
+            key = (str(_resolved(Path(g.path))), g.text)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            distinct.append(g)
+        if len(distinct) < 2:
             continue
-        paths = sorted({g.path for g in group})
-        agents = sorted({g.agent_id for g in group if g.agent_id})
-        detail = f"Repeated fact across {len(group)} entries"
+        # Still require at least two distinct resolved paths *or* two different texts
+        paths = sorted({str(_resolved(Path(g.path))) for g in distinct})
+        texts = {g.text for g in distinct}
+        if len(paths) < 2 and len(texts) < 2:
+            continue
+        path_display = sorted({g.path for g in distinct})
+        agents = sorted({g.agent_id for g in distinct if g.agent_id})
+        detail = f"Repeated fact across {len(distinct)} entries"
         if agents:
             detail += f" (agents: {', '.join(agents)})"
-        detail += f": {_q(group[0].text)}"
+        detail += f": {_q(distinct[0].text)}"
         issues.append(
             FactIssue(
                 kind="duplicate",
-                path="; ".join(paths[:3]),
+                path="; ".join(path_display[:3]),
                 detail=detail,
-                date=max((g.date for g in group if g.date), default=""),
+                date=max((g.date for g in distinct if g.date), default=""),
                 suggestion="Keep the newest dated copy; delete extras after approval."
             )
         )
@@ -392,7 +455,7 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
     for i in range(n):
         for j in range(i + 1, n):
             a, b = facts[i], facts[j]
-            if a.path == b.path and a.text == b.text:
+            if str(_resolved(Path(a.path))) == str(_resolved(Path(b.path))) and a.text == b.text:
                 continue
             sim = similarity(a.text, b.text)
             conflict = _polarity_conflict(a.text, b.text)
