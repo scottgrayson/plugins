@@ -25,32 +25,32 @@ def _unescape(s: str) -> str:
 
 
 def load_corpus() -> list[tuple[str, str, str]]:
-    return [r[:3] for r in load_labeled()]
+    return [(r[0], r[1], r[2], r[4]) for r in load_labeled()]
 
 
-def load_labeled() -> list[tuple[str, str, str, str]]:
+def load_labeled() -> list[tuple[str, str, str, str, str]]:
     rows = []
     for n, line in enumerate(CORPUS.read_text(encoding="utf-8").split("\n"), 1):
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t")
-        if len(parts) == 4:
-            label = parts[3]
-            assert label == "by-design", (n, line)
-            parts = parts[:3]
-        else:
-            label = ""
+        label = parts[3] if len(parts) >= 4 else ""
+        field = parts[4] if len(parts) == 5 else "description"
+        assert label in ("", "by-design"), (n, line)
+        assert len(parts) <= 5 and field in ("description", "source", "path"), (n, line)
+        parts = parts[:3]
         assert len(parts) == 3 and parts[0] in ("redact", "keep", "overredact"), (n, line)
         expect, raw, value = parts[0], _unescape(parts[1]), _unescape(parts[2])
         assert expect != "redact" or value, f"line {n}: redact row needs a value"
         assert expect != "redact" or value in raw, f"line {n}: value not in input"
-        rows.append((expect, raw, value, label))
+        rows.append((expect, raw, value, label, field))
     return rows
 
 
-def check_line(expect: str, raw: str, value: str) -> None:
-    # Through a free-text field, as report rows do (multi-line inputs included).
-    got = redact_tree({"description": raw})["description"]
+def check_line(expect: str, raw: str, value: str, field: str = "description") -> None:
+    # Through a free-text field by default, as report rows do (multi-line inputs
+    # included). Optional 5th column names a path-like field (source, path).
+    got = redact_tree({field: raw})[field]
     if expect == "redact":
         assert value not in got, f"LEAK in={raw!r} out={got!r} value={value!r}"
     elif expect == "keep":
@@ -59,11 +59,11 @@ def check_line(expect: str, raw: str, value: str) -> None:
 
 def test_redaction_corpus() -> None:
     rows = load_corpus()
-    assert len({r[1] for r in rows}) == len(rows), "duplicate corpus inputs"
+    assert len({(r[1], r[3]) for r in rows}) == len(rows), "duplicate corpus inputs"
     failures = []
-    for expect, raw, value in rows:
+    for expect, raw, value, field in rows:
         try:
-            check_line(expect, raw, value)
+            check_line(expect, raw, value, field)
         except AssertionError as e:
             failures.append(str(e))
     assert not failures, "\n".join(failures)

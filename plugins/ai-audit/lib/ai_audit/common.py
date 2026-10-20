@@ -1025,8 +1025,9 @@ _BARE_NAME_RE = re.compile(
 )
 # Path-shaped (rendered as a path, not prose): rooted or ~-relative, no whitespace.
 _PATH_SHAPE_RE = re.compile(r"(?:~|\.{1,2})?/\S*|~\S*|[A-Za-z]:\\\S*|\\\\\S*")
-# Keys whose string values are rendered as paths (exempt from the backstop when
-# they contain no whitespace). "source" is the short path column in the tables.
+# Keys whose string values are rendered as paths. "source" is the short path
+# column in the tables. Without whitespace they stay readable (see
+# _hide_path_secret); every other field gets the full backstop.
 _BACKSTOP_PATH_KEYS = _PATH_FIELD_KEYS | {"source"}
 HIDDEN_MARKER = "…[hidden]"
 
@@ -1054,20 +1055,73 @@ def hide_after_strong_word(text: str) -> str:
     # take a plural "s" so "secrets" / "credentials" stay whole words
     if folded[end : end + 1] == "s":
         end += 1
+    return _hide_from(text, idx, end)
+
+
+def _strong_tail_start(folded: str, m: "re.Match[str]") -> int:
+    end = m.end()
+    if folded[end : end + 1] == "s":
+        end += 1
+    return end
+
+
+def _hide_from(text: str, idx: list[int], end: int) -> str:
     cut = idx[end - 1] + 1
     if not text[cut:].strip():
         return text
-    # keep the signal that the primary redactor already fired in the hidden part
     if "REDACTED" in text[cut:]:
         return text[:cut] + "…REDACTED" + HIDDEN_MARKER
     return text[:cut] + HIDDEN_MARKER
 
 
+def _hide_path_secret(text: str) -> str:
+    """Path-like field: a strong word may be followed by / . - _ a letter or nothing.
+
+    Anything else (= : | ? % ( [ < > a digit, ...) hides the rest. password/X and
+    password.X stay readable by design.
+    """
+    folded, idx = _fold_with_map(text)
+    for m in _STRONG_SECRET_RE.finditer(folded):
+        end = _strong_tail_start(folded, m)
+        nxt = folded[end : end + 1]
+        if nxt and not (nxt in "/.-_" or nxt.isalpha()):
+            return _hide_from(text, idx, end)
+        if nxt in ("-", "_", ".", "/") and _random_tail(text[idx[end] :]):
+            return _hide_from(text, idx, end)
+    return text
+
+
+def _random_tail(tail: str) -> bool:
+    tail = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", tail)
+    for seg in re.split(r"[_/.-]+", tail):
+        if not (any(c.isdigit() for c in seg) and any(c.isalpha() for c in seg)):
+            continue
+        mixed = any(c.isupper() for c in seg) and any(c.islower() for c in seg)
+        if len(seg) >= 8 or mixed:
+            return True
+    return False
+
+
+def _bare_name_is_safe(text: str) -> bool:
+    folded, _ = _fold_with_map(text)
+    m = _STRONG_SECRET_RE.search(folded)
+    if not m:
+        return True
+    return not _random_tail(text[_strong_tail_start(folded, m) :])
+
+
 def _redact_field(text: str, key: str | None) -> str:
-    if key in _BACKSTOP_PATH_KEYS and not re.search(r"\s", text):
-        return text if key in _PATH_FIELD_KEYS else redact_secrets(text)
     out = redact_secrets(text)
-    if _BARE_NAME_RE.fullmatch(out) or _PATH_SHAPE_RE.fullmatch(out):
+    if key in _BACKSTOP_PATH_KEYS and not re.search(r"\s", text):
+        return _hide_path_secret(text if key in _PATH_FIELD_KEYS else out)
+    if _BARE_NAME_RE.fullmatch(out) and _bare_name_is_safe(out):
+        return out
+    # Path-shaped text is kept only under the strict path rule; never on its own.
+    if (
+        _PATH_SHAPE_RE.fullmatch(out)
+        and _hide_path_secret(out) == out
+        and _bare_name_is_safe(out)
+    ):
         return out
     return hide_after_strong_word(out)
 
@@ -1095,9 +1149,11 @@ def redact_tree(obj: Any) -> Any:
       - environment heading and override text, tokenizer, context_window
       - top-level and per-section notes, state_vscdb_keys
     Path fields (path, home, project, sand_data, claude_home, cursor_home,
-    installPath, projectPath) are never rewritten. A "source" field is a path and
-    skips the backstop when it has no whitespace. A bare kebab name
-    ([A-Za-z0-9_-]+) skips the backstop. Everything else gets the backstop.
+    installPath, projectPath) and "source" stay readable when they have no
+    whitespace, unless a strong secret word is followed by something other than
+    / . - _ a letter or end of text. A bare name ([A-Za-z0-9_-]+) skips the
+    backstop unless the part after a strong word looks random. Everything else,
+    path-shaped or not, gets the backstop.
     """
     return _walk(obj, None)
 

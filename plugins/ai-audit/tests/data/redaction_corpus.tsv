@@ -1,6 +1,7 @@
 # Redaction regression corpus. Columns (tab-separated): expect, input, value.
 # expect: redact (value must not appear in output), keep (output == input),
 # overredact (redaction allowed, not required). value: only for redact rows.
+# Optional 5th column: field the input runs through (description default, or source, path).
 # Optional 4th column: label. 'by-design' marks known, accepted gaps or tradeoffs (rows are kept).
 # Escapes: \t \n \\ \uXXXX. All secrets are generic fakes.
 redact	password=hunter2	hunter2
@@ -608,3 +609,20 @@ redact	api_key: Zq7FakeVal9	Zq7FakeVal9
 redact	secret: Zq7FakeVal9	Zq7FakeVal9
 overredact	pwd=/tmp/Secret		by-design
 overredact	password=<Hunter2Fake>		by-design
+redact	/login?password%3DZq7FakeVal9	Zq7FakeVal9
+redact	/login?pwd%3DZq7FakeVal9	Zq7FakeVal9
+redact	/x/(password)Zq7FakeVal9	Zq7FakeVal9
+redact	/x/[password]Zq7FakeVal9	Zq7FakeVal9
+redact	/x/y:password|Zq7FakeVal9	Zq7FakeVal9
+redact	/a/b|password|Zq7FakeVal9	Zq7FakeVal9
+redact	bearer:Zq7FakeVal9	Zq7FakeVal9		source
+redact	password|Zq7FakeVal9	Zq7FakeVal9		source
+redact	<password>Zq7FakeVal9</password>	Zq7FakeVal9		source
+redact	password=Zq7FakeVal9	Zq7FakeVal9		path
+redact	password_Xk9fQ2mZ	Xk9fQ2mZ
+redact	DB_PASSWORD_aB3dE5fG7	aB3dE5fG7
+redact	secret-Zx81kLmq2	Zx81kLmq2
+keep	password-reset-flow	
+keep	api_key_rotation	
+keep	password/X		by-design	source
+keep	password.X		by-design	source

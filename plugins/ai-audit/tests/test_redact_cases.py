@@ -23,7 +23,7 @@ PLUGIN = Path(__file__).resolve().parents[1]
 BIN = PLUGIN / "bin" / "ai-audit"
 sys.path.insert(0, str(LIB))
 
-from ai_audit.common import redact_secrets, redact_tree  # noqa: E402
+from ai_audit.common import HIDDEN_MARKER, redact_secrets, redact_tree  # noqa: E402
 from ai_audit.detect import detect_host  # noqa: E402
 from ai_audit.context_audit import run_context_audit  # noqa: E402
 
@@ -521,6 +521,19 @@ def run_project_eq_home_context_dedupe() -> None:
         shutil.rmtree(td, ignore_errors=True)
 
 
+# KEEP_CASES that the redact_secrets pass leaves alone but the free-text field
+# backstop (redact_tree on a description) truncates after the strong word.
+BACKSTOP_HIDES_KEEP = frozenset(
+    {
+        "pwd=/Users/alice/Code", "PWD=/home/box", "has_secret=false", "secret=true",
+        "password=<your password>", "pwd: /Users/x", "Use Bearer authentication for the API",
+        "Bearer of bad news", "password=${DB_PASSWORD}", "password=$TOKEN", "secret=***",
+        "password: changed", "password: reset", "secret: unknown", "password: none",
+        "PASSWORD=required",
+    }
+)
+
+
 def run_all() -> tuple[int, int, int]:
     for raw, leak in REDACT_CASES:
         _assert_redact(raw, leak)
@@ -555,6 +568,14 @@ def run_all() -> tuple[int, int, int]:
 
     for raw in KEEP_CASES:
         _assert_keep(raw)
+        got = redact_tree({"description": raw})["description"]
+        if raw in BACKSTOP_HIDES_KEEP:
+            # By design: free-text fields hide everything after a strong secret word.
+            assert got.endswith(HIDDEN_MARKER) and raw.startswith(got[: -len(HIDDEN_MARKER)]), (
+                f"KEEP backstop shape changed in={raw!r} out={got!r}"
+            )
+        else:
+            assert got == raw, f"KEEP changed via redact_tree in={raw!r} out={got!r}"
 
     for raw in EXPECTED_OVERREDACT:
         _assert_overredact(raw)
