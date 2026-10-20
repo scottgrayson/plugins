@@ -1,8 +1,0 @@
-Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output,Total Tokens,Cost,Cloud Agent ID,Automation ID
-2026-10-01,Cloud Agent,gpt-5,true,500,9500,500,2000,12500,1.25,ca_abc123,
-2026-10-02,Cloud Agent,gpt-5,true,0,8000,2000,1500,11500,0.90,ca_abc123,
-2026-10-03,Automation,claude-sonnet,false,50,2950,100,800,3900,0.40,,auto_weekly
-2026-10-04,Cloud Agent,gpt-5,true,200,11800,100,3000,15300,1.80,ca_def456,
-2026-10-05,IDE,claude-sonnet,false,0,2000,1500,400,3900,0.20,,
-2026-10-06,Automation,gpt-5,false,0,4000,800,600,5400,0.55,,auto_hourly
-2026-10-07,IDE,gpt-5,true,0,1500,200,300,2000,0.15,,

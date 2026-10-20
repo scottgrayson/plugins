@@ -651,7 +651,7 @@ if [[ "$WITH_E2E" -eq 1 ]]; then
   fi
 fi
 
-# ai-audit fixture suite (context / token / facts for each host)
+# ai-audit fixture suite (stage 1: detect + context)
 echo
 echo "== ai-audit =="
 AI_RC=0

@@ -3,7 +3,7 @@
 MIT-licensed plugins by Scott Grayson. This marketplace ships:
 
 - **preview** — temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`). Package: [`plugins/preview/`](plugins/preview/).
-- **ai-audit** — read-only audits of agent context, token cost, and saved facts. Package: [`plugins/ai-audit/`](plugins/ai-audit/). Skills: `context-audit`, `token-audit`, `facts-audit`. Installs on **Claude Code**, **Cursor**, and **Grok Bot** (see [ai-audit install](#install--ai-audit) below).
+- **ai-audit** — read-only startup context audit (stage 1). Package: [`plugins/ai-audit/`](plugins/ai-audit/). Skill: `context-audit`. Installs on **Claude Code**, **Cursor**, and **Grok Bot** (see [ai-audit install](#install--ai-audit) below). Later stages will add token usage and facts.
 
 Two modes share the same scripts for **preview**:
 
@@ -167,7 +167,7 @@ See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/S
 
 ## Install — ai-audit
 
-Read-only context / token / facts audits. Details: [`plugins/ai-audit/README.md`](plugins/ai-audit/README.md).
+Stage 1: read-only **startup context** audit (`context-audit`). Details: [`plugins/ai-audit/README.md`](plugins/ai-audit/README.md).
 
 ### Claude Code
 
@@ -184,14 +184,11 @@ Read-only context / token / facts audits. Details: [`plugins/ai-audit/README.md`
 2. Customize → install **ai-audit**
 3. Or local copy: `~/.cursor/plugins/local/ai-audit` (must include `.cursor-plugin/plugin.json`)
 
-Token audit: set `CURSOR_ADMIN_API_KEY` for the official Admin API, or pass a dashboard Usage CSV with `--csv`.
-
 ### Grok Bot
 
 1. Ask the bot to clone this repo (or a branch) onto its computer.
-2. Follow each skill’s **Locate the CLI option B** (`SKILL_MD` → `scripts/locate-cli.sh` → `bash "$AI_AUDIT" …`).
-3. Optional: copy skill folders into the bot’s skills only if `../../bin/ai-audit` still resolves.
-4. Token audit has **no official auto-download** for Bot usage — pass `--usage-file` (or `--usage-total`) from the Usage & Billing UI.
+2. Follow the skill’s **Locate the CLI option B** (`SKILL_MD` → `scripts/locate-cli.sh` → `bash "$AI_AUDIT" …`).
+3. Optional: copy the `context-audit` skill folder into the bot’s skills only if `../../bin/ai-audit` still resolves.
 
 ### Optional: repo agent rules
 

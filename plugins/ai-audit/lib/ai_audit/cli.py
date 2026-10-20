@@ -1,4 +1,4 @@
-"""ai-audit CLI: detect | context | token | facts."""
+"""ai-audit CLI: detect | context (stage 1 — startup context only)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,7 @@ from . import __version__
 from .common import redact_tree
 from .context_audit import run_context_audit
 from .detect import detect_host
-from .facts_audit import run_facts_audit
-from .report import context_markdown, facts_markdown, to_json, token_markdown
-from .token_audit import run_token_audit
+from .report import context_markdown, to_json
 
 
 def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
@@ -39,7 +37,10 @@ def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ai-audit",
-        description="Read-only context / token / facts audits (never writes; redacts common secret formats).",
+        description=(
+            "Read-only startup context audit "
+            "(never writes; redacts common secret formats)."
+        ),
     )
     p.add_argument("--version", action="version", version=f"ai-audit {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -69,49 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("context", help="Inventory what agents load into context")
     add_common(c)
 
-    t = sub.add_parser("token", help="Attribute token usage from official sources or a usage file")
-    add_common(t)
-    t.add_argument("--csv", default=None, help="Cursor dashboard Usage CSV path")
-    t.add_argument(
-        "--usage-file",
-        default=None,
-        help="User-downloaded usage file (CSV or JSON) — fallback for every host",
-    )
-    t.add_argument(
-        "--cursor-admin-api",
-        action="store_true",
-        help=(
-            "Request Cursor Admin API (Enterprise team admin keys only; "
-            "also used automatically when CURSOR_ADMIN_API_KEY is set)."
-        ),
-    )
-    t.add_argument(
-        "--admin-start",
-        default=None,
-        help="Admin API startDate (ISO date/datetime or epoch ms; sent as epoch ms)",
-    )
-    t.add_argument(
-        "--admin-end",
-        default=None,
-        help="Admin API endDate (ISO date/datetime or epoch ms; sent as epoch ms)",
-    )
-    t.add_argument(
-        "--usage-total",
-        type=float,
-        default=None,
-        help="Pasted Usage page total for Grok Bot when no usage file is available",
-    )
-    t.add_argument(
-        "--usage-period",
-        default=None,
-        help="Label for --usage-total (e.g. 'week of 2026-10-13')",
-    )
-
-    f = sub.add_parser("facts", help="Audit memory/facts for stale/duplicate/conflict/orphan")
-    add_common(f)
-    f.add_argument("--stale-days", type=int, default=30)
-    f.add_argument("--memories", default=None, help="Cursor exported memories .mdc")
-
     return p
 
 
@@ -132,54 +90,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cmd == "context":
         payload = run_context_audit(roots)
         return _emit(payload, context_markdown(payload), args)
-
-    if args.cmd == "token":
-        # Validate admin dates before any network call (fail loud, never drop silently).
-        if args.admin_start or args.admin_end:
-            from .token_audit import _to_epoch_ms
-
-            try:
-                if args.admin_start:
-                    _to_epoch_ms(args.admin_start, label="start")
-                if args.admin_end:
-                    _to_epoch_ms(args.admin_end, label="end")
-            except ValueError as e:
-                payload = {
-                    "audit": "token",
-                    "host": roots.host,
-                    "error": str(e),
-                    "data": {"error": str(e), "source": "none"},
-                    "summary": {"source": "none"},
-                    "notes": [str(e)],
-                    "wins": [],
-                }
-                _emit(payload, token_markdown(payload), args)
-                return 2
-
-        payload = run_token_audit(
-            roots,
-            csv_path=Path(args.csv) if args.csv else None,
-            use_admin_api=bool(args.cursor_admin_api),
-            admin_start=args.admin_start,
-            admin_end=args.admin_end,
-            usage_total=args.usage_total,
-            usage_period=args.usage_period,
-            usage_file=Path(args.usage_file) if args.usage_file else None,
-        )
-        rc = _emit(payload, token_markdown(payload), args)
-        data = payload.get("data") or {}
-        # Explicit --csv that is missing/unreadable, or collector error → non-zero.
-        if data.get("error") or (args.csv and data.get("missing_csv")):
-            return 1
-        return rc
-
-    if args.cmd == "facts":
-        payload = run_facts_audit(
-            roots,
-            stale_days=args.stale_days,
-            memories_path=Path(args.memories) if args.memories else None,
-        )
-        return _emit(payload, facts_markdown(payload), args)
 
     parser.error(f"unknown command {args.cmd}")
     return 2

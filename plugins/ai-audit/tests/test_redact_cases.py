@@ -2,12 +2,10 @@
 """
 Table-driven redact / keep cases for ai_audit.common.redact_secrets.
 
-Also exercises CLI end-to-end: plant each case into a fixtures tree and assert
-on real `facts` (md+json) and `token --usage-period` output.
+Also plants secrets into a tiny project and asserts context CLI output
+redacts them (stage 1 — no token/facts commands).
 
-Zero network / zero AI. Run via:
-  PYTHONPATH=plugins/ai-audit/lib python3 -B plugins/ai-audit/tests/test_redact_cases.py
-or from plugins/ai-audit/tests/run-tests.sh.
+Zero network / zero AI.
 """
 
 from __future__ import annotations
@@ -23,17 +21,14 @@ from pathlib import Path
 LIB = Path(__file__).resolve().parents[1] / "lib"
 PLUGIN = Path(__file__).resolve().parents[1]
 BIN = PLUGIN / "bin" / "ai-audit"
-FIX = PLUGIN / "fixtures"
 sys.path.insert(0, str(LIB))
 
 from ai_audit.common import redact_secrets, redact_tree  # noqa: E402
 from ai_audit.detect import detect_host  # noqa: E402
-from ai_audit.facts_audit import run_facts_audit  # noqa: E402
+from ai_audit.context_audit import run_context_audit  # noqa: E402
 
-# (input, must_not_appear_substring) — after redaction the leak must be gone
-# and "REDACTED" must appear (unless noted).
+# (input, must_not_appear_substring)
 REDACT_CASES: list[tuple[str, str]] = [
-    # --- rounds 10–13 core ---
     ("password=hunter2", "hunter2"),
     ("db password=FakePw99", "FakePw99"),
     ("password=correct-horse-battery-staple", "correct-horse-battery-staple"),
@@ -57,7 +52,6 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("client_secret=ClientFake9876543", "ClientFake9876543"),
     ("OPENAI_API_KEY=plainvalueABCDEF12", "plainvalueABCDEF12"),
     ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI"),
-    # --- R5 nested / labeled / query / cookie ---
     ("Prod: DB_PASSWORD=FakeEnvPw99", "FakeEnvPw99"),
     ("config: password=hunter2", "hunter2"),
     ("Note: token=FakeTok12345", "FakeTok12345"),
@@ -68,7 +62,6 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("staging=password=hunter2", "hunter2"),
     ("Cookie: session=abcSessionTok99", "abcSessionTok99"),
     ("Set-Cookie: session=SetCookieTok99; Path=/", "SetCookieTok99"),
-    # --- residual shapes ---
     ("--password FakeCli123", "FakeCli123"),
     ("--password=FakeCliEquals99", "FakeCliEquals99"),
     ("pw=FakePwValue99", "FakePwValue99"),
@@ -96,7 +89,6 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("redis://:EmptyUserPass99ab@db.host/0", "EmptyUserPass99ab"),
     ("'password': 'singleQuotedSecret99'", "singleQuotedSecret99"),
     ('{"password": "JsonFakePw77"}', "JsonFakePw77"),
-    # --- R7 weak / numeric / model-prefix / extra shapes ---
     ("password=admin", "admin"),
     ("pass=root", "root"),
     ("pwd=test", "test"),
@@ -124,7 +116,6 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("ghu_abcdefghijklmnopqrstuv", "ghu_abcdefghijklmnopqrstuv"),
     ("ghr_abcdefghijklmnopqrstuv", "ghr_abcdefghijklmnopqrstuv"),
     ("db password=admin", "admin"),
-    # --- round-15: colon single-word weak passwords (status allowlist only) ---
     ("password: dragon", "dragon"),
     ("password: monkey", "monkey"),
     ("password: sunshine", "sunshine"),
@@ -142,7 +133,6 @@ REDACT_CASES: list[tuple[str, str]] = [
 ]
 
 KEEP_CASES: list[str] = [
-    # --- R6 ---
     "Max token: 8192",
     "Default token: 4096 limit",
     "Secret: 3 rules to follow",
@@ -161,7 +151,6 @@ KEEP_CASES: list[str] = [
     "token=null",
     "secret=true",
     "password=<your password>",
-    # --- round-11 keep list ---
     "Key: use pnpm not npm",
     "API key: stored in 1Password",
     "primary_key: user_id",
@@ -184,18 +173,15 @@ KEEP_CASES: list[str] = [
     "Use Bearer authentication for the API",
     "Bearer of bad news",
     "Basic setup: install pnpm",
-    # placeholders
     "password=${DB_PASSWORD}",
     "password=$TOKEN",
     "token=<redacted>",
     "secret=***",
     "API_KEY=changeme",
-    # paths / ids
     "/tmp/r10fp/abcdefghijklmnopqrstuv/CLAUDE.md",
     "/home/box/sand-data/workflows/why/references/epistemics.md",
     "commit abcdef1",
     "id 550e8400-e29b-41d4-a716-446655440000",
-    # --- status-word allowlist + pass/fail variants ---
     "token: optional",
     "password: changed",
     "Authorization: required",
@@ -221,11 +207,9 @@ def _assert_keep(raw: str) -> None:
     assert got == raw, f"KEEP changed:\n  in:  {raw!r}\n  out: {got!r}"
 
 
-def _run_cli(args: list[str], env: dict[str, str] | None = None) -> str:
+def _run_cli(args: list[str]) -> str:
     e = os.environ.copy()
     e["PYTHONPATH"] = str(LIB) + (os.pathsep + e["PYTHONPATH"] if e.get("PYTHONPATH") else "")
-    if env:
-        e.update(env)
     proc = subprocess.run(
         [str(BIN), *args],
         capture_output=True,
@@ -238,199 +222,60 @@ def _run_cli(args: list[str], env: dict[str, str] | None = None) -> str:
     return out
 
 
-def _leak_is_distinctive(leak: str) -> bool:
-    """Short common words (admin/root/test) appear elsewhere; only check distinctive leaks."""
-    if any(leak in k for k in KEEP_CASES):
-        return False  # e.g. abcdefghijklmnop inside a kept path
-    if len(leak) >= 8:
-        return True
-    if any(c.isdigit() for c in leak) and len(leak) >= 4:
-        return True
-    return False
-
-
-def run_cli_e2e() -> None:
-    """Plant every table case into fixtures; assert facts + usage-period output."""
-    # --- facts: plant into Grok profile ---
-    td = Path(tempfile.mkdtemp(prefix="ai-audit-redact-e2e."))
+def run_context_secret_e2e() -> None:
+    """Plant secrets into Grok bot name meta; assert context CLI redacts them."""
+    fix = PLUGIN / "fixtures" / "grok"
+    td = Path(tempfile.mkdtemp(prefix="ai-audit-ctx-secret."))
     try:
         grok = td / "grok"
-        shutil.copytree(FIX / "grok", grok)
-        profile = next(grok.glob("sand-data/user-memory/by-agent/*/profile.md"))
-        lines = []
-        for raw, _leak in REDACT_CASES:
-            if "\n" in raw:
-                continue
-            lines.append(f"- (2025-06-01) planted {raw}")
-        for raw in KEEP_CASES:
-            if "\n" in raw:
-                continue
-            lines.append(f"- (2025-06-01) keepcase {raw}")
-        with profile.open("a", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-
-        facts_json = _run_cli(
-            ["facts", "--host", "grok", "--root", str(grok), "--json-only"]
+        shutil.copytree(fix, grok)
+        profile = grok / "sand-data" / "agents" / "agent-active" / "profile.json"
+        # Inventory emits bot name as a string leaf; redact_tree must scrub it.
+        plants = [
+            raw
+            for raw, _ in REDACT_CASES
+            if "\n" not in raw and len(raw) < 80 and "=" in raw
+        ][:12]
+        profile.write_text(
+            json.dumps({"name": " | ".join(plants), "description": "test"}, indent=2),
+            encoding="utf-8",
         )
-        facts_md = _run_cli(
-            ["facts", "--host", "grok", "--root", str(grok), "--md-only"]
+        out_json = _run_cli(
+            ["context", "--host", "grok", "--root", str(grok), "--json-only"]
         )
+        out_md = _run_cli(
+            ["context", "--host", "grok", "--root", str(grok), "--md-only"]
+        )
+        blob = out_json + "\n" + out_md
+        assert "REDACTED" in blob, blob[:500]
         for raw, leak in REDACT_CASES:
-            if "\n" in raw:
+            if raw not in plants:
                 continue
-            # Unredacted assignment must not survive in either channel.
-            assert raw not in facts_json, f"facts json still has raw {raw!r}"
-            assert raw not in facts_md, f"facts md still has raw {raw!r}"
-            if _leak_is_distinctive(leak):
-                assert leak not in facts_json, f"facts json leak {leak!r} from {raw!r}"
-                assert leak not in facts_md, f"facts md leak {leak!r} from {raw!r}"
-        assert "REDACTED" in facts_json and "REDACTED" in facts_md
-        for raw in KEEP_CASES:
-            if "\n" in raw:
-                continue
-            # Keep text must survive in json (md quotes truncate at 80 chars)
-            assert raw in facts_json or raw[:70] in facts_json, (
-                f"facts lost keep case {raw!r}"
-            )
-
-        # --- token --usage-period (needs --usage-total for period to surface) ---
-        for raw, leak in REDACT_CASES:
-            if "\n" in raw or len(raw) > 180:
-                continue
-            # Values starting with "-" would be parsed as CLI flags; use --usage-period=…
-            period_arg = f"--usage-period={raw}"
-            out_json = _run_cli(
-                [
-                    "token",
-                    "--host",
-                    "grok",
-                    "--root",
-                    str(grok),
-                    "--usage-total",
-                    "9",
-                    period_arg,
-                    "--json-only",
-                ]
-            )
-            out_md = _run_cli(
-                [
-                    "token",
-                    "--host",
-                    "grok",
-                    "--root",
-                    str(grok),
-                    "--usage-total",
-                    "9",
-                    period_arg,
-                    "--md-only",
-                ]
-            )
-            assert raw not in out_json, f"usage-period json still has raw {raw!r}"
-            assert raw not in out_md, f"usage-period md still has raw {raw!r}"
-            if _leak_is_distinctive(leak):
-                assert leak not in out_json, f"usage-period json leak {leak!r} from {raw!r}"
-                assert leak not in out_md, f"usage-period md leak {leak!r} from {raw!r}"
-            assert "REDACTED" in out_json or "REDACTED" in out_md, (
-                f"usage-period missing REDACTED for {raw!r}"
-            )
-        # Explicit R7 usage-period shape
-        admin_out = _run_cli(
-            [
-                "token",
-                "--host",
-                "grok",
-                "--root",
-                str(grok),
-                "--usage-total",
-                "9",
-                "--usage-period",
-                "db password=admin",
-                "--md-only",
-            ]
-        )
-        assert "password=admin" not in admin_out
-        assert "REDACTED" in admin_out
-
-        for raw in KEEP_CASES:
-            if "\n" in raw or len(raw) > 180:
-                continue
-            out_json = _run_cli(
-                [
-                    "token",
-                    "--host",
-                    "grok",
-                    "--root",
-                    str(grok),
-                    "--usage-total",
-                    "9",
-                    f"--usage-period={raw}",
-                    "--json-only",
-                ]
-            )
-            blob = json.dumps(json.loads(out_json))
-            assert raw in blob, f"usage-period json altered keep {raw!r} -> {blob[:200]}"
+            assert raw not in blob, f"context still has raw {raw!r}"
+            if len(leak) >= 8 and not any(leak in k for k in KEEP_CASES):
+                assert leak not in blob, f"context leak {leak!r} from {raw!r}"
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
 
-def run_project_eq_home_dedupe() -> None:
-    """project root == HOME must not double-count ~/.cursor/rules facts."""
+def run_project_eq_home_context_dedupe() -> None:
+    """project root == HOME must not double-list ~/.cursor/rules in inventory."""
     td = Path(tempfile.mkdtemp(prefix="ai-audit-homeproj."))
     try:
         home = td / "home"
         rules = home / ".cursor" / "rules"
         rules.mkdir(parents=True)
         (rules / "dup.mdc").write_text(
-            "---\ndescription: d\n---\n"
-            "- Always use the shared lint config for this workspace.\n"
-            "- Prefer small pull requests over large ones.\n",
+            "---\ndescription: d\n---\n- Always use the shared lint config.\n",
             encoding="utf-8",
         )
-        (home / "AGENTS.md").write_text("# Agents\n\n- Ship small changes daily.\n", encoding="utf-8")
-        # project == home (cwd-style layout)
         roots = detect_host(host="cursor", home=home, project=home)
         assert roots.project.resolve() == roots.home.resolve()
-        result = run_facts_audit(roots, stale_days=30)
-        facts = result["facts"]
-        texts = [f["text"] for f in facts]
-        assert texts.count("Always use the shared lint config for this workspace.") == 1, texts
-        assert texts.count("Prefer small pull requests over large ones.") == 1, texts
-        dups = [i for i in result["issues"] if i["kind"] == "duplicate"]
-        assert dups == [], dups
-        # Inventory also one row per rule file
-        from ai_audit.context_audit import run_context_audit
-
-        ctx = run_context_audit(roots)
+        inv = run_context_audit(roots)["inventory"]
         rule_rows = [
-            i
-            for i in ctx["inventory"]
-            if i.get("kind") == "rule" and i["path"].endswith("dup.mdc")
+            i for i in inv if i.get("kind") == "rule" and i["path"].endswith("dup.mdc")
         ]
         assert len(rule_rows) == 1, rule_rows
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-
-
-def run_same_file_duplicate_lines() -> None:
-    """A line written twice in one file must still be reported as a duplicate."""
-    td = Path(tempfile.mkdtemp(prefix="ai-audit-samedup."))
-    try:
-        home = td / "home"
-        rules = home / ".cursor" / "rules"
-        rules.mkdir(parents=True)
-        (rules / "c.mdc").write_text(
-            "---\ndescription: d\n---\n"
-            "- Same line twice for duplicate detection.\n"
-            "- Same line twice for duplicate detection.\n",
-            encoding="utf-8",
-        )
-        roots = detect_host(host="cursor", home=home, project=home)
-        result = run_facts_audit(roots, stale_days=30)
-        texts = [f["text"] for f in result["facts"]]
-        assert texts.count("Same line twice for duplicate detection.") == 2, texts
-        dups = [i for i in result["issues"] if i["kind"] == "duplicate"]
-        assert len(dups) >= 1, result["issues"]
-        assert "Same line twice" in dups[0]["detail"]
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -438,7 +283,6 @@ def run_same_file_duplicate_lines() -> None:
 def run_all() -> tuple[int, int]:
     for raw, leak in REDACT_CASES:
         _assert_redact(raw, leak)
-    # PEM / PGP / Slack (runtime-built) extras
     pem = (
         "-----BEGIN RSA PRIVATE KEY-----"
         + chr(10)
@@ -462,7 +306,6 @@ def run_all() -> tuple[int, int]:
         slack_tok,
     )
     _assert_redact(slack_url, slack_tok)
-    # inventory path field never rewritten
     path = "/home/box/sand-data/workflows/why/references/epistemics.md"
     tree = {"inventory": [{"path": path, "notes": "db password=Hunter2FakePass!99"}]}
     out = redact_tree(tree)
@@ -472,13 +315,10 @@ def run_all() -> tuple[int, int]:
     for raw in KEEP_CASES:
         _assert_keep(raw)
 
-    run_cli_e2e()
-    run_project_eq_home_dedupe()
-    run_same_file_duplicate_lines()
+    run_context_secret_e2e()
+    run_project_eq_home_context_dedupe()
 
-    redact_n = len(REDACT_CASES) + 3  # + pem/pgp/slack
-    keep_n = len(KEEP_CASES)
-    return redact_n, keep_n
+    return len(REDACT_CASES) + 3, len(KEEP_CASES)
 
 
 def main() -> int:
