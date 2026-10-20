@@ -44,7 +44,6 @@ KEEP = [
     "session-report",
     "secret-leak-watch",
     "~/.cursor/skills/secret-scanning/SKILL.md",
-    "password reset flow docs",
     "grep -p foo",
 ]
 

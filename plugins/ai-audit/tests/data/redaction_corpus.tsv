@@ -1,0 +1,541 @@
+# Redaction regression corpus. Columns (tab-separated): expect, input, value.
+# expect: redact (value must not appear in output), keep (output == input),
+# overredact (redaction allowed, not required). value: only for redact rows.
+# Escapes: \t \n \\ \uXXXX. All secrets are generic fakes.
+redact	password=hunter2	hunter2
+redact	db password=FakePw99	FakePw99
+redact	password=correct-horse-battery-staple	correct-horse-battery-staple
+redact	password: Hunter2!	Hunter2!
+redact	password: FakeQuoted123	FakeQuoted123
+redact	password: "FakeQuoted123"	FakeQuoted123
+redact	password = "Fake Pass With Spaces99"	Fake Pass With Spaces99
+redact	DB_PASSWORD=short1	short1
+redact	DB_PASSWORD=EnvFakePw12345	EnvFakePw12345
+redact	TOKEN=FakeTok99	FakeTok99
+redact	token: FakeTok12345	FakeTok12345
+redact	SECRET=shortFake1	shortFake1
+redact	API_KEY=abc123def	abc123def
+redact	GITHUB_TOKEN=ghfake	ghfake
+redact	pass=FakePass12345	FakePass12345
+redact	passphrase: FakePhrase123	FakePhrase123
+redact	credentials: FakeCred12345	FakeCred12345
+redact	x-api-key: FakeHdr12345678	FakeHdr12345678
+redact	MYSQL_PWD=FakeMy123	FakeMy123
+redact	DB_PASS=DbPassValue99	DbPassValue99
+redact	client_secret=ClientFake9876543	ClientFake9876543
+redact	OPENAI_API_KEY=plainvalueABCDEF12	plainvalueABCDEF12
+redact	AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY	wJalrXUtnFEMI
+redact	Prod: DB_PASSWORD=FakeEnvPw99	FakeEnvPw99
+redact	config: password=hunter2	hunter2
+redact	Note: token=FakeTok12345	FakeTok12345
+redact	env: GITHUB_TOKEN=ghfake12	ghfake12
+redact	A: password: Hunter2x	Hunter2x
+redact	url: https://x.com/?api_key=FakeQ9	FakeQ9
+redact	https://x.com/cb?access_token=FakeQueryTok9	FakeQueryTok9
+redact	staging=password=hunter2	hunter2
+redact	Cookie: session=abcSessionTok99	abcSessionTok99
+redact	Set-Cookie: session=SetCookieTok99; Path=/	SetCookieTok99
+redact	--password FakeCli123	FakeCli123
+redact	--password=FakeCliEquals99	FakeCliEquals99
+redact	pw=FakePwValue99	FakePwValue99
+redact	pw: FakePwColon99	FakePwColon99
+redact	apikey=FakeApiKeyValue9	FakeApiKeyValue9
+redact	ApiKey: FakeApiKeyColon9	FakeApiKeyColon9
+redact	auth: FakeAuthToken99xx	FakeAuthToken99xx
+redact	Bearer abcdefghijklmnop	abcdefghijklmnop
+redact	Authorization: Bearer opaqueTokenValue99XYZ	opaqueTokenValue99XYZ
+redact	Authorization: Basic dXNlcjpwYXNzMTIzNDU2	dXNlcjpwYXNzMTIzNDU2
+redact	ghs_abcdefghijklmnopqrstuv	klmnopqrstuv
+redact	hf_abcdefghijklmnopqrstuv	klmnopqrstuv
+redact	glpat-abcdefghijklmnopqrstuv	klmnopqrstuv
+redact	npm_abcdefghijklmnopqrstuvwx	mnopqrstuvwx
+redact	sk_test_51FAKEabcdefghijklmnop	efghijklmnop
+redact	sk_live_51FAKEabcdefghijklmnop	efghijklmnop
+redact	whsec_abcdefghijklmnopqrstuvwx	mnopqrstuvwx
+redact	crsr_fake0123456789abcdef0123456789	crsr_fake0123456789
+redact	Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U	eyJhbGciOiJIUzI1NiJ9
+redact	postgres://admin:SuperS3cretPw@db.example/x	SuperS3cretPw
+redact	https://alice:ghostPass123@example.com/a	ghostPass123
+redact	redis://:EmptyUserPass99ab@db.host/0	EmptyUserPass99ab
+redact	'password': 'singleQuotedSecret99'	singleQuotedSecret99
+redact	{"password": "JsonFakePw77"}	JsonFakePw77
+redact	password=admin	admin
+redact	pass=root	root
+redact	pwd=test	test
+redact	password=Summer	Summer
+redact	password: Dragon	Dragon
+redact	DB_PASSWORD=Welcome	Welcome
+redact	PASSWORD=ADMIN	ADMIN
+redact	password=123456	123456
+redact	password: 1234	1234
+redact	TOKEN=12345678901234567890	12345678901234567890
+redact	api_key=1234567890	1234567890
+redact	password=o1secretXyz	o1secretXyz
+redact	password=v1.2.3	v1.2.3
+redact	password=claude-rocks-1	claude-rocks-1
+redact	password=/Secret123	/Secret123
+redact	secret=~abc123	~abc123
+redact	GITHUB_TOKEN=Abcdef	Abcdef
+redact	password is FakeIs123	FakeIs123
+redact	Set-Cookie: sid=FakeSidTok99xx	FakeSidTok99xx
+redact	Bearer abc.def	abc.def
+redact	Authorization: token ghfakeToken123	ghfakeToken123
+redact	privateKey: FakePrivKey99	FakePrivKey99
+redact	secretKey=FakeSecKey99xx	FakeSecKey99xx
+redact	apiKey=FakeApiCamel99	FakeApiCamel99
+redact	ghu_abcdefghijklmnopqrstuv	klmnopqrstuv
+redact	ghr_abcdefghijklmnopqrstuv	klmnopqrstuv
+redact	db password=admin	admin
+redact	password: dragon	dragon
+redact	password: monkey	monkey
+redact	password: sunshine	sunshine
+redact	PASSWORD: iloveyou	iloveyou
+redact	DB_PASSWORD: welcome	welcome
+redact	pwd: qwerty	qwerty
+redact	token: hunter	hunter
+redact	secret: banana	banana
+redact	api_key: abcdefghij	abcdefghij
+redact	pw: shadow	shadow
+redact	auth: trustno	trustno
+redact	token: Hunter	Hunter
+redact	secret: Banana	Banana
+redact	password: correct horse	correct horse
+redact	password: Hunter2FakePass99 for prod	Hunter2FakePass99
+redact	token: ghfakeTok123 for CI	ghfakeTok123
+redact	api_key: abc123def456 is prod	abc123def456
+redact	DB_PASSWORD: Welcome1 on staging	Welcome1
+redact	password: FakeQuoted123 in vault	FakeQuoted123
+redact	db password: Hunter2FakePass!99 for prod	Hunter2FakePass!99
+redact	password: correct horse battery staple	correct horse
+redact	password: blue sky 7	blue sky
+redact	password: Dragon Monkey Tiger	Dragon Monkey
+redact	pwd: qwerty asdf zxcv	qwerty
+redact	password: dragon for wifi	dragon
+redact	password: dragon, rotate monthly	dragon
+redact	password: set to dragon	dragon
+redact	password: changed to Hunter2x	Hunter2x
+redact	password: reset to welcome123	welcome123
+redact	password: none, use dragon	dragon
+redact	token: rotated abc123XYZ	abc123XYZ
+redact	password: required dragon	dragon
+redact	password: n/a dragon	dragon
+redact	secret: unset banana	banana
+redact	password - dragon	dragon
+redact	password → dragon	dragon
+redact	password -> dragon	dragon
+redact	passwd dragon	dragon
+redact	pass: 1 dragon	dragon
+redact	pass=196 Hunter2Fake	Hunter2Fake
+redact	max_token=100 Hunter2Fake	Hunter2Fake
+redact	token_limit=5 Hunter2Fake	Hunter2Fake
+redact	pwd=/tmp Hunter2Secret	Hunter2Secret
+redact	pwd: /tmp/x Hunter2Secret	Hunter2Secret
+redact	password: x=Hunter2Fake	Hunter2Fake
+redact	password_prod=dragon	dragon
+redact	passwordProd: dragon	dragon
+redact	password[prod]=dragon	dragon
+redact	api key: FakeApiSpace99	FakeApiSpace99
+redact	secret key: FakeSecSpace99	FakeSecSpace99
+redact	sessionid=FakeSess99xx	FakeSess99xx
+redact	passcode: 4821	4821
+redact	pin: 4821	4821
+redact	p@ssword: dragon	dragon
+redact	password := dragon	dragon
+redact	password：dragon	dragon
+redact	password is: dragon	dragon
+redact	password; dragon	dragon
+redact	password, dragon	dragon
+redact	-p dragon	dragon
+redact	password: changeme	changeme
+redact	API_KEY=changeme	changeme
+redact	access key: FakeAccessKey99	FakeAccessKey99
+redact	private key: FakePrivateKey99	FakePrivateKey99
+redact	DBPASS=DbPassValue99	DbPassValue99
+redact	mypwd: MyPwdValue99xx	MyPwdValue99xx
+redact	userpass=UserPass99xx	UserPass99xx
+redact	password[]=dragon	dragon
+redact	password[a][b]=dragon	dragon
+redact	password.prod=dragon	dragon
+redact	password(prod)=dragon	dragon
+redact	pa$$word: dragon	dragon
+redact	pin code: 4821	4821
+redact	-pdragon	dragon
+redact	mysql -uroot -pSecretPw99	SecretPw99
+redact	password: 'Hunter2Fake' dragon	Hunter2Fake
+redact	pass word: dragon	dragon
+redact	Passwort: geheim99xx	geheim99xx
+redact	mot de passe: secret99xx	secret99xx
+redact	contraseña: secreto99	secreto99
+redact	password{prod}=dragon	dragon
+redact	p@ss: dragon	dragon
+redact	p@55word: dragon	dragon
+keep	workers-best-practices	
+keep	web-perf	
+keep	split-to-prs	
+keep	mkdir -p /tmp/x	
+keep	ssh -p 22	
+keep	docker -p 8080:80	
+keep	web-pin: x	
+keep	supabase-postgres-best-practices	
+keep	local-security-prompts.mdc	
+keep	pwd=/Users/alice/Code	
+keep	PWD=/home/user	
+keep	pass=1 fail=0	
+keep	PASS=12 FAIL=0	
+keep	DEFAULT_TOKEN=gpt-4o	
+keep	is_token=true	
+keep	has_secret=false	
+keep	csrf_token=enabled	
+keep	NEXT_PAGE_TOKEN=null	
+keep	token=null	
+keep	secret=true	
+keep	password=<your password>	
+keep	Key: use pnpm not npm	
+keep	primary_key: user_id	
+keep	sort_key: created_at	
+keep	cache_key: v2-node20	
+keep	MAX_TOKEN=4096	
+keep	pwd: /Users/x	
+keep	MONKEY_KEY=banana	
+keep	REACT_APP_PUBLIC_KEY=pk_test_x	
+keep	Basic authentication is disabled	
+keep	Use Bearer authentication for the API	
+keep	Bearer of bad news	
+keep	Basic setup: install pnpm	
+keep	password=${DB_PASSWORD}	
+keep	password=$TOKEN	
+keep	token=<redacted>	
+keep	secret=***	
+keep	/tmp/r10fp/abcdefghijklmnopqrstuv/CLAUDE.md	
+keep	/home/user/data/workflows/why/references/epistemics.md	
+keep	commit abcdef1	
+keep	id 550e8400-e29b-41d4-a716-446655440000	
+keep	token: optional	
+keep	password: changed	
+keep	Authorization: required	
+keep	password: reset	
+keep	token: expired	
+keep	secret: unknown	
+keep	session: deprecated	
+keep	auth: revoked	
+keep	password: none	
+keep	PASSWORD=required	
+keep	token=expired	
+keep	Tests: pass=196 failed=0	
+keep	Tests: pass=196	
+keep	PASS: 12 FAIL: 0	
+keep	pass=3 failures=1	
+overredact	Default token: Composer model	
+overredact	Explain token: what counts	
+overredact	API key: stored in 1Password	
+overredact	Max token: 8192	
+overredact	Default token: 4096 limit	
+overredact	Secret: 3 rules to follow	
+overredact	token: 2 per request	
+overredact	Password: 8+ chars required	
+overredact	token: v2	
+overredact	password: none needed	
+overredact	token: claude-sonnet-4-5	
+overredact	token: gpt-4o-mini-2024	
+overredact	token: grok-2	
+overredact	token: gemini-1.5-pro	
+overredact	token: o1-preview	
+overredact	secret: the deploy key	
+overredact	auth: github	
+overredact	session: weekly	
+overredact	cookie: consent banner	
+overredact	token: sonnet	
+overredact	token: budget	
+overredact	token: 1h	
+overredact	token: Composer-1	
+overredact	Token: see docs	
+overredact	auth: sso	
+overredact	Auth: OAuth	
+overredact	session: daily	
+overredact	Session: Monday standup	
+overredact	cookie: chocolate	
+overredact	cookie: blocked	
+overredact	secret: shared	
+overredact	secret: 2fa	
+overredact	The secret: practice daily	
+overredact	password: policy	
+overredact	password: weak	
+overredact	Password: Strong	
+overredact	password: 2FA enabled	
+overredact	x-api-key: header name	
+overredact	access_key: from IAM	
+overredact	apikey: in vault	
+overredact	credentials: in vault	
+overredact	passphrase: ask Alice	
+overredact	private_key: in ~/.ssh	
+overredact	token=sonnet-4	
+overredact	AUTH=sso	
+overredact	auth=oauth	
+overredact	session=abc	
+redact	pw-prod=dragon	dragon
+redact	password-prod=x9Fake	x9Fake
+redact	pwd-prod=x9Fake	x9Fake
+redact	pass-prod=x9Fake	x9Fake
+redact	token-prod=x9Fake	x9Fake
+redact	secret-prod: x9Fake	x9Fake
+redact	pass-phrase: x9Fake	x9Fake
+redact	pin-code=1234	1234
+redact	--pw-prod x9Fake	x9Fake
+redact	secret, hunter22X	hunter22X
+redact	password, hunter22X	hunter22X
+keep	token-budget	
+keep	secret-scanning	
+keep	auth-flow	
+keep	session-report	
+keep	secret-leak-watch	
+keep	~/.cursor/skills/secret-scanning/SKILL.md	
+overredact	password reset flow docs	
+keep	grep -p foo	
+keep	~/.cursor/skills/token-budget/SKILL.md	
+keep	/home/u/.claude/skills/secret-scanning/SKILL.md	
+keep	| session-report | 12 | desc |	
+keep	Check auth, then retry.	
+keep	The token, as shown, is short.	
+keep	Tests pass.	
+keep	you pass	
+redact	Kennwort: Geheim99xyz	Geheim99xyz
+redact	Kennwort=Geheim99xyz	Geheim99xyz
+redact	senha: Segredo99xyz	Segredo99xyz
+redact	senha=Segredo99xyz	Segredo99xyz
+redact	パスワード: Himitsu99xyz	Himitsu99xyz
+redact	パスワード=Himitsu99xyz	Himitsu99xyz
+redact	あなたのパスワード: Himitsu99xyz	Himitsu99xyz
+redact	Set-Cookie: sid=FakeSid9876543210	FakeSid9876543210
+redact	privateKey: FakePriv99	FakePriv99
+redact	secretKey=FakeSecretKey99	FakeSecretKey99
+redact	apiKey: FakeApiKeyC9	FakeApiKeyC9
+redact	ghu_FAKEfakefakefake0000	ghu_FAKEfake
+redact	ghr_FAKEfakefakefake0000	ghr_FAKEfake
+redact	password=letmein	letmein
+redact	passphrase: correct-horse	correct-horse
+redact	password: Sunshine	Sunshine
+redact	password is dragon	dragon
+redact	password: letmein1	letmein1
+redact	the password: football	football
+redact	token: my dog	my dog
+redact	password: correct horse battery	correct horse battery
+redact	password: dragon monkey	dragon monkey
+overredact	password:dragon	
+redact	PASSWORD : dragon	dragon
+redact	password:  dragon	dragon
+redact	password:\tdragon	dragon
+redact	Password: Dragon	Dragon
+redact	password: dragon.	dragon.
+redact	password: dragon!	dragon!
+redact	password: drag-on	drag-on
+redact	password: abcdefghijklm	abcdefghijklm
+redact	password: 'two words'	two words
+redact	password: dragon; rotate	dragon
+redact	password: a=Hunter2Fake	Hunter2Fake
+keep	pass=1234	
+redact	MAX_TOKEN=Hunter2Fake	Hunter2Fake
+redact	password: "q" Hunter2Fake	Hunter2Fake
+redact	password = dragon	dragon
+redact	password => dragon	dragon
+redact	password — dragon	dragon
+redact	password – dragon	dragon
+redact	password was dragon	dragon
+redact	pw is dragon	dragon
+redact	the wifi password is dragon	dragon
+redact	password for wifi is dragon	dragon
+redact	password = 'correct horse'	correct horse
+redact	"password": "dragon"	dragon
+redact	'password': 'dragon'	dragon
+redact	password: required, dragon	dragon
+redact	password: none dragon	dragon
+redact	password: true dragon	dragon
+redact	password: null Hunter2Fake	Hunter2Fake
+redact	password: <redacted> Hunter2Fake	Hunter2Fake
+redact	password: ${PW} Hunter2Fake	Hunter2Fake
+redact	secret key: Hunter2Fake	Hunter2Fake
+redact	api key: Hunter2Fake	Hunter2Fake
+redact	api-key: Hunter2Fake	Hunter2Fake
+redact	x-api-key: Hunter2Fake	Hunter2Fake
+redact	client_secret: Hunter2Fake	Hunter2Fake
+redact	refresh_token: Hunter2Fake	Hunter2Fake
+redact	sessionid=Hunter2Fake	Hunter2Fake
+redact	PGPASSWORD=Hunter2Fake	Hunter2Fake
+redact	MYSQL_PWD=Hunter2Fake	Hunter2Fake
+redact	password: v1 Hunter2Fake	Hunter2Fake
+redact	token: 8192 Hunter2Fake	Hunter2Fake
+redact	password: gpt-5 Hunter2Fake	Hunter2Fake
+redact	password=Hunter2Fake, user=bob	Hunter2Fake
+redact	user=bob, password=Hunter2Fake	Hunter2Fake
+redact	password: dragon, note: x	dragon
+redact	PassWord: dragon	dragon
+redact	password\u200b: dragon	dragon
+redact	password: dr\u200bagon	dr\u200bagon
+redact	Password: ＤＲＡＧＯＮ	ＤＲＡＧＯＮ
+redact	https://bob:Hunter2Fake@example.com	Hunter2Fake
+redact	mysql://bob:dragon@db	dragon
+redact	--password dragon	dragon
+redact	--password=dragon	dragon
+redact	?token=Hunter2Fake&x=1	Hunter2Fake
+redact	Authorization: Basic Ym9iOmRyYWdvbg==	Ym9iOmRyYWdvbg==
+redact	Cookie: session=Hunter2Fake	Hunter2Fake
+redact	password (prod): dragon	dragon
+redact	prod.password=dragon	dragon
+redact	API  key: Hunter2Fake	Hunter2Fake
+redact	api_key : Hunter2Fake	Hunter2Fake
+redact	Secret Key = Hunter2Fake	Hunter2Fake
+redact	access key: Hunter2Fake	Hunter2Fake
+redact	private key: Hunter2Fake	Hunter2Fake
+redact	client secret: Hunter2Fake	Hunter2Fake
+redact	auth token: Hunter2Fake	Hunter2Fake
+redact	bearer token: Hunter2Fake	Hunter2Fake
+redact	PASS-WORD: dragon	dragon
+redact	pass_word=dragon	dragon
+redact	passWord=dragon	dragon
+redact	Passwort: dragon	dragon
+redact	mot de passe: dragon	dragon
+redact	contraseña: dragon	dragon
+redact	dbPassword=dragon	dragon
+redact	DBPASS=dragon	dragon
+redact	db_pw=dragon	dragon
+redact	mypwd=dragon	dragon
+redact	userpass=dragon	dragon
+redact	password[prod][x]=dragon	dragon
+redact	P@SSWORD: dragon	dragon
+redact	password :=dragon	dragon
+redact	password=:dragon	dragon
+redact	password ：dragon	dragon
+redact	password∶dragon	dragon
+redact	password꞉dragon	dragon
+redact	password﹕dragon	dragon
+redact	password::dragon	dragon
+redact	password <- dragon	dragon
+redact	password | dragon	dragon
+redact	password / dragon	dragon
+redact	password\tdragon	dragon
+redact	password is now dragon	dragon
+redact	password = is dragon	dragon
+redact	-p=dragon	dragon
+redact	-P dragon	dragon
+redact	--pass dragon	dragon
+redact	--pw=dragon	dragon
+redact	-u bob -p dragon	dragon
+redact	mysql -uroot -pHunter2Fake	Hunter2Fake
+redact	sshpass -p dragon ssh x	dragon
+redact	PGPASSWORD=dragon psql	dragon
+redact	pin: 4821 for card	4821
+redact	PIN=4821	4821
+redact	passcode=4821	4821
+redact	pass=196 fail=0 Hunter2Fake	Hunter2Fake
+redact	pass=1 fail=0; token=Hunter2Fake	Hunter2Fake
+redact	max_token=100, password=Hunter2Fake	Hunter2Fake
+redact	MAX_TOKEN=gpt-4o Hunter2Fake	Hunter2Fake
+redact	pwd=/tmp\tHunter2Secret	Hunter2Secret
+redact	password=/tmp/Hunter2Secret	Hunter2Secret
+redact	password: x =Hunter2Fake	Hunter2Fake
+redact	password: session=Hunter2Fake	Hunter2Fake
+redact	password: token=Hunter2Fake	Hunter2Fake
+redact	password: a:Hunter2Fake	Hunter2Fake
+redact	password: changeme123	changeme123
+redact	password: ChangeMe	ChangeMe
+redact	password: xxx-real	xxx-real
+redact	password: *** Hunter2Fake	Hunter2Fake
+redact	password: none Hunter2Fake	Hunter2Fake
+redact	password: true Hunter2Fake	Hunter2Fake
+redact	password: required Hunter2Fake	Hunter2Fake
+redact	mysql -p hunter2Fake	hunter2Fake
+redact	mysql -phunter2Fake	hunter2Fake
+redact	mysql -u root -p hunter2Fake	hunter2Fake
+redact	mysqldump -u x -phunter2Fake db	hunter2Fake
+redact	mariadb -phunter2Fake	hunter2Fake
+redact	psql -p hunter2Fake	hunter2Fake
+redact	pg_dump -p hunter2Fake	hunter2Fake
+redact	sshpass -p hunter2Fake ssh host	hunter2Fake
+redact	docker login -p hunter2Fake	hunter2Fake
+redact	docker login -u x -p hunter2Fake	hunter2Fake
+redact	git -c x -p hunter2Fake	hunter2Fake
+redact	curl -u admin -p hunter2Fake	hunter2Fake
+redact	redis-cli -a hunter2Fake	hunter2Fake
+redact	7z x -phunter2Fake a.7z	hunter2Fake
+redact	zip -P hunter2Fake a.zip	hunter2Fake
+redact	unzip -P hunter2Fake a.zip	hunter2Fake
+redact	openssl enc -pass pass:hunter2Fake	hunter2Fake
+redact	htpasswd -b f user hunter2Fake	hunter2Fake
+redact	--password hunter2Fake	hunter2Fake
+redact	--password=hunter2Fake	hunter2Fake
+redact	password reset: hunter2Fake	hunter2Fake
+redact	password reset=hunter2Fake	hunter2Fake
+redact	password for prod: hunter2Fake	hunter2Fake
+redact	password to the db is hunter2Fake	hunter2Fake
+redact	password and hunter2Fake	hunter2Fake
+redact	password of admin = hunter2Fake	hunter2Fake
+redact	password the hunter2Fake	hunter2Fake
+redact	password hunter2Fake	hunter2Fake
+redact	passwd hunter2Fake	hunter2Fake
+redact	password: hunter2Fake	hunter2Fake
+redact	secret, hunter2Fake	hunter2Fake
+redact	secret; hunter2Fake	hunter2Fake
+redact	api-key=hunter2Fake	hunter2Fake
+redact	db-password: hunter2Fake	hunter2Fake
+redact	x-auth-token: hunter2Fake	hunter2Fake
+redact	pin-code=hunter2Fake	hunter2Fake
+keep	ls -p hunter2Fake	
+keep	ssh -p hunter2Fake host	
+redact	sshpass -phunter2Fake	hunter2Fake
+keep	qc-pass-desc	
+keep	pass-through mode	
+keep	/x/skills/secret-leak-watch/SKILL.md	
+keep	~/.claude/plugins/cache/m/session-report/1.0/skills/session-report/SKILL.md	
+overredact	password policy for teams	
+keep	docker run -p 8080:80 img	
+keep	ssh -p 22 host	
+keep	pip install -p x	
+keep	tar -xpf a.tar	
+overredact	the password, which is reset	
+overredact	token, password, API key, private key	
+keep	wait for CI to pass, clear PR feedback	
+redact	pwd-prod=dragon	dragon
+redact	pass-prod=dragon	dragon
+redact	password-prod=dragon	dragon
+redact	token-prod=dragon	dragon
+redact	secret-key=dragon	dragon
+redact	api-key=dragon	dragon
+redact	db-password=dragon	dragon
+redact	auth-token: dragon	dragon
+redact	session-token=dragon	dragon
+redact	secret-prod: dragon	dragon
+redact	pass-word=dragon	dragon
+redact	PW_PROD=dragon	dragon
+redact	pw.prod=dragon	dragon
+redact	--pw-prod dragon	dragon
+redact	x-api-key: dragon	dragon
+redact	pin-code=dragon	dragon
+redact	token-budget=dragon	dragon
+redact	secret-sauce=dragon	dragon
+redact	pass-phrase: dragon	dragon
+keep	qc-pass-rule.mdc	
+keep	pass-through	
+keep	api-key-setup	
+keep	key-rotation	
+keep	password-reset	
+keep	pwd-helper	
+keep	acme-pass-check	
+keep	creds-sync	
+keep	1password	
+keep	1password-cli	
+keep	token-optimizer	
+keep	oauth-token-refresh	
+keep	secret-sauce.mdc	
+keep	/x/skills/qc-pass-refs/SKILL.md	
+keep	bypass-cache	
+keep	passkey-login	
+redact	password reset: hunter2	hunter2
+redact	password reset=hunter2	hunter2
+redact	password for prod: hunter2	hunter2
+redact	password of admin = hunter2	hunter2
+redact	password to the db is hunter2	hunter2
+redact	password and hunter2	hunter2
+redact	password the hunter2	hunter2
+redact	redis-cli -a hunter2	hunter2
+redact	redis-cli -h cache -a hunter2	hunter2
+redact	htpasswd -b file user hunter2	hunter2
+redact	htpasswd -cb file user hunter2	hunter2

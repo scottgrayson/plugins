@@ -184,6 +184,14 @@ _MYSQL_CTX_RE = re.compile(
     r"(?i)(?:\b(?:mysql|mysqldump|mariadb|psql|postgres(?:ql)?)\b|"
     r"-u\w+|--user(?:name)?\b|--password\b)"
 )
+# redis-cli -a PASS ; htpasswd [-flags] file user PASS
+_REDIS_A_RE = re.compile(
+    rf"(?i)(?<![\w-])(redis-cli\b[^\n|;&]*?\s)(-a)\s+({_VALUE_EQ})"
+)
+_HTPASSWD_B_RE = re.compile(
+    rf"(?i)(?<![\w-])htpasswd\b(?:\s+-[A-Za-z]+)*\s+-[A-Za-z]*b[A-Za-z]*"
+    rf"(?:\s+-[A-Za-z]+)*\s+\S+\s+\S+\s+({_VALUE_EQ})"
+)
 # URL query ?name=value &name=value
 _ASSIGN_QUERY_RE = re.compile(
     rf"(?i)([?&])({_NAME_ATOM})=({_VALUE_EQ})"
@@ -231,13 +239,6 @@ _ASSIGN_DASH_ARROW_RE = re.compile(
 _ASSIGN_COMMA_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_@-])(password|passwd|passphrase|passcode|pwd|secret|"
     r"kennwort|senha|パスワード|密码|пароль)\s*[;,]\s*"
-)
-# Prose that follows "password" in documentation ("password reset flow docs").
-_PASSWORD_WS_PROSE_RE = re.compile(
-    r"(?i)(?:reset|policy|policies|manager|managers|field|fields|hash|hashing|"
-    r"hashes|rotation|rules|rule|requirements|strength|length|recovery|change|"
-    r"input|prompt|form|file|files|store|storage|protected|protection|flow|"
-    r"login|expiry|expiration|complexity|and|or|for|to|in|on|of|the|with)\b"
 )
 # Commands whose -p flag is never a password.
 _P_FLAG_SAFE_CMD_RE = re.compile(
@@ -854,6 +855,24 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
                 )
             )
 
+    for rx, grp in ((_REDIS_A_RE, 3), (_HTPASSWD_B_RE, 1)):
+        for m in rx.finditer(text):
+            vs = m.start(grp)
+            hit = _hit_from_name_sep(text, m.start(), "p", vs, "flag")
+            if hit:
+                hits.append(
+                    _AssignHit(
+                        hit.start,
+                        hit.end,
+                        "p",
+                        hit.value_start,
+                        hit.value_end,
+                        hit.value,
+                        text[m.start() : vs],
+                        "flag",
+                    )
+                )
+
     for m in _ASSIGN_QUERY_RE.finditer(text):
         amp, name = m.group(1), m.group(2)
         vs = m.start(3)
@@ -881,7 +900,7 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         name = m.group(1)
         # Avoid eating "password is X" / "password: X" / "password=X" (other forms).
         rest = text[m.end() :]
-        if re.match(r"(?i)is\b", rest) or _PASSWORD_WS_PROSE_RE.match(rest):
+        if re.match(r"(?i)is\b", rest):
             continue
         hit = _hit_from_name_sep(text, m.start(), name, m.end(), "ws")
         if hit:

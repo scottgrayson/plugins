@@ -207,6 +207,16 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("password{prod}=dragon", "dragon"),
     ("p@ss: dragon", "dragon"),
     ("p@55word: dragon", "dragon"),
+    ("password reset: hunter2", "hunter2"),
+    ("password reset=hunter2", "hunter2"),
+    ("password for prod: hunter2", "hunter2"),
+    ("password of admin = hunter2", "hunter2"),
+    ("password to the db is hunter2", "hunter2"),
+    ("password for wifi is dragon", "dragon"),
+    ("password and hunter2", "hunter2"),
+    ("password the hunter2", "hunter2"),
+    ("redis-cli -a hunter2", "hunter2"),
+    ("htpasswd -b file user hunter2", "hunter2"),
 ]
 
 # Still kept under the simple rule (empty / placeholder / null / bool / status
@@ -277,6 +287,8 @@ KEEP_CASES: list[str] = [
 # Do not delete or reword these to make tests pass — document the tradeoff.
 # Includes restored round-10 strings that prose carve-outs previously "kept".
 EXPECTED_OVERREDACT: list[str] = [
+    # prose allowlist removed (round 22): a leak is worse than over-redaction
+    "password reset flow docs",
     # restored round-10 originals (were reworded in later rounds to dodge FP)
     "Default token: Composer model",
     "Explain token: what counts",

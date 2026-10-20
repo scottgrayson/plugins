@@ -74,3 +74,5 @@ bash bin/ai-audit context --host auto
 | `--out-dir PATH` | Write `report.json` and `report.md` here |
 
 Secret-shaped values in notes and other string fields are redacted; inventory filesystem paths are never rewritten.
+
+Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked.

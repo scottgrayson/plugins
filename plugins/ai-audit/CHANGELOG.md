@@ -30,3 +30,4 @@
 - Out of scope: scheduled runs and savings estimates.
 - HUMAN-TEST: Claude / Cursor install, context command, secret check on context output.
 - **Round 21:** kebab-name exception removed from assignments (`pw-prod=x` redacts); project dir == home reads `~/.cursor/mcp.json` once; vscdb-disabled plugin skill asserted listed/counted/checked; `apply during` trigger; prose `skill mid-task` not a reference; `secret, X` redacts; `grep -p foo` and `password reset flow docs` kept.
+- **Round 22:** removed the "password <prose>" allowlist (leaks over reuse); `redis-cli -a` and `htpasswd -b` redacted; `tests/data/redaction_corpus.tsv` regression corpus.

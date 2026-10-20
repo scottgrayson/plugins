@@ -524,6 +524,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== redaction corpus =="
+CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
+if [[ $CORPUS_RC -eq 0 ]]; then
+  echo "PASS $CORPUS_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL redaction corpus (rc=$CORPUS_RC)"
+  echo "  $CORPUS_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 py_check "HUMAN-TEST secret check FAIL when AI_AUDIT unset" <<PY
 import pathlib, re, subprocess
 ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")

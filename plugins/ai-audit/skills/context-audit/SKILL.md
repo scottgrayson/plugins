@@ -50,6 +50,8 @@ The script fills **Item**, **Tokens**, **Description** (quoted/truncated from th
 
 **Do not** add generated text to the inventory table or the Checks table. Do not invent Purpose, AI suggestion, or token numbers. Report check findings **verbatim** — add no judgement. Do not edit files. Pattern hints (vague words, shouting) are not in this release.
 
+Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked.
+
 ## When to ask the user
 
 | Gap | Ask for |
