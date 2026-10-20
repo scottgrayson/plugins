@@ -54,7 +54,8 @@ def context_markdown(payload: dict[str, Any]) -> str:
     limit = 25
     ranked = sorted(always, key=lambda x: -int(x.get("est_tokens") or 0))
     for i in ranked[:limit]:
-        path = redact_secrets(i.get("path") or "?")
+        # Inventory paths are never secret-redacted (AWS-shape false positives).
+        path = i.get("path") or "?"
         kind = i.get("kind") or ""
         tok = int(i.get("est_tokens") or 0)
         lines.append(f"- `{kind}` · ~{tok} tok · `{path}`")
@@ -148,7 +149,7 @@ def facts_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
         for iss in issues[:40]:
             kind = iss.get("kind", "issue")
-            path = redact_secrets(iss.get("path", ""))
+            path = iss.get("path", "")  # filesystem path — do not redact
             detail = redact_secrets(iss.get("detail", ""))
             when = iss.get("date") or ""
             extra = f" ({when})" if when else ""

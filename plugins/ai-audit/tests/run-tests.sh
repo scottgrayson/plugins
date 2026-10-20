@@ -769,6 +769,9 @@ rm -rf "$SECRET9"
 assert_eq "fixture nested widget-skill present" \
   "$(py_get "$TMP/claude-context.json" 'sum(1 for i in data["inventory"] if "widget-skill" in i["path"] and i["kind"]=="skill_description")')" \
   "1"
+assert_eq "fixture nested widget-skill on_demand" \
+  "$(py_get "$TMP/claude-context.json" 'next(i["load"] for i in data["inventory"] if "widget-skill" in i["path"] and i["kind"]=="skill_description")')" \
+  "on_demand"
 py_check "context skips ~/.claude/plugins cache+marketplace and home nested" <<PY
 import sys, tempfile, shutil
 from pathlib import Path
@@ -789,11 +792,9 @@ try:
         tree.mkdir(parents=True)
         (tree / "SKILL.md").write_text("---\nname: big-skill\ndescription: fixture leak\n---\nbody\n")
     (home / "CLAUDE.md").write_text("# home\n")
-    # home as project (~)
+    # home as project (~) — no enabledPlugins, so cache must stay unlisted
     roots = Roots("claude", home, home, None, claude, home / ".cursor", False)
     inv = run_context_audit(roots)["inventory"]
-    bad = [i["path"] for i in inv if "big-skill" in i["path"] or "/plugins/" in i["path"].replace(str(td), "")]
-    # Only flag real plugin-tree paths
     bad = [i["path"] for i in inv if ".claude/plugins" in i["path"] or "big-skill" in i["path"]]
     assert bad == [], bad
     # monorepo: exclude ai-audit/fixtures under a different project root
@@ -844,6 +845,195 @@ else
   echo "FAIL HUMAN-TEST shell smoke"
   FAIL=$((FAIL + 1))
 fi
+
+echo "== round10 regressions =="
+# 1. AWS bare secret must not rewrite inventory paths; needs context; env KEY= works
+py_check "redact: path-safe AWS + context + new secret shapes + token prose" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.common import redact_secrets, redact_tree, looks_like_secret_value
+
+# Path false positive (round-10 repro)
+path = "/tmp/r10fp/abcdefghijklmnopqrstuv/CLAUDE.md"
+assert redact_secrets(path) == path, redact_secrets(path)
+path2 = "/home/box/sand-data/workflows/why/references/epistemics.md"
+assert redact_secrets(path2) == path2, redact_secrets(path2)
+assert "REDACTED" not in redact_secrets(path)
+# Inventory path field never rewritten
+tree = {"inventory": [{"path": path2, "notes": "db password=Hunter2FakePass!99"}]}
+out = redact_tree(tree)
+assert out["inventory"][0]["path"] == path2
+assert "Hunter2FakePass" not in out["inventory"][0]["notes"]
+
+# Bare AWS with context still redacts
+aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+assert aws not in redact_secrets("aws secret " + aws)
+assert aws not in redact_secrets("key " + aws)
+assert "REDACTED" in redact_secrets("aws " + aws)
+
+# Prefixed env / JSON / URL / PEM / Stripe
+cases = [
+    ("DB_PASSWORD=EnvFakePw12345", "EnvFakePw12345"),
+    ("GITHUB_TOKEN=plainfaketokenABCDEF", "plainfaketokenABCDEF"),
+    ("client_secret=ClientFake98765", "ClientFake98765"),
+    ("OPENAI_API_KEY=plainvalueABCDEF12", "plainvalueABCDEF12"),
+    ("AWS_SECRET_ACCESS_KEY=" + aws, aws),
+    ('{"password": "JsonFakePw77"}', "JsonFakePw77"),
+    ("postgres://admin:SuperS3cretPw@db.example/x", "SuperS3cretPw"),
+    ("https://scott:ghostPass123@example.com/a", "ghostPass123"),
+    ("sk_live_51FAKEabcdefghijklmnop", "sk_live_51FAKEabcdefghijklmnop"),
+    ("rk_live_51FAKEabcdefghijklmnop", "rk_live_51FAKEabcdefghijklmnop"),
+]
+for raw, leak in cases:
+    got = redact_secrets(raw)
+    assert leak not in got, (raw, got)
+    assert "REDACTED" in got, (raw, got)
+pem = (
+    "-----BEGIN RSA PRIVATE KEY-----"
+    + chr(10)
+    + "MIIEowIBAAKCAQEAfakePEM"
+    + chr(10)
+    + "-----END RSA PRIVATE KEY-----"
+)
+pem_out = redact_secrets(pem)
+assert "MIIEowIBAAKCAQEAfakePEM" not in pem_out, pem_out
+assert "REDACTED" in pem_out
+
+# token:/secret: prose — ordinary words stay
+assert "Composer" in redact_secrets("Default token: Composer model")
+assert "REDACTED" not in redact_secrets("Default token: Composer model")
+assert "counts" in redact_secrets("Explain token: what counts")
+assert "REDACTED" not in redact_secrets("secret: the deploy key")
+# but secret-looking values still redact
+assert "tok_live_abc123XYZ999" not in redact_secrets("token: tok_live_abc123XYZ999")
+assert looks_like_secret_value("tok_live_abc123XYZ999")
+assert not looks_like_secret_value("Composer")
+PY
+
+# Path survives end-to-end context md+json (repro mkdir)
+PATHFP="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-r10fp.XXXXXX")"
+mkdir -p "$PATHFP/abcdefghijklmnopqrstuv"
+printf 'x\n' >"$PATHFP/abcdefghijklmnopqrstuv/CLAUDE.md"
+HOMEFP="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-r10home.XXXXXX")"
+mkdir -p "$HOMEFP/.claude"
+(
+  cd "$PATHFP/abcdefghijklmnopqrstuv"
+  HOME="$HOMEFP" "$BIN" context --host claude --md-only >"$TMP/r10-path.md"
+  HOME="$HOMEFP" "$BIN" context --host claude --json-only >"$TMP/r10-path.json"
+)
+assert_not_contains "context md keeps long path segment" "$(cat "$TMP/r10-path.md")" "REDACTED.md"
+assert_contains "context md shows CLAUDE.md path" "$(cat "$TMP/r10-path.md")" "abcdefghijklmnopqrstuv/CLAUDE.md"
+assert_not_contains "context json keeps long path segment" "$(cat "$TMP/r10-path.json")" "REDACTED"
+rm -rf "$PATHFP" "$HOMEFP"
+
+# Softened CLI help (argparse may wrap the description across lines)
+HELP="$("$BIN" --help 2>&1 || true)"
+HELP_ONE="$(printf '%s' "$HELP" | tr '\n' ' ')"
+assert_contains "CLI help redacts common secret formats" "$HELP_ONE" "redacts common secret formats"
+assert_not_contains "CLI help no longer says never prints secrets" "$HELP_ONE" "never prints secrets"
+
+# 5. Nested skills on-demand (also covered above for fixture); synthetic monorepo
+py_check "nested .claude/skills marked on_demand" <<PY
+import sys, tempfile, shutil
+from pathlib import Path
+sys.path.insert(0, "$LIB")
+from ai_audit.context_audit import run_context_audit
+from ai_audit.detect import Roots
+
+td = Path(tempfile.mkdtemp())
+try:
+    home = td / "home"
+    home.mkdir()
+    claude = home / ".claude"
+    claude.mkdir()
+    proj = td / "proj"
+    nest = proj / "packages" / "pkg" / ".claude" / "skills" / "deep-skill"
+    nest.mkdir(parents=True)
+    (nest / "SKILL.md").write_text("---\nname: deep-skill\ndescription: nested desc\n---\nbody\n")
+    (proj / "CLAUDE.md").write_text("# p\n")
+    roots = Roots("claude", home, proj, None, claude, home / ".cursor", False)
+    inv = run_context_audit(roots)["inventory"]
+    rows = [i for i in inv if "deep-skill" in i["path"] and i["kind"] == "skill_description"]
+    assert rows, inv
+    assert all(i["load"] == "on_demand" for i in rows), rows
+    assert all(i["scope"] == "nested_package" for i in rows), rows
+finally:
+    shutil.rmtree(td)
+PY
+
+# 6. Enabled plugin skills listed from installPath only (no cache walk / no fixtures / no dupes)
+py_check "enabled plugin skills from installed_plugins.json" <<PY
+import json, sys, tempfile, shutil
+from pathlib import Path
+sys.path.insert(0, "$LIB")
+from ai_audit.context_audit import run_context_audit
+from ai_audit.detect import Roots
+
+td = Path(tempfile.mkdtemp())
+try:
+    home = td / "home"
+    claude = home / ".claude"
+    proj = td / "proj"
+    proj.mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("# p\n")
+    # Enabled ai-audit + disabled other
+    claude.mkdir(parents=True)
+    (claude / "settings.json").write_text(json.dumps({
+        "enabledPlugins": {
+            "ai-audit@scottgrayson-plugins": True,
+            "other@mp": False,
+        }
+    }))
+    # Real install path with 3 skills
+    inst = claude / "plugins" / "cache" / "scottgrayson-plugins" / "ai-audit" / "0.1.0"
+    for name in ("context-audit", "facts-audit", "token-audit"):
+        d = inst / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} desc here\n---\nbody\n")
+    # Noise: unenabled plugin + marketplace fixture skill must not appear
+    other = claude / "plugins" / "cache" / "mp" / "other" / "1.0.0" / "skills" / "other-skill"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("---\nname: other-skill\ndescription: no\n---\nx\n")
+    fix = (
+        claude / "plugins" / "cache" / "scottgrayson-plugins" / "ai-audit" / "0.1.0"
+        / "fixtures" / "claude" / "project" / ".claude" / "skills" / "big-skill"
+    )
+    fix.mkdir(parents=True)
+    (fix / "SKILL.md").write_text("---\nname: big-skill\ndescription: leak\n---\nx\n")
+    # Duplicate install record pointing at same path
+    (claude / "plugins").mkdir(exist_ok=True)
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            "ai-audit@scottgrayson-plugins": [
+                {"scope": "user", "installPath": str(inst), "version": "0.1.0"},
+                {"scope": "user", "installPath": str(inst), "version": "0.1.0"},
+            ],
+            "other@mp": [
+                {"scope": "user", "installPath": str(other.parent.parent), "version": "1.0.0"},
+            ],
+        }
+    }))
+    roots = Roots("claude", home, proj, None, claude, home / ".cursor", False)
+    inv = run_context_audit(roots)["inventory"]
+    plugin_skills = [
+        i for i in inv
+        if i.get("kind") == "skill_description" and i.get("scope") == "plugin"
+    ]
+    names = sorted({(i.get("meta") or {}).get("skill") or Path(i["path"]).parent.name for i in plugin_skills})
+    assert names == ["context-audit", "facts-audit", "token-audit"], names
+    assert not any("other-skill" in i["path"] for i in inv), "disabled plugin skill leaked"
+    assert not any("big-skill" in i["path"] for i in inv), "fixture skill leaked"
+    # No duplicate skill_description rows for the same skill name
+    assert len(plugin_skills) == 3, plugin_skills
+finally:
+    shutil.rmtree(td)
+PY
+
+# HUMAN-TEST: path-independent Cursor install + no exit 1
+assert_contains "HUMAN-TEST path-independent Cursor cp" "$(cat "$PLUGIN/HUMAN-TEST.md")" "/path/to/plugins/ai-audit"
+assert_not_contains "HUMAN-TEST no exit 1" "$(cat "$PLUGIN/HUMAN-TEST.md")" "exit 1"
+assert_contains "HUMAN-TEST echo FAIL" "$(cat "$PLUGIN/HUMAN-TEST.md")" "echo \"FAIL"
 
 echo "== public-repo clean =="
 assert_contains "three skills present" "$(ls "$PLUGIN/skills")" "context-audit"

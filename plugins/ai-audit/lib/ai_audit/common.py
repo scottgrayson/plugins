@@ -48,16 +48,51 @@ SECRET_JSON_KEYS = frozenset(
     }
 )
 
-# Value-pattern redaction for secrets in free-text (facts, notes, periods).
-# Whole values are replaced (not a visible prefix of the secret).
-_KV_SECRET_RE = re.compile(
-    r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*([=:])\s*([^\s,;]+)"
+# Keys whose values are always treated as secrets when assigned (password family).
+_ALWAYS_REDACT_KV_NAMES = frozenset(
+    {"password", "passwd", "pwd"}
 )
+# Keys that only redact when the value looks secret-shaped (avoids "token: Composer").
+_CONDITIONAL_KV_NAMES = frozenset(
+    {"secret", "token", "api_key", "api-key"}
+)
+
+# Env-style names ending in PASSWORD/TOKEN/SECRET/API_KEY/_KEY (and bare KEY after _).
+_ENV_SECRET_NAME_RE = re.compile(
+    r"(?i)^(?:[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY)|"
+    r"[A-Za-z_][A-Za-z0-9_]*_KEY|KEY)$"
+)
+# key=value / key: value — capture name, sep, value (value may be quoted)
+_KV_ASSIGN_RE = re.compile(
+    r"(?i)\b([A-Za-z_][A-Za-z0-9_-]*)\s*([=:])\s*([^\s,;]+)"
+)
+# JSON "password": "…" and the same key family (quoted keys)
+_JSON_SECRET_RE = re.compile(
+    r'(?i)("(?:password|passwd|pwd|secret|token|api[_-]?key|'
+    r'[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY)|'
+    r'[A-Za-z_][A-Za-z0-9_]*_KEY)")\s*:\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')'
+)
+# URL user:password@host
+_URL_USERINFO_RE = re.compile(
+    r"(?i)\b((?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|ftp)://)"
+    r"([^/\s:@]+):([^@/\s]+)@"
+)
+# PEM private key blocks
+_PEM_PRIVATE_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"
+    r".*?"
+    r"-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
+    re.DOTALL,
+)
+
 _SECRET_TOKEN_RES = (
     # Provider API keys / tokens (entire match → label…REDACTED)
     (re.compile(r"(?i)\bsk-ant-[A-Za-z0-9_\-]{8,}\b"), "sk-ant-…REDACTED"),
     (re.compile(r"(?i)\bsk-proj-[A-Za-z0-9_\-]{16,}\b"), "sk-proj-…REDACTED"),
     (re.compile(r"(?i)\bsk-or-[A-Za-z0-9_\-]{16,}\b"), "sk-or-…REDACTED"),
+    # Stripe live secret / restricted keys (underscore, not hyphen)
+    (re.compile(r"(?i)\bsk_live_[A-Za-z0-9]{8,}\b"), "sk_live_…REDACTED"),
+    (re.compile(r"(?i)\brk_live_[A-Za-z0-9]{8,}\b"), "rk_live_…REDACTED"),
     (re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{16,}\b"), "sk-…REDACTED"),
     (re.compile(r"(?i)\bxai-[A-Za-z0-9_\-]{16,}\b"), "xai-…REDACTED"),
     (re.compile(r"(?i)\b(ghp_|gho_|github_pat_)[A-Za-z0-9_\-]{16,}\b"), "gh-…REDACTED"),
@@ -78,10 +113,116 @@ _SECRET_TOKEN_RES = (
         "eyJ…REDACTED",
     ),
 )
-# AWS secret access key: 40-char base64-ish with / or + (avoids redacting plain hex).
+# Bare 40-char AWS secret access key shape (base64-ish). Only applied with context.
 _AWS_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9/+=])([A-Za-z0-9+/]{40})(?![A-Za-z0-9/+=])"
 )
+_AWS_CONTEXT_BEFORE_RE = re.compile(
+    r"(?i)(?:"
+    r"(?:aws[_-]?secret(?:_access)?[_-]?key|secret[_-]?access[_-]?key|"
+    r"aws[_-]?secret|secret)\s*[=:\s]\s*$|"
+    r"AKIA[A-Z0-9]{12,}\s+\S{0,60}\s*$|"
+    r"\b(?:aws\s+)?(?:secret(?:\s+access\s+key)?|key)\s+$|"
+    r"\baws\s+$"
+    r")"
+)
+
+# Keys whose string values are filesystem paths — never value-redact.
+_PATH_FIELD_KEYS = frozenset(
+    {
+        "path",
+        "home",
+        "project",
+        "sand_data",
+        "claude_home",
+        "cursor_home",
+        "installPath",
+        "projectPath",
+    }
+)
+
+
+def _strip_value_quotes(value: str) -> str:
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
+
+
+def looks_like_secret_value(value: str) -> bool:
+    """True when a token:/secret: value looks like a credential, not ordinary prose."""
+    v = _strip_value_quotes(value).strip()
+    if not v:
+        return False
+    # Known key prefixes
+    if re.match(
+        r"(?i)(?:sk[-_]|rk[-_]|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)",
+        v,
+    ):
+        return True
+    # 16+ chars mixing letters and digits (typical opaque tokens)
+    if len(v) >= 16:
+        has_letter = bool(re.search(r"[A-Za-z]", v))
+        has_digit = bool(re.search(r"[0-9]", v))
+        if has_letter and has_digit:
+            return True
+    # Shorter but clearly opaque (has digit + letter, length >= 10, not a single word)
+    if len(v) >= 10 and re.search(r"[A-Za-z]", v) and re.search(r"[0-9]", v):
+        if re.search(r"[^A-Za-z0-9]", v) or re.search(r"[A-Z].*[a-z]|[a-z].*[A-Z]", v):
+            return True
+    return False
+
+
+def _kv_should_redact(name: str, value: str) -> bool:
+    n = name.lower().replace("-", "_")
+    if n in _ALWAYS_REDACT_KV_NAMES or n.endswith("_password") or n.endswith("_passwd"):
+        return bool(_strip_value_quotes(value).strip())
+    if n in _CONDITIONAL_KV_NAMES:
+        return looks_like_secret_value(value)
+    if _ENV_SECRET_NAME_RE.match(name):
+        # Prefixed env names: redact any non-empty value
+        return bool(_strip_value_quotes(value).strip())
+    return False
+
+
+_PATH_WORD_RE = re.compile(
+    r"(?i)(?:home|users|tmp|var|opt|workspace|sand-data|agent-data|"
+    r"references|workflows|plugins|claude|cursor|packages|node_modules)"
+)
+
+
+def _aws_candidate_is_pathlike(secret: str, full: str, start: int) -> bool:
+    """True when a 40-char match is (or sits inside) a filesystem path."""
+    # Absolute path fragment: match begins with /
+    if secret.startswith("/"):
+        return True
+    after = full[start + len(secret) : start + len(secret) + 12]
+    if after.startswith((".md", ".py", ".json", ".txt", ".yaml", ".yml", ".toml")):
+        return True
+    before = full[max(0, start - 32) : start]
+    # Readable path words inside the match (AWS keys are opaque base64)
+    if "/" in secret and _PATH_WORD_RE.search(secret):
+        return True
+    window = before + secret[:24]
+    if re.search(r"(?i)/(?:home|Users|tmp|var|etc|opt|workspace|mnt)(?:/|$)", window):
+        return True
+    return False
+
+
+def _redact_aws_bare(text: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        secret = m.group(1)
+        if _aws_candidate_is_pathlike(secret, text, m.start()):
+            return secret
+        # AWS secrets almost always include / or +; skip plain hex/alnum runs
+        if "/" not in secret and "+" not in secret:
+            return secret
+        before = text[max(0, m.start() - 100) : m.start()]
+        if _AWS_CONTEXT_BEFORE_RE.search(before):
+            return "…REDACTED"
+        return secret
+
+    return _AWS_SECRET_RE.sub(repl, text)
 
 
 def redact_secrets(text: str) -> str:
@@ -91,27 +232,51 @@ def redact_secrets(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
     out = text
-    # key=value / key: value — keep the key name, redact the whole value
-    out = _KV_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}…REDACTED", out)
+
+    # PEM private keys first (multi-line)
+    out = _PEM_PRIVATE_RE.sub("-----BEGIN PRIVATE KEY-----…REDACTED-----END PRIVATE KEY-----", out)
+
+    # URL credentials: keep scheme+user, redact password
+    out = _URL_USERINFO_RE.sub(r"\1\2:…REDACTED@", out)
+
+    # JSON "key": "value"
+    def _json_sub(m: re.Match[str]) -> str:
+        key, _val = m.group(1), m.group(2)
+        return f"{key}: \"…REDACTED\""
+
+    out = _JSON_SECRET_RE.sub(_json_sub, out)
+
+    # key=value / key: value — password always; token/secret only when value looks secret;
+    # env names ending in PASSWORD/TOKEN/SECRET/API_KEY/KEY always.
+    def _kv_sub(m: re.Match[str]) -> str:
+        name, sep, value = m.group(1), m.group(2), m.group(3)
+        if _kv_should_redact(name, value):
+            return f"{name}{sep}…REDACTED"
+        return m.group(0)
+
+    out = _KV_ASSIGN_RE.sub(_kv_sub, out)
+
     for rx, repl in _SECRET_TOKEN_RES:
         out = rx.sub(repl, out)
 
-    def _aws(m: re.Match[str]) -> str:
-        s = m.group(1)
-        return "…REDACTED" if ("/" in s or "+" in s) else s
-
-    out = _AWS_SECRET_RE.sub(_aws, out)
+    out = _redact_aws_bare(out)
     return out
 
 
 def redact_tree(obj: Any) -> Any:
-    """Deep-copy-ish walk: redact every string leaf in dict/list structures."""
+    """Deep-copy-ish walk: redact every string leaf except filesystem path fields."""
     if isinstance(obj, str):
         return redact_secrets(obj)
     if isinstance(obj, list):
         return [redact_tree(x) for x in obj]
     if isinstance(obj, dict):
-        return {k: redact_tree(v) for k, v in obj.items()}
+        out = {}
+        for k, v in obj.items():
+            if k in _PATH_FIELD_KEYS and isinstance(v, str):
+                out[k] = v  # never rewrite inventory / root paths
+            else:
+                out[k] = redact_tree(v)
+        return out
     return obj
 
 

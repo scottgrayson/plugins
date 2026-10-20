@@ -232,7 +232,13 @@ def _skill_extra_files(skill_dir: Path, skill_md: Path) -> list[tuple[Path, int]
     return out
 
 
-def _skill_items(host: str, scope: str, skill_md: Path) -> list[InventoryItem]:
+def _skill_items(
+    host: str,
+    scope: str,
+    skill_md: Path,
+    *,
+    force_on_demand: bool = False,
+) -> list[InventoryItem]:
     text = safe_read_text(skill_md) or ""
     desc_chars, meta, body = skill_description_chars(text)
     name = str(meta.get("name") or skill_md.parent.name)
@@ -250,7 +256,7 @@ def _skill_items(host: str, scope: str, skill_md: Path) -> list[InventoryItem]:
                     scope,
                     skill_md,
                     path_listing,
-                    "always",
+                    "on_demand" if force_on_demand else "always",
                     notes=f"skill={name}; disable-model-invocation — path only in catalog",
                     skill=name,
                     disable_model_invocation=True,
@@ -271,6 +277,22 @@ def _skill_items(host: str, scope: str, skill_md: Path) -> list[InventoryItem]:
                     disable_model_invocation=True,
                 )
             )
+    elif force_on_demand:
+        # Nested package .claude/skills below the project root: Claude Code docs say
+        # these do not load at startup (on-demand only).
+        items.append(
+            _item(
+                host,
+                "skill_description",
+                scope,
+                skill_md,
+                _utf8_bytes(str(meta.get("description") or "")),
+                "on_demand",
+                notes=f"skill={name}; nested .claude/skills — on demand (not always-loaded)",
+                skill=name,
+                disable_model_invocation=False,
+            )
+        )
     else:
         items.append(
             _item(
@@ -497,6 +519,143 @@ def _mcp_items(
 # --- Claude Code -----------------------------------------------------------
 
 
+def _enabled_plugin_ids(claude_home: Path, project: Path) -> list[str]:
+    """Plugin ids with enabledPlugins: true from user + project settings (order preserved)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for settings_path in (
+        claude_home / "settings.json",
+        project / ".claude" / "settings.json",
+        project / ".claude" / "settings.local.json",
+    ):
+        data = load_json_safe(settings_path)
+        if not isinstance(data, dict):
+            continue
+        enabled = data.get("enabledPlugins")
+        if not isinstance(enabled, dict):
+            continue
+        for key, val in enabled.items():
+            if val is True and key not in seen:
+                seen.add(key)
+                out.append(str(key))
+    return out
+
+
+def _read_installed_plugins(claude_home: Path) -> dict[str, Any]:
+    """Load ~/.claude/plugins/installed_plugins.json (v2 plugins map or legacy flat)."""
+    path = claude_home / "plugins" / "installed_plugins.json"
+    data = load_json_safe(path)
+    if not isinstance(data, dict):
+        return {}
+    plugins = data.get("plugins")
+    if isinstance(plugins, dict):
+        return plugins
+    # Legacy: top-level keys are plugin ids
+    return {k: v for k, v in data.items() if k not in ("version",)}
+
+
+def _install_paths_for_plugin(entries: Any, project: Path) -> list[Path]:
+    """Resolve unique installPath dirs for one plugin id (user/managed, then matching project)."""
+    if isinstance(entries, dict):
+        entry_list = [entries]
+    elif isinstance(entries, list):
+        entry_list = [e for e in entries if isinstance(e, dict)]
+    else:
+        return []
+
+    chosen: list[dict[str, Any]] = []
+    for e in entry_list:
+        scope = str(e.get("scope") or "")
+        if scope in ("user", "managed"):
+            chosen.append(e)
+    if not chosen:
+        proj_s = str(project.resolve()) if project else ""
+        for e in entry_list:
+            if str(e.get("scope") or "") != "project":
+                continue
+            pp = e.get("projectPath")
+            if pp is None or str(Path(str(pp)).expanduser().resolve()) == proj_s:
+                chosen.append(e)
+    if not chosen:
+        chosen = list(entry_list)
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for e in chosen:
+        raw = e.get("installPath")
+        if not raw:
+            continue
+        p = Path(str(raw)).expanduser()
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.is_dir():
+            paths.append(p)
+    return paths
+
+
+def _skill_mds_in_plugin_root(install_path: Path) -> list[Path]:
+    """List SKILL.md files for one plugin install — no full cache walk."""
+    found: list[Path] = []
+    skills_dir = install_path / "skills"
+    if skills_dir.is_dir():
+        for child in sorted(skills_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            skill_md = child / "SKILL.md"
+            if skill_md.is_file():
+                found.append(skill_md)
+    root_skill = install_path / "SKILL.md"
+    if root_skill.is_file():
+        found.append(root_skill)
+    return found
+
+
+def _enabled_plugin_skill_items(
+    host: str,
+    claude_home: Path,
+    project: Path,
+    enabled_ids: list[str],
+) -> list[InventoryItem]:
+    """
+    Skills of enabled plugins via installed_plugins.json install paths only.
+    Skips fixtures and duplicate resolved paths; does not walk the whole plugin cache.
+    """
+    registry = _read_installed_plugins(claude_home)
+    items: list[InventoryItem] = []
+    seen_skill: set[str] = set()
+    for plugin_id in enabled_ids:
+        entries = registry.get(plugin_id)
+        if entries is None:
+            continue
+        for install_path in _install_paths_for_plugin(entries, project):
+            if _under_ai_audit_fixtures(install_path):
+                continue
+            for skill_md in _skill_mds_in_plugin_root(install_path):
+                if _under_ai_audit_fixtures(skill_md):
+                    continue
+                try:
+                    key = str(skill_md.resolve())
+                except OSError:
+                    key = str(skill_md)
+                if key in seen_skill:
+                    continue
+                seen_skill.add(key)
+                for it in _skill_items(host, "plugin", skill_md):
+                    it.notes = (
+                        f"{it.notes}; plugin={plugin_id}"
+                        if it.notes
+                        else f"plugin={plugin_id}"
+                    )
+                    it.meta = {**(it.meta or {}), "plugin": plugin_id}
+                    items.append(it)
+    return items
+
+
 def collect_claude(roots: Roots) -> list[InventoryItem]:
     host = "claude"
     items: list[InventoryItem] = []
@@ -588,10 +747,12 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
         (project / ".claude" / "skills", "project"),
     ):
         items.extend(_walk_skills(host, scope, skills_dir, project=project))
-    # Nested package skills (e.g. packages/foo/.claude/skills) — bounded, no plugin caches
+    # Nested package skills (e.g. packages/foo/.claude/skills) — on-demand only
     if _project_allows_nested_scan(project, roots.home):
         for skill_md in _iter_nested_skill_mds(project, project=project):
-            items.extend(_skill_items(host, "nested_package", skill_md))
+            items.extend(
+                _skill_items(host, "nested_package", skill_md, force_on_demand=True)
+            )
 
     for agents_dir, scope in (
         (home / "agents", "user"),
@@ -626,10 +787,9 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
     ):
         items.extend(_mcp_items(host, scope, cfg_path, defer_schemas=True))
 
-    settings = load_json_safe(home / "settings.json") or {}
-    enabled = settings.get("enabledPlugins") if isinstance(settings, dict) else None
-    if isinstance(enabled, dict) and enabled:
-        blob = ",".join(sorted(enabled.keys()))
+    enabled_ids = _enabled_plugin_ids(home, project)
+    if enabled_ids:
+        blob = ",".join(sorted(enabled_ids))
         items.append(
             _item(
                 host,
@@ -638,10 +798,11 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
                 home / "settings.json",
                 _utf8_bytes(blob),
                 "always",
-                notes=f"{len(enabled)} enabled plugin key(s)",
-                plugin_count=len(enabled),
+                notes=f"{len(enabled_ids)} enabled plugin key(s)",
+                plugin_count=len(enabled_ids),
             )
         )
+        items.extend(_enabled_plugin_skill_items(host, home, project, enabled_ids))
 
     return items
 

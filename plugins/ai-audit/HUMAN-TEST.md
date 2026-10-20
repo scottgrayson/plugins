@@ -16,10 +16,11 @@ While this PR is open / unmerged, add the branch marketplace (after merge, use p
 
 ```bash
 claude plugin marketplace add 'scottgrayson/plugins#cursor/ai-audit-plugin-f41a'
-# After merge to main, prefer:  claude plugin marketplace add scottgrayson/plugins
 claude plugin install ai-audit@scottgrayson-plugins
 claude plugin details ai-audit@scottgrayson-plugins
 ```
+
+After merge to main, prefer: `claude plugin marketplace add scottgrayson/plugins`.
 
 Expect: `Skills (3)` listing `context-audit`, `facts-audit`, `token-audit`.
 
@@ -38,13 +39,14 @@ echo "PASS Claude install paths ($PLUGIN)"
 
 1. Dashboard → Plugins / Team Marketplaces → add `https://github.com/scottgrayson/plugins` (or the PR branch URL while open)
 2. Customize → Plugins → install **ai-audit**
-3. Or local copy from a clone:
+3. Or local copy from a clone (path-independent — replace the source path with your checkout):
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
-cp -R "$(pwd)/plugins/ai-audit" ~/.cursor/plugins/local/ai-audit
-# Reload Window, then confirm skills under the Plugins UI
+cp -R /path/to/plugins/ai-audit ~/.cursor/plugins/local/ai-audit
 ```
+
+Reload Window, then confirm skills under the Plugins UI.
 
 ```bash
 PLUGIN="$HOME/.cursor/plugins/local/ai-audit"
@@ -62,8 +64,10 @@ Slash-invoke `/ai-audit:context-audit` (or the other two) once in the host UI if
 
 ## 1. Context audit (~30 s)
 
+Required — do not run from `~`; use your real project path:
+
 ```bash
-cd /path/to/your/project   # required — do not run from ~
+cd /path/to/your/project
 bash "$AI_AUDIT" context --host claude --md-only | head -40
 bash "$AI_AUDIT" context --host cursor --md-only | head -40
 bash "$AI_AUDIT" context --host grok --md-only | head -40
@@ -84,10 +88,11 @@ bash "$AI_AUDIT" token --host claude --md-only
 **Cursor — file fallback (everyone):**
 
 1. Cursor dashboard → **Usage** → download/export CSV (name varies; usually under `~/Downloads/`)
-2. Resolve a real file with a zsh-safe glob (zsh is the Mac default):
+2. Resolve a real file with a zsh-safe glob (zsh is the Mac default).
+
+zsh: `null_glob` so a non-matching pattern does not abort the line:
 
 ```bash
-# zsh: null_glob so a non-matching pattern does not abort the line
 if [ -n "${ZSH_VERSION:-}" ]; then
   setopt null_glob
 fi
@@ -97,7 +102,11 @@ for candidate in "$HOME"/Downloads/*[Uu]sage*.csv "$HOME"/Downloads/usage*.csv; 
   CSV="$candidate"
   break
 done
-# Prefer newest if several matched via find (also zsh/bash safe):
+```
+
+Prefer newest if several matched via find (also zsh/bash safe):
+
+```bash
 if [ -z "$CSV" ]; then
   CSV="$(find "$HOME/Downloads" -maxdepth 1 -iname '*usage*.csv' -type f 2>/dev/null | sort | tail -1)"
 fi
@@ -106,10 +115,10 @@ test -n "$CSV" && test -f "$CSV"
 bash "$AI_AUDIT" token --host cursor --csv "$CSV" --md-only
 ```
 
-Optional **Enterprise team admin only** (individual / Pro: skip):
+Optional **Enterprise team admin only** (individual / Pro: skip). Export a team Admin API key — not a browser cookie:
 
 ```bash
-export CURSOR_ADMIN_API_KEY=…   # team Admin API key — not a browser cookie
+export CURSOR_ADMIN_API_KEY=…
 bash "$AI_AUDIT" token --host cursor --md-only
 ```
 
@@ -134,7 +143,7 @@ bash "$AI_AUDIT" facts --host grok --stale-days 30 --md-only | head -40
 
 ## 4. Secrets stay redacted + bad CSV errors (~30 s)
 
-Plant a realistic fake key; raw value count must be **0**. Checks print visible PASS/FAIL:
+Plant a realistic fake key; raw value count must be **0**. Checks print visible PASS/FAIL (use `echo FAIL` — do not `exit`, which closes an interactive terminal):
 
 ```bash
 SECRET_ROOT="$(mktemp -d)"
@@ -151,17 +160,17 @@ bash "$AI_AUDIT" facts --host grok --root "$SECRET_ROOT/grok" --md-only \
 if [ "$(grep -c 'Hunter2FakePass' /tmp/ai-audit-secret-facts.json || true)" -eq 0 ]; then
   echo "PASS secrets json redacted"
 else
-  echo "FAIL secrets json leaked Hunter2FakePass"; exit 1
+  echo "FAIL secrets json leaked Hunter2FakePass"
 fi
 if [ "$(grep -c 'crsr_fake' /tmp/ai-audit-secret-facts.json || true)" -eq 0 ]; then
   echo "PASS crsr_ json redacted"
 else
-  echo "FAIL crsr_ leaked"; exit 1
+  echo "FAIL crsr_ leaked"
 fi
 if grep -q REDACTED /tmp/ai-audit-secret-facts.json; then
   echo "PASS REDACTED marker present"
 else
-  echo "FAIL missing REDACTED marker"; exit 1
+  echo "FAIL missing REDACTED marker"
 fi
 
 rm -rf "$SECRET_ROOT"
@@ -174,11 +183,11 @@ if bash "$AI_AUDIT" token --host cursor --csv /nonexistent/usage.csv --md-only 2
     | tee /tmp/ai-audit-bad-csv.txt | grep -qi 'does not exist'; then
   echo "PASS bad csv message"
 else
-  echo "FAIL bad csv message missing"; exit 1
+  echo "FAIL bad csv message missing"
 fi
 if ! bash "$AI_AUDIT" token --host cursor --csv /nonexistent/usage.csv --json-only >/dev/null 2>&1; then
   echo "PASS bad csv exit non-zero"
 else
-  echo "FAIL bad csv exit was zero"; exit 1
+  echo "FAIL bad csv exit was zero"
 fi
 ```

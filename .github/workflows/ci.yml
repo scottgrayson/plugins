@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ripgrep curl >/dev/null
+          sudo apt-get install -y -qq ripgrep curl zsh >/dev/null
           # mikefarah yq (workflow YAML assertions in run-tests.sh)
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64

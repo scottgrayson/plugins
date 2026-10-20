@@ -39,7 +39,7 @@ def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ai-audit",
-        description="Read-only context / token / facts audits (never writes; never prints secrets).",
+        description="Read-only context / token / facts audits (never writes; redacts common secret formats).",
     )
     p.add_argument("--version", action="version", version=f"ai-audit {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
