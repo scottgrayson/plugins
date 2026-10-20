@@ -78,6 +78,16 @@ _PATH_REF_RE = re.compile(
     r"(?i)(?<![\w/.@-])((?:\./|\.\./|~/|/)[^\s`'\"<>()\[\]{}|,;*]+"
     r"\.[A-Za-z][A-Za-z0-9]{0,7})(?![\w/-])"
 )
+# Skill-relative paths with no ./ prefix, e.g. references/x.md or scripts/y.sh.
+_SKILL_SUBDIRS = ("references", "reference", "scripts", "assets", "templates", "resources")
+_SKILL_REL_RE = re.compile(
+    r"(?i)(?<![\w/.@~-])((?:%s)/[^\s`'\"<>()\[\]{}|,;*]+"
+    r"\.[A-Za-z][A-Za-z0-9]{0,7})(?![\w/-])" % "|".join(_SKILL_SUBDIRS)
+)
+# Markdown link targets: [text](target) or [text](target "title").
+_MD_LINK_RE = re.compile(r"\[[^\]\n]*\]\(\s*<?([^\s)>]+)>?(?:\s+[^)\n]*)?\)")
+_FENCE_RE = re.compile(r"(?m)^[ \t]*(`{3,}|~{3,}).*$")
+
 # skill/rule name references: quoted/backticked, or kebab-case (avoids
 # prose like "skill descriptions").
 _NAME_REF_RE = re.compile(
@@ -98,7 +108,9 @@ class CheckFinding:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["editable"] = is_editable_source(self.source)
+        return d
 
 
 def _short(path: Path, home: Path, project: Path | None = None) -> str:
@@ -138,6 +150,45 @@ def _looks_like_file_ref(ref: str) -> bool:
         return False
     ext = ref.rsplit(".", 1)[-1].lower()
     return ext in _FILE_EXTS
+
+
+def _code_ranges(text: str) -> list[tuple[int, int]]:
+    """Offsets of fenced code blocks and inline code spans."""
+    out: list[tuple[int, int]] = []
+    open_at: Optional[int] = None
+    fence = ""
+    for m in _FENCE_RE.finditer(text):
+        mark = m.group(1)
+        if open_at is None:
+            open_at, fence = m.start(), mark
+        elif mark[0] == fence[0] and len(mark) >= len(fence):
+            out.append((open_at, m.end()))
+            open_at = None
+    if open_at is not None:
+        out.append((open_at, len(text)))
+    for m in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", text, re.DOTALL):
+        out.append((m.start(), m.end()))
+    return out
+
+
+def _in_ranges(ranges: Sequence[tuple[int, int]], offset: int) -> bool:
+    return any(a <= offset < b for a, b in ranges)
+
+
+_UNEDITABLE_FRAGMENTS = (
+    "/plugins/cache/",
+    "/plugins/marketplaces/",
+    "/plugins/installed/",
+    "/skills-cursor/",
+    "/.cursor/extensions/",
+    "/.vscode/extensions/",
+)
+
+
+def is_editable_source(source: str) -> str:
+    """'no' for files under plugin caches and other tool-managed locations."""
+    s = "/" + str(source).replace("\\", "/").lstrip("/")
+    return "no" if any(f in s for f in _UNEDITABLE_FRAGMENTS) else "yes"
 
 
 def _line_at(text: str, offset: int) -> int:
@@ -272,42 +323,62 @@ def check_broken_references(
         base = path.parent
         src = _short(path, home, project)
         scan = _mask_non_refs(scan)
-        for rx in (_AT_FILE_RE, _PATH_REF_RE):
+        code = _code_ranges(scan)
+        cands: list[tuple[str, int, str]] = []  # (ref, offset, kind)
+        for rx, kind in (
+            (_AT_FILE_RE, "at"),
+            (_PATH_REF_RE, "path"),
+            (_SKILL_REL_RE, "skillrel"),
+        ):
             for m in rx.finditer(scan):
-                ref = m.group(1)
-                if not _looks_like_file_ref(ref):
+                cands.append((m.group(1), m.start(1), kind))
+        for m in _MD_LINK_RE.finditer(scan):
+            target = m.group(1).split("#", 1)[0].split("?", 1)[0]
+            if not target or target.startswith(("/", "#")) or _in_ranges(code, m.start()):
+                continue
+            cands.append((target, m.start(1), "link"))
+        for ref, start, kind in cands:
+            if not _looks_like_file_ref(ref) or ref.startswith("/"):
+                continue  # absolute non-home paths: sandbox, container, temp
+            if ref.startswith("~/"):
+                cand = home / ref[2:]
+            else:
+                if ref.startswith("./") and _in_ranges(code, start):
+                    # Project-relative example in code; only skill-owned names count.
+                    parts = ref.split("/")
+                    if not (
+                        len(parts) > 2
+                        and (parts[1] in _SKILL_SUBDIRS or (base / parts[1]).exists())
+                    ):
+                        continue
+                if ref.startswith("../") and _in_ranges(code, start):
                     continue
-                cand = Path(ref)
-                if not cand.is_absolute():
-                    if ref.startswith("~/"):
-                        cand = home / ref[2:]
-                    else:
-                        cand = (base / ref).resolve() if base.exists() else project / ref
-                        try:
-                            cand = cand.resolve()
-                        except OSError:
-                            pass
-                if not cand.exists():
-                    # also try relative to project
-                    alt = project / ref.lstrip("./")
-                    if alt.exists():
-                        continue
-                    line = _line_at(text, body_offset + m.start())
-                    key = (src, line, ref)
-                    if key in seen_path_refs:
-                        continue
-                    seen_path_refs.add(key)
-                    findings.append(
-                        CheckFinding(
-                            item=path.name,
-                            check="broken_references",
-                            finding=f"{src}:{line}: missing path {ref!r}",
-                            source=src,
-                            severity="high",
-                            line=line,
-                            meta={"ref": ref},
-                        )
+                cand = (base / ref) if base.exists() else project / ref
+                try:
+                    cand = cand.resolve()
+                except OSError:
+                    pass
+            if not cand.exists():
+                # also try relative to project
+                alt = project / ref.lstrip("./")
+                if alt.exists():
+                    continue
+                line = _line_at(text, body_offset + start)
+                key = (src, line, ref)
+                if key in seen_path_refs:
+                    continue
+                seen_path_refs.add(key)
+                findings.append(
+                    CheckFinding(
+                        item=path.name,
+                        check="broken_references",
+                        finding=f"{src}:{line}: missing path {ref!r}",
+                        source=src,
+                        severity="high",
+                        line=line,
+                        meta={"ref": ref, "kind": kind},
                     )
+                )
         for m in _NAME_REF_RE.finditer(scan):
             kind = "skill" if m.group(0).lower().lstrip().startswith("skill") else "rule"
             name = m.group(1) or m.group(2)

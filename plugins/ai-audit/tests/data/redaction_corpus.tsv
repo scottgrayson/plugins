@@ -626,3 +626,34 @@ keep	password-reset-flow
 keep	api_key_rotation	
 keep	password/X		by-design	source
 keep	password.X		by-design	source
+keep	user-1password	
+keep	plugin-1password-mcp	
+keep	user-bitwarden	
+keep	bitwarden	
+keep	user-lastpass	
+keep	lastpass	
+keep	user-keepass	
+keep	keepassxc	
+keep	user-1password (12 tools)	
+keep	MCP server user-bitwarden (7 tools)	
+keep	user-1password			source
+redact	/x/password/hunter2	hunter2
+redact	/x/passwordhunter2	hunter2
+redact	password-hunter2	hunter2
+redact	passwordhunter2	hunter2
+redact	api_key_abc123	abc123
+redact	~/.secrets/hunter2	hunter2
+redact	x/secret_ab12	ab12		source
+redact	~/.cursor/password/hunter2	hunter2		source
+redact	x/passwordZq7FakeVal9	Zq7FakeVal9		source
+redact	/x/password-abc1	abc1		path
+redact	/x/pwd.hunter2	hunter2
+redact	/x/password.Hunter2Fake	Hunter2Fake
+redact	/x/bearer/eyJhbGciOiJIUzI1NiJ9	eyJhbGciOiJIUzI1NiJ9
+keep	local-security-prompts	
+keep	~/.secrets/	
+keep	~/.secrets/			source
+keep	~/.claude/plugins/cache/m/secret-scanner/0.15.25/skills/a/SKILL.md			source
+overredact	password-v2	
+keep	/x/password-dragonfly		by-design
+keep	DB_PASSWORD_dragonfly		by-design

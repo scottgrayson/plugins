@@ -524,6 +524,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-25 (reference false positives, product names, tails, Editable) =="
+R25_OUT="$(python3 -B "$PLUGIN/tests/test_round25.py" 2>&1)" && R25_RC=0 || R25_RC=$?
+if [[ $R25_RC -eq 0 ]]; then
+  echo "PASS $R25_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round25 (rc=$R25_RC)"
+  echo "  $R25_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then

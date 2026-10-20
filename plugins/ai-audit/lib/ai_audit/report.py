@@ -79,18 +79,19 @@ def _checks_markdown(payload: dict[str, Any]) -> list[str]:
         "Deterministic, token-free facts (no AI). Report each finding verbatim; "
         "do not add judgement.",
         "",
-        "| Item | Check | Finding | Source |",
-        "|---|---|---|---|",
+        "| Item | Check | Finding | Source | Editable |",
+        "|---|---|---|---|---|",
     ]
     if not checks:
-        lines.append("| _(none)_ |  |  |  |")
+        lines.append("| _(none)_ |  |  |  |  |")
     else:
         for c in checks:
             item = str(c.get("item") or "").replace("|", "\\|")
             check = str(c.get("check") or "").replace("|", "\\|")
             finding = str(c.get("finding") or "").replace("|", "\\|")
             source = str(c.get("source") or "").replace("|", "\\|")
-            lines.append(f"| {item} | {check} | {finding} | {source} |")
+            editable = str(c.get("editable") or "yes")
+            lines.append(f"| {item} | {check} | {finding} | {source} | {editable} |")
     lines.append("")
     return lines
 

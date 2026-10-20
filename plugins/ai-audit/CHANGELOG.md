@@ -31,3 +31,8 @@
 - HUMAN-TEST: Claude / Cursor install, context command, secret check on context output.
 - **Round 21:** kebab-name exception removed from assignments (`pw-prod=x` redacts); project dir == home reads `~/.cursor/mcp.json` once; vscdb-disabled plugin skill asserted listed/counted/checked; `apply during` trigger; prose `skill mid-task` not a reference; `secret, X` redacts; `grep -p foo` and `password reset flow docs` kept.
 - **Round 22:** removed the "password <prose>" allowlist (leaks over reuse); `redis-cli -a` and `htpasswd -b` redacted; `tests/data/redaction_corpus.tsv` regression corpus.
+- **Round 25:**
+  - `broken_references` checks markdown link targets, skill-relative paths (`references/`, `scripts/`, `./` outside code) and `~/` paths. It skips absolute non-home paths (sandbox, container, temp) and `./` paths in code spans or fences unless they point into the skill folder.
+  - Password-manager names (1password, lastpass, keepass, bitwarden) no longer trigger the secret-word backstop.
+  - After a strong secret word, a digit in the rest of a bare name or path segment, or a letter run glued to the word, hides the tail. `password-v2` is over-redacted by design.
+  - Checks table has an **Editable** column (`no` for plugin caches and other tool-managed locations).

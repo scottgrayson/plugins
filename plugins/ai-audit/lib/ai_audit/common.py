@@ -1020,6 +1020,8 @@ _STRONG_SECRET_RE = re.compile(
     r"private[\s_-]?key|api[\s_-]?key|credential|access[\s_-]?key|"
     r"auth[\s_-]?token|bearer"
 )
+# Password-manager product names. The secret word inside them is not a secret.
+_PRODUCT_RE = re.compile(r"1password|lastpass|keepass(?:xc|x)?|bitwarden|dashlane")
 _BARE_NAME_RE = re.compile(
     r"[A-Za-z0-9_-]+(?:\.(?:md|mdc|json|jsonc|toml|ya?ml|txt|sh|py|js|ts))?"
 )
@@ -1045,12 +1047,49 @@ def _fold_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(chars), idx
 
 
+def _strong_matches(folded: str) -> list["re.Match[str]"]:
+    """Strong secret words, minus those inside a product name such as 1password."""
+    products = [m.span() for m in _PRODUCT_RE.finditer(folded)]
+    return [
+        m
+        for m in _STRONG_SECRET_RE.finditer(folded)
+        if not any(a <= m.start() and m.end() <= b for a, b in products)
+    ]
+
+
+# Letter suffixes that may be glued to a strong word without hiding it.
+_GLUED_OK_RE = re.compile(r"(?:less|ed|ing|ary|ive|manager)(?![A-Za-z])", re.I)
+
+
+def _tail_is_secret(tail: str) -> bool:
+    """Is what follows a strong word secret-looking in a bare name or path segment?
+
+    A digit in the rest of the word, or a letter run glued straight onto the word,
+    means a value. When the word ends its segment (password/, ~/.secrets/), the next
+    segment is checked for a digit. Separate letter-only words (password-reset-flow,
+    api_key_rotation, password/notes) stay readable.
+    """
+    if _random_tail(tail):
+        return True
+    parts = re.split(r"[/\\]", tail, maxsplit=2)
+    seg = re.sub(r"(?::\d+)+$", "", parts[0])
+    if seg.strip(" ._-"):
+        if any(c.isdigit() for c in seg):
+            return True
+        if seg[:1].isalpha() and not _GLUED_OK_RE.match(seg):
+            return True
+        return False
+    nxt = re.sub(r"(?::\d+)+$", "", parts[1]) if len(parts) > 1 else ""
+    return any(c.isdigit() for c in nxt)
+
+
 def hide_after_strong_word(text: str) -> str:
     """Field-level backstop: keep text through the first strong secret word, hide the rest."""
     folded, idx = _fold_with_map(text)
-    m = _STRONG_SECRET_RE.search(folded)
-    if not m:
+    found = _strong_matches(folded)
+    if not found:
         return text
+    m = found[0]
     end = m.end()
     # take a plural "s" so "secrets" / "credentials" stay whole words
     if folded[end : end + 1] == "s":
@@ -1081,12 +1120,12 @@ def _hide_path_secret(text: str) -> str:
     password.X stay readable by design.
     """
     folded, idx = _fold_with_map(text)
-    for m in _STRONG_SECRET_RE.finditer(folded):
+    for m in _strong_matches(folded):
         end = _strong_tail_start(folded, m)
         nxt = folded[end : end + 1]
         if nxt and not (nxt in "/.-_" or nxt.isalpha()):
             return _hide_from(text, idx, end)
-        if nxt in ("-", "_", ".", "/") and _random_tail(text[idx[end] :]):
+        if nxt and _tail_is_secret(text[idx[end] :]):
             return _hide_from(text, idx, end)
     return text
 
@@ -1103,11 +1142,12 @@ def _random_tail(tail: str) -> bool:
 
 
 def _bare_name_is_safe(text: str) -> bool:
-    folded, _ = _fold_with_map(text)
-    m = _STRONG_SECRET_RE.search(folded)
-    if not m:
-        return True
-    return not _random_tail(text[_strong_tail_start(folded, m) :])
+    folded, idx = _fold_with_map(text)
+    for m in _strong_matches(folded):
+        end = _strong_tail_start(folded, m)
+        if end < len(folded) and _tail_is_secret(text[idx[end] :]):
+            return False
+    return True
 
 
 def _redact_field(text: str, key: str | None) -> str:
