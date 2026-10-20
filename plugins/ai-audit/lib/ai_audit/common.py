@@ -94,6 +94,18 @@ _SECRET_NAME_EXACT = frozenset(
         "p",  # short CLI -p
     }
 )
+# Password-manager product names. In a key they count as the word `password`.
+_PRODUCT_NAMES = r"1password|lastpass|keepass(?:xc)?|bitwarden|dashlane"
+_PRODUCT_KEY_RE = re.compile(_PRODUCT_NAMES)
+
+
+def _has_product(name: str) -> bool:
+    folded = "".join(
+        c for c in unicodedata.normalize("NFKC", name or "") if unicodedata.category(c) != "Cf"
+    )
+    return bool(_PRODUCT_KEY_RE.search(folded.lower()))
+
+
 _PASSWORD_FAMILY = frozenset(
     {
         "password",
@@ -144,7 +156,7 @@ _NAME_ATOM = (
     r"(?:p@ssword|pa\$\$word|p@55word|p@ss|"
     r"passwort|kennwort|senha|contrase(?:ñ|n)a|"
     r"パスワード|密码|пароль|"
-    r"[A-Za-z_][A-Za-z0-9_-]*"
+    r"[A-Za-z0-9_][A-Za-z0-9_-]*"  # may start with a digit (1password-x)
     r"(?:\[[^\]]*\])*"  # password[] / password[a][b]
     r"(?:\{[^}]*\})*"  # password{prod}
     r"(?:\.[A-Za-z0-9_-]+)*"  # password.prod
@@ -154,7 +166,9 @@ _NAME_ATOM = (
 # Spaced secret names (incl. "pass word", i18n password words).
 _NAME_SPACED = (
     r"(?:api|secret|access|private)\s+key|pin\s+code|pass\s+word|"
-    r"mot\s+de\s+passe|contrase(?:ñ|n)a|passwort"
+    r"mot\s+de\s+passe|contrase(?:ñ|n)a|passwort|"
+    # product name as a word in a multi-word key ("my lastpass key")
+    rf"[A-Za-z0-9_.-]*(?:{_PRODUCT_NAMES})[A-Za-z0-9_.-]*(?:\s+[A-Za-z]+){{1,3}}"
 )
 _NAME_ANY = rf"(?:{_NAME_SPACED}|{_NAME_ATOM})"
 # Unicode colon lookalikes used as separators (∶ U+2236, ꞉ U+A789, ﹕ U+FE55)
@@ -172,7 +186,7 @@ _ASSIGN_COLON_START_RE = re.compile(
 # Long --flags only here. Short -p is handled separately (round-19 #1):
 # only as a standalone flag token in mysql-like context or with a secret-shaped value.
 _ASSIGN_FLAG_RE = re.compile(
-    rf"(?i)(--([A-Za-z][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))"
+    rf"(?i)(--([A-Za-z0-9][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))"
 )
 # Standalone -p / -pVALUE (not mid hyphenated name; not -port/-plugin/…).
 # Groups: 1=-p, 2=sep, 3=spaced/eq value, 4=glued value.
@@ -406,6 +420,8 @@ def is_secret_name(name: str) -> bool:
     """Classify assignment/header/flag name as secret-ish."""
     if not name:
         return False
+    if _has_product(name):
+        return True
     raw = name.strip()
     # Spaced forms + i18n password words
     low = re.sub(r"\s+", " ", raw.lower())
@@ -469,6 +485,8 @@ def is_secret_name(name: str) -> bool:
 
 
 def _is_password_family(name: str) -> bool:
+    if _has_product(name):
+        return True
     bare = re.sub(r"\[.*?\]", "", name or "")
     bare = re.sub(r"\{.*?\}", "", bare)
     bare = re.sub(r"\([^)]*\)", "", bare)
@@ -1057,15 +1075,30 @@ _ALPHA_WORD = r"[^\W\d_]+(?=$|\s|[.,;!?)\]])"
 _SAFE_PAREN_RE = re.compile(
     r"\s+\((?:\d+ tools?|password managers?)\)(?=$|\s)"
 )
-_SAFE_WORD_RE = re.compile(r"\s+(?!(?:is|are)(?=\s|$))" + _ALPHA_WORD)
-_SAFE_CLOSE_RE = re.compile(r"[.,)\]]+(?:$|\s+" + _ALPHA_WORD + ")")
+# A tab is never prose spacing, so tab + word is a value. Verbs that introduce a
+# value (is, was, ...) are not filler. A digit-bearing token within two words
+# after a filler word reads as a value ("1password and hunter2").
+_SAFE_WORD_RE = re.compile(
+    r"[^\S\t]+(?!(?:is|are|was|were|be|been|am)(?=\s|$))" + _ALPHA_WORD
+)
+_VALUE_AFTER_FILLER_RE = re.compile(r"(?:\s+[^\W\d_]+){0,2}\s+\S*\d")
+# After a comma only a connective keeps the product readable ("Bitwarden, and
+# more"); any other word may be a value ("1password, dragon").
+_SAFE_CLOSE_RE = re.compile(
+    r"[.)\]]+(?:$|\s+" + _ALPHA_WORD + r")|,[^\S\t]+(?:and|or|but|then|etc)(?=[\s.,]|$)"
+)
 _SAFE_TAIL_RE = re.compile(r"(?:[-_.]*[^\W\d_]+)+(?![^\W_])")
 _PM_RE = re.compile(r"password managers?")
 _PM_TAIL_RE = re.compile(r"(?i)managers?")
 
 
 def _safe_follow(rest: str) -> bool:
-    return not rest or any(
+    if not rest:
+        return True
+    w = _SAFE_WORD_RE.match(rest)
+    if w and _VALUE_AFTER_FILLER_RE.match(rest, w.end()):
+        return False
+    return any(
         rx.match(rest)
         for rx in (_SAFE_PAREN_RE, _SAFE_WORD_RE, _SAFE_CLOSE_RE, _SAFE_TAIL_RE)
     )

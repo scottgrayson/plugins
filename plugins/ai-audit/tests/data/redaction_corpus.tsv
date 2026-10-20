@@ -702,3 +702,7 @@ redact	password manager hunter2	hunter2
 redact	1password (password is dragonfly)	dragonfly
 redact	1password (secret dragonfly)	dragonfly
 redact	Use 1Password, password is dragonfly	dragonfly
+redact	1password-dragonfly: hunter2Fake	hunter2Fake
+redact	1password-dragonfly:x9	x9
+redact	my_lastpass_key=abc1	abc1
+redact	BITWARDEN_TOKEN=x9	x9

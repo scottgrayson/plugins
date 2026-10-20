@@ -579,6 +579,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-32 (password-manager product name in a key) =="
+R32_OUT="$(python3 -B "$PLUGIN/tests/test_round32.py" 2>&1)" && R32_RC=0 || R32_RC=$?
+if [[ $R32_RC -eq 0 ]]; then
+  echo "PASS $R32_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round32 (rc=$R32_RC)"
+  echo "  $R32_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then
