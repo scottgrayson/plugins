@@ -94,8 +94,11 @@ def _classify_kind(kind_raw: str, row: dict[str, str]) -> str:
 
 
 
-def _to_epoch_ms(value: Optional[str]) -> Optional[int]:
-    """Convert ISO date/datetime or numeric string to epoch milliseconds (Admin API)."""
+def _to_epoch_ms(value: Optional[str], *, label: str = "date") -> Optional[int]:
+    """Convert ISO date/datetime or numeric string to epoch milliseconds (Admin API).
+
+    Empty/None → None. Unparseable non-empty values raise ValueError (never silently dropped).
+    """
     if value is None:
         return None
     s = str(value).strip()
@@ -113,8 +116,10 @@ def _to_epoch_ms(value: Optional[str]) -> Optional[int]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return int(dt.timestamp() * 1000)
-    except ValueError:
-        return None
+    except ValueError as e:
+        raise ValueError(
+            f"unparseable --admin-{label} {value!r}; use ISO YYYY-MM-DD (or datetime) or epoch ms"
+        ) from e
 
 
 def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
@@ -294,8 +299,11 @@ def fetch_cursor_admin_usage(
     max_pages = 500  # safety; if hit, report truncated rather than silent stop
     while True:
         payload: dict[str, Any] = {"page": page, "pageSize": page_size}
-        start_ms = _to_epoch_ms(start_date)
-        end_ms = _to_epoch_ms(end_date)
+        try:
+            start_ms = _to_epoch_ms(start_date, label="start")
+            end_ms = _to_epoch_ms(end_date, label="end")
+        except ValueError as e:
+            return {"error": str(e), "events": []}
         if start_ms is not None:
             payload["startDate"] = start_ms
         if end_ms is not None:

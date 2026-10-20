@@ -48,17 +48,39 @@ SECRET_JSON_KEYS = frozenset(
     }
 )
 
-# Value-pattern redaction for secrets that appear inside free-text (facts, notes, periods).
-# Matches common provider key shapes; replacements keep enough prefix to show a key was present.
-_SECRET_VALUE_RES = (
-    re.compile(r"(?i)\b(sk-ant-)[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"(?i)\b(sk-|sk-proj-|sk-or-)[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"(?i)\b(xai-)[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"(?i)\b(ghp_|gho_|github_pat_)[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"(?i)\b(xox[baprs]-)[A-Za-z0-9_\-]{10,}"),
-    re.compile(r"(?i)\b(AIza)[A-Za-z0-9_\-]{20,}"),
-    re.compile(r"(?i)\b(AKIA)[A-Z0-9]{12,}"),
-    re.compile(r"(?i)\b(key-|api[_-]?key[_\-=:\s]+)[A-Za-z0-9_\-]{16,}"),
+# Value-pattern redaction for secrets in free-text (facts, notes, periods).
+# Whole values are replaced (not a visible prefix of the secret).
+_KV_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*([=:])\s*([^\s,;]+)"
+)
+_SECRET_TOKEN_RES = (
+    # Provider API keys / tokens (entire match → label…REDACTED)
+    (re.compile(r"(?i)\bsk-ant-[A-Za-z0-9_\-]{8,}\b"), "sk-ant-…REDACTED"),
+    (re.compile(r"(?i)\bsk-proj-[A-Za-z0-9_\-]{16,}\b"), "sk-proj-…REDACTED"),
+    (re.compile(r"(?i)\bsk-or-[A-Za-z0-9_\-]{16,}\b"), "sk-or-…REDACTED"),
+    (re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{16,}\b"), "sk-…REDACTED"),
+    (re.compile(r"(?i)\bxai-[A-Za-z0-9_\-]{16,}\b"), "xai-…REDACTED"),
+    (re.compile(r"(?i)\b(ghp_|gho_|github_pat_)[A-Za-z0-9_\-]{16,}\b"), "gh-…REDACTED"),
+    (re.compile(r"(?i)\bxox[baprs]-[A-Za-z0-9_\-]{10,}\b"), "xox-…REDACTED"),
+    (re.compile(r"(?i)\bAIza[A-Za-z0-9_\-]{20,}\b"), "AIza-…REDACTED"),
+    (re.compile(r"(?i)\bAKIA[A-Z0-9]{12,}\b"), "AKIA-…REDACTED"),
+    # Cursor Admin API keys
+    (re.compile(r"(?i)\bcrsr_[A-Za-z0-9_\-]{8,}\b"), "crsr_…REDACTED"),
+    # Bearer + JWT (header.payload.sig)
+    (
+        re.compile(
+            r"(?i)\bBearer\s+eyJ[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+){2,}"
+        ),
+        "Bearer …REDACTED",
+    ),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_\-]+=*(?:\.[A-Za-z0-9_\-]+=*){2,}\b"),
+        "eyJ…REDACTED",
+    ),
+)
+# AWS secret access key: 40-char base64-ish with / or + (avoids redacting plain hex).
+_AWS_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9/+=])([A-Za-z0-9+/]{40})(?![A-Za-z0-9/+=])"
 )
 
 
@@ -69,8 +91,16 @@ def redact_secrets(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
     out = text
-    for rx in _SECRET_VALUE_RES:
-        out = rx.sub(lambda m: (m.group(1) if m.lastindex else "***") + "…REDACTED", out)
+    # key=value / key: value — keep the key name, redact the whole value
+    out = _KV_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}…REDACTED", out)
+    for rx, repl in _SECRET_TOKEN_RES:
+        out = rx.sub(repl, out)
+
+    def _aws(m: re.Match[str]) -> str:
+        s = m.group(1)
+        return "…REDACTED" if ("/" in s or "+" in s) else s
+
+    out = _AWS_SECRET_RE.sub(_aws, out)
     return out
 
 

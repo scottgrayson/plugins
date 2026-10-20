@@ -626,12 +626,16 @@ assert_eq "usage-file period redacts key" \
 rm -rf "$SECRET_FIX"
 
 # 2/3 Admin API epoch + pagination covered in section 15 mock
-# 3 missing --csv path errors clearly
+# 3 missing --csv path errors clearly + non-zero exit
+set +e
 "$BIN" token --host cursor --root "$FIX/cursor" --csv /nonexistent/usage.csv --json-only \
-  >"$TMP/missing-csv.json" || true
+  >"$TMP/missing-csv.json" 2>"$TMP/missing-csv.err"
+missing_csv_rc=$?
+set -e
 assert_contains "missing csv error" \
   "$(py_get "$TMP/missing-csv.json" 'str(data.get("data",{}).get("error") or "") + " ".join(data.get("notes") or [])')" \
-  "not found"
+  "does not exist"
+assert_eq "missing csv exit non-zero" "$([[ $missing_csv_rc -ne 0 ]] && echo yes || echo no)" "yes"
 
 # 4 duplicate usage-file note
 printf '%s\n' '{"usage_total":3,"unit":"percent"}' >"$TMP/uf.json"
@@ -694,10 +698,152 @@ assert_not_contains "no RETURN trap for install temps" "$(cat "$PLUGIN/tests/run
 
 # 10 HUMAN-TEST + Enterprise docs
 assert_contains "HUMAN-TEST has claude plugin install" "$(cat "$PLUGIN/HUMAN-TEST.md")" "claude plugin"
-assert_contains "HUMAN-TEST plants sk-ant" "$(cat "$PLUGIN/HUMAN-TEST.md")" "sk-ant-FAKE"
+assert_contains "HUMAN-TEST branch marketplace form" "$(cat "$PLUGIN/HUMAN-TEST.md")" \
+  "scottgrayson/plugins#cursor/ai-audit-plugin-f41a"
+assert_contains "HUMAN-TEST plants password= secret" "$(cat "$PLUGIN/HUMAN-TEST.md")" "password=Hunter2FakePass"
+assert_contains "HUMAN-TEST greps does not exist" "$(cat "$PLUGIN/HUMAN-TEST.md")" "does not exist"
+assert_contains "HUMAN-TEST says cd into a project" "$(cat "$PLUGIN/HUMAN-TEST.md")" "into a real project directory"
+assert_contains "HUMAN-TEST Claude OR Cursor" "$(cat "$PLUGIN/HUMAN-TEST.md")" "Claude Code block OR the Cursor block"
+assert_contains "HUMAN-TEST prints PASS" "$(cat "$PLUGIN/HUMAN-TEST.md")" "PASS secrets json redacted"
+assert_contains "HUMAN-TEST zsh null_glob" "$(cat "$PLUGIN/HUMAN-TEST.md")" "null_glob"
 assert_contains "HUMAN-TEST per-host --host claude" "$(cat "$PLUGIN/HUMAN-TEST.md")" "--host claude"
 assert_contains "README Enterprise team admin" "$(cat "$PLUGIN/README.md")" "Enterprise team admin"
 assert_contains "token skill Enterprise" "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "Enterprise"
+
+echo "== round9 regressions =="
+# 1. Redaction: password=/secret=/token=, AWS 40-char, crsr_, Bearer JWT (whole value)
+py_check "redact password= secret= token= AWS crsr_ Bearer JWT" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.common import redact_secrets
+cases = [
+    ("db password=Hunter2FakePass!99 for prod", "Hunter2FakePass!99"),
+    ("password: Hunter2FakePass!99", "Hunter2FakePass!99"),
+    ("secret=SuperSecretValue99", "SuperSecretValue99"),
+    ("token=tok_live_abc123XYZ", "tok_live_abc123XYZ"),
+    ("key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY end", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+    ("crsr_fake0123456789abcdef0123456789abcdef0123456789", "crsr_fake0123456789"),
+    (
+        "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        "eyJhbGciOiJIUzI1NiJ9",
+    ),
+]
+for raw, leak in cases:
+    out = redact_secrets(raw)
+    assert leak not in out, (raw, out)
+    assert "REDACTED" in out, out
+    # No long visible secret prefix (whole value redacted)
+    assert "Hunter2" not in out
+    assert "wJalrXUtnFEMI" not in out
+    assert "fake0123456789abcdef" not in out
+    assert "eyJhbGciOiJIUzI1NiJ9.eyJ" not in out
+PY
+
+SECRET9="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-secret9.XXXXXX")"
+cp -a "$FIX/grok" "$SECRET9/grok"
+printf '%s\n' \
+  '- (2025-03-01) db password=Hunter2FakePass!99 secret=SuperSecretValue99 token=tok_live_abc123XYZ' \
+  '- (2025-03-01) aws wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' \
+  '- (2025-03-01) admin crsr_fake0123456789abcdef0123456789abcdef0123456789' \
+  '- (2025-03-01) auth Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U' \
+  >>"$SECRET9/grok/sand-data/user-memory/by-agent/agent-active/profile.md"
+"$BIN" facts --host grok --root "$SECRET9/grok" --json-only >"$TMP/r9-facts.json"
+"$BIN" facts --host grok --root "$SECRET9/grok" --md-only >"$TMP/r9-facts.md"
+for leak in Hunter2FakePass SuperSecretValue99 tok_live_abc123XYZ wJalrXUtnFEMI crsr_fake0123456789abcdef eyJhbGciOiJIUzI1NiJ9; do
+  assert_eq "facts json redacts $leak" "$(grep -c "$leak" "$TMP/r9-facts.json" || true)" "0"
+  assert_eq "facts md redacts $leak" "$(grep -c "$leak" "$TMP/r9-facts.md" || true)" "0"
+done
+printf '%s\n' '{"usage_total":9,"usage_period":"wk password=Hunter2FakePass!99 crsr_fake0123456789abcdef0123456789 Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig","unit":"percent"}' \
+  >"$TMP/r9-usage.json"
+"$BIN" token --host grok --root "$FIX/grok" --usage-file "$TMP/r9-usage.json" --json-only \
+  >"$TMP/r9-usage-out.json"
+"$BIN" token --host grok --root "$FIX/grok" --usage-file "$TMP/r9-usage.json" --md-only \
+  >"$TMP/r9-usage-out.md"
+assert_eq "usage json redacts password value" "$(grep -c 'Hunter2FakePass' "$TMP/r9-usage-out.json" || true)" "0"
+assert_eq "usage md redacts password value" "$(grep -c 'Hunter2FakePass' "$TMP/r9-usage-out.md" || true)" "0"
+assert_eq "usage json redacts crsr_" "$(grep -c 'crsr_fake0123456789abcdef' "$TMP/r9-usage-out.json" || true)" "0"
+assert_eq "usage json redacts Bearer jwt" "$(grep -c 'eyJhbGciOiJIUzI1NiJ9' "$TMP/r9-usage-out.json" || true)" "0"
+rm -rf "$SECRET9"
+
+# 2. Context: no plugin cache/marketplace fixtures; home-as-project skips nested; --root keeps widget-skill; dedupe
+assert_eq "fixture nested widget-skill present" \
+  "$(py_get "$TMP/claude-context.json" 'sum(1 for i in data["inventory"] if "widget-skill" in i["path"] and i["kind"]=="skill_description")')" \
+  "1"
+py_check "context skips ~/.claude/plugins cache+marketplace and home nested" <<PY
+import sys, tempfile, shutil
+from pathlib import Path
+sys.path.insert(0, "$LIB")
+from ai_audit.context_audit import run_context_audit, _dedupe_items, _item
+from ai_audit.detect import Roots
+from ai_audit.common import InventoryItem
+
+td = Path(tempfile.mkdtemp())
+try:
+    home = td / "home"
+    home.mkdir()
+    claude = home / ".claude"
+    for tree in (
+        claude / "plugins" / "cache" / "mp" / "ai-audit" / "0.1.0" / "fixtures" / "claude" / "project" / ".claude" / "skills" / "big-skill",
+        claude / "plugins" / "marketplaces" / "mp" / "plugins" / "ai-audit" / "fixtures" / "claude" / "project" / ".claude" / "skills" / "big-skill",
+    ):
+        tree.mkdir(parents=True)
+        (tree / "SKILL.md").write_text("---\nname: big-skill\ndescription: fixture leak\n---\nbody\n")
+    (home / "CLAUDE.md").write_text("# home\n")
+    # home as project (~)
+    roots = Roots("claude", home, home, None, claude, home / ".cursor", False)
+    inv = run_context_audit(roots)["inventory"]
+    bad = [i["path"] for i in inv if "big-skill" in i["path"] or "/plugins/" in i["path"].replace(str(td), "")]
+    # Only flag real plugin-tree paths
+    bad = [i["path"] for i in inv if ".claude/plugins" in i["path"] or "big-skill" in i["path"]]
+    assert bad == [], bad
+    # monorepo: exclude ai-audit/fixtures under a different project root
+    mono = td / "repo"
+    wdir = mono / "plugins" / "ai-audit" / "fixtures" / "claude" / "project" / "packages" / "widget" / ".claude" / "skills" / "widget-skill"
+    wdir.mkdir(parents=True)
+    (wdir / "SKILL.md").write_text("---\nname: widget-skill\ndescription: d\n---\nx\n")
+    (mono / "CLAUDE.md").write_text("# repo\n")
+    roots2 = Roots("claude", home, mono, None, claude, home / ".cursor", False)
+    inv2 = run_context_audit(roots2)["inventory"]
+    assert not any("widget-skill" in i["path"] for i in inv2), [i["path"] for i in inv2 if "widget" in i["path"]]
+    # dedupe
+    a = _item("claude", "k", "s", "/tmp/x", 1, "always")
+    b = _item("claude", "k", "s", "/tmp/x", 2, "always")
+    out = _dedupe_items([a, b])
+    assert len(out) == 1, out
+finally:
+    shutil.rmtree(td)
+PY
+
+# 3. Unparseable --admin-start/--admin-end must error (exit 2), not drop silently
+set +e
+"$BIN" token --host cursor --root "$FIX/cursor" --admin-start '10/01/2026' --json-only \
+  >"$TMP/bad-admin-start.json" 2>"$TMP/bad-admin-start.err"
+bad_start_rc=$?
+"$BIN" token --host cursor --root "$FIX/cursor" --admin-end 'yesterday' --md-only \
+  >"$TMP/bad-admin-end.md" 2>"$TMP/bad-admin-end.err"
+bad_end_rc=$?
+set -e
+assert_eq "unparseable admin-start exit 2" "$bad_start_rc" "2"
+assert_contains "unparseable admin-start message" \
+  "$(cat "$TMP/bad-admin-start.json" "$TMP/bad-admin-start.err" 2>/dev/null || true)" "unparseable"
+assert_eq "unparseable admin-end exit 2" "$bad_end_rc" "2"
+assert_contains "unparseable admin-end message" "$(cat "$TMP/bad-admin-end.md")" "unparseable"
+
+# 4. HUMAN-TEST shell blocks under zsh when installable, else bash nomatch-equivalent
+SHELL_SMOKE="$PLUGIN/tests/human-test-shell-smoke.sh"
+assert_eq "human-test shell smoke script exists" "$(test -f "$SHELL_SMOKE" && echo yes || echo no)" "yes"
+if ! command -v zsh >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y zsh >/dev/null 2>&1 || apt-get install -y zsh >/dev/null 2>&1 || true
+  fi
+fi
+if bash "$SHELL_SMOKE"; then
+  echo "PASS HUMAN-TEST shell smoke"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL HUMAN-TEST shell smoke"
+  FAIL=$((FAIL + 1))
+fi
 
 echo "== public-repo clean =="
 assert_contains "three skills present" "$(ls "$PLUGIN/skills")" "context-audit"

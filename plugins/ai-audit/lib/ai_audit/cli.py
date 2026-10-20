@@ -134,6 +134,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _emit(payload, context_markdown(payload), args)
 
     if args.cmd == "token":
+        # Validate admin dates before any network call (fail loud, never drop silently).
+        if args.admin_start or args.admin_end:
+            from .token_audit import _to_epoch_ms
+
+            try:
+                if args.admin_start:
+                    _to_epoch_ms(args.admin_start, label="start")
+                if args.admin_end:
+                    _to_epoch_ms(args.admin_end, label="end")
+            except ValueError as e:
+                payload = {
+                    "audit": "token",
+                    "host": roots.host,
+                    "error": str(e),
+                    "data": {"error": str(e), "source": "none"},
+                    "summary": {"source": "none"},
+                    "notes": [str(e)],
+                    "wins": [],
+                }
+                _emit(payload, token_markdown(payload), args)
+                return 2
+
         payload = run_token_audit(
             roots,
             csv_path=Path(args.csv) if args.csv else None,
@@ -144,7 +166,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             usage_period=args.usage_period,
             usage_file=Path(args.usage_file) if args.usage_file else None,
         )
-        return _emit(payload, token_markdown(payload), args)
+        rc = _emit(payload, token_markdown(payload), args)
+        data = payload.get("data") or {}
+        # Explicit --csv that is missing/unreadable, or collector error → non-zero.
+        if data.get("error") or (args.csv and data.get("missing_csv")):
+            return 1
+        return rc
 
     if args.cmd == "facts":
         payload = run_facts_audit(

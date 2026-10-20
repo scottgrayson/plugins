@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -21,6 +22,173 @@ from .common import (
 from .detect import Roots
 
 _IMPORT_RE = re.compile(r"@([^\s\]\)\"\'<>]+)")
+
+_SKIP_DIR_NAMES = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        "Library",
+        "Applications",
+    }
+)
+_MAX_NEST_DEPTH = 8
+
+
+def _under_ai_audit_fixtures(path: Path) -> bool:
+    """True when path is inside an .../ai-audit/fixtures/... tree."""
+    parts = [part.lower() for part in Path(path).parts]
+    for i, part in enumerate(parts):
+        if part == "ai-audit" and i + 1 < len(parts) and parts[i + 1] == "fixtures":
+            return True
+    return False
+
+
+def _path_is_excluded(path: Path, project: Path | None = None) -> bool:
+    """Skip host plugin cache/marketplace trees and (when not the scan target) ai-audit fixtures."""
+    parts = [part.lower() for part in Path(path).parts]
+    for i, part in enumerate(parts):
+        # ~/.claude/plugins/{cache,marketplaces,...} and ~/.cursor/plugins/...
+        if part == "plugins" and i > 0 and parts[i - 1] in (".claude", ".cursor"):
+            return True
+    # Exclude this plugin's fixtures when auditing some other project (e.g. monorepo
+    # checkout). Keep them when --root points at the fixtures themselves. When no
+    # project is supplied (e.g. walking sand-data workflows), do not guess.
+    if project is not None and _under_ai_audit_fixtures(path):
+        if _under_ai_audit_fixtures(project):
+            return False
+        return True
+    return False
+
+
+def _project_allows_nested_scan(project: Path, home: Path) -> bool:
+    """Do not recurse when the 'project' is the user home (Terminal opens on ~)."""
+    try:
+        return project.resolve() != home.resolve()
+    except OSError:
+        return False
+
+
+def _iter_named_files(
+    root: Path,
+    name: str,
+    max_depth: int = _MAX_NEST_DEPTH,
+    project: Path | None = None,
+) -> list[Path]:
+    """Bounded walk for a basename; prunes skip dirs and plugin caches."""
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    root_res = root.resolve()
+    proj = project if project is not None else root_res
+    for dirpath, dirnames, filenames in os.walk(root_res):
+        cur = Path(dirpath)
+        try:
+            rel = cur.relative_to(root_res)
+            depth = 0 if str(rel) == "." else len(rel.parts)
+        except ValueError:
+            depth = 0
+        if _path_is_excluded(cur, proj):
+            dirnames[:] = []
+            continue
+        kept: list[str] = []
+        for d in dirnames:
+            child = cur / d
+            if _path_is_excluded(child, proj):
+                continue
+            if d in _SKIP_DIR_NAMES:
+                continue
+            if d.startswith(".") and d not in (".claude", ".cursor"):
+                continue
+            if depth + 1 > max_depth:
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        if depth > max_depth:
+            continue
+        if name in filenames:
+            path = cur / name
+            if path.is_file() and not _path_is_excluded(path, proj):
+                found.append(path)
+    return sorted(set(found))
+
+
+def _iter_nested_skill_mds(
+    root: Path,
+    max_depth: int = _MAX_NEST_DEPTH,
+    project: Path | None = None,
+) -> list[Path]:
+    """Find package-level .claude/skills/*/SKILL.md under root (bounded)."""
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    root_res = root.resolve()
+    proj = project if project is not None else root_res
+    project_skills = (root_res / ".claude" / "skills").resolve()
+    for dirpath, dirnames, _filenames in os.walk(root_res):
+        cur = Path(dirpath)
+        try:
+            rel = cur.relative_to(root_res)
+            depth = 0 if str(rel) == "." else len(rel.parts)
+        except ValueError:
+            depth = 0
+        if _path_is_excluded(cur, proj):
+            dirnames[:] = []
+            continue
+        kept: list[str] = []
+        for d in dirnames:
+            child = cur / d
+            if _path_is_excluded(child, proj):
+                continue
+            if d in _SKIP_DIR_NAMES:
+                continue
+            if d.startswith(".") and d not in (".claude", ".cursor"):
+                continue
+            if depth + 1 > max_depth:
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        if cur.name != "skills" or cur.parent.name != ".claude":
+            continue
+        try:
+            if cur.resolve() == project_skills:
+                continue  # project/.claude/skills handled separately
+        except OSError:
+            pass
+        if not cur.is_dir():
+            continue
+        for child in sorted(cur.iterdir()):
+            if not child.is_dir():
+                continue
+            skill_md = child / "SKILL.md"
+            if skill_md.is_file() and not _path_is_excluded(skill_md, proj):
+                found.append(skill_md)
+    return sorted(set(found))
+
+
+def _dedupe_items(items: list[InventoryItem]) -> list[InventoryItem]:
+    """One inventory row per resolved path (first wins)."""
+    seen: set[str] = set()
+    out: list[InventoryItem] = []
+    for it in items:
+        try:
+            key = str(Path(it.path).resolve())
+        except OSError:
+            key = f"{it.kind}:{it.path}:{it.notes}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
 
 
 def _item(
@@ -148,11 +316,17 @@ def _skill_items(host: str, scope: str, skill_md: Path) -> list[InventoryItem]:
     return items
 
 
-def _walk_skills(host: str, scope: str, root: Path) -> list[InventoryItem]:
+def _walk_skills(
+    host: str, scope: str, root: Path, project: Path | None = None
+) -> list[InventoryItem]:
     if not root.is_dir():
+        return []
+    if _path_is_excluded(root, project):
         return []
     items: list[InventoryItem] = []
     for skill_md in sorted(root.rglob("SKILL.md")):
+        if _path_is_excluded(skill_md, project):
+            continue
         items.extend(_skill_items(host, scope, skill_md))
     return items
 
@@ -227,13 +401,18 @@ def _resolve_imports(
     return items
 
 
-def _nested_instruction_files(project: Path) -> list[Path]:
+def _nested_instruction_files(
+    project: Path, home: Optional[Path] = None
+) -> list[Path]:
     """Nested CLAUDE.md / AGENTS.md under the project (excluding root copies handled separately)."""
+    if home is not None and not _project_allows_nested_scan(project, home):
+        return []
     found: list[Path] = []
     for name in ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"):
-        for p in project.rglob(name):
-            if p.is_file():
-                found.append(p)
+        for p in _iter_named_files(project, name, project=project):
+            if p.parent.resolve() == project.resolve():
+                continue  # root copies handled separately
+            found.append(p)
     return sorted(set(found))
 
 
@@ -336,14 +515,12 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
         if path.is_file():
             items.extend(_resolve_imports(host, scope, path, seen_imports))
 
-    # Nested package instruction files
-    for path in _nested_instruction_files(project):
+    # Nested package instruction files (bounded; never when project == ~)
+    for path in _nested_instruction_files(project, home=roots.home):
         if path.resolve() in seen_imports:
             continue
-        # Nested AGENTS.md / CLAUDE.md load when working in that subtree
-        load = "conditional" if path.parent != project else "always"
-        if path.name == "CLAUDE.local.md":
-            load = "always"
+        # Nested AGENTS.md / CLAUDE.md / CLAUDE.local.md load in that subtree only
+        load = "conditional" if path.parent.resolve() != project.resolve() else "always"
         items.extend(
             _resolve_imports(host, "nested", path, seen_imports)
             if load == "always"
@@ -410,16 +587,11 @@ def collect_claude(roots: Roots) -> list[InventoryItem]:
         (home / "skills", "user"),
         (project / ".claude" / "skills", "project"),
     ):
-        items.extend(_walk_skills(host, scope, skills_dir))
-    # Nested package skills (e.g. packages/foo/.claude/skills)
-    for skill_md in project.rglob(".claude/skills/*/SKILL.md"):
-        # Avoid double-counting project/.claude/skills
-        try:
-            skill_md.relative_to(project / ".claude" / "skills")
-            continue
-        except ValueError:
-            pass
-        items.extend(_skill_items(host, "nested_package", skill_md))
+        items.extend(_walk_skills(host, scope, skills_dir, project=project))
+    # Nested package skills (e.g. packages/foo/.claude/skills) — bounded, no plugin caches
+    if _project_allows_nested_scan(project, roots.home):
+        for skill_md in _iter_nested_skill_mds(project, project=project):
+            items.extend(_skill_items(host, "nested_package", skill_md))
 
     for agents_dir, scope in (
         (home / "agents", "user"),
@@ -507,7 +679,7 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
             load, notes = _cursor_rule_load(meta)
             items.append(_item(host, "rule", scope, path, file_bytes(path), load, notes=notes))
 
-    for path in _nested_instruction_files(project):
+    for path in _nested_instruction_files(project, home=roots.home):
         if path.resolve() in seen:
             continue
         load = "always" if path.parent == project else "conditional"
@@ -538,7 +710,7 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
         (project / ".codex" / "skills", "project_codex_compat"),
     ]
     for skills_dir, scope in skill_roots:
-        items.extend(_walk_skills(host, scope, skills_dir))
+        items.extend(_walk_skills(host, scope, skills_dir, project=project))
 
     for agents_dir, scope in (
         (home / "agents", "user"),
@@ -622,7 +794,9 @@ def collect_grok(roots: Roots) -> list[InventoryItem]:
         return items
 
     # Workflows are the source of truth for skill files.
-    workflow_items = _walk_skills(host, "workflows", sand / "workflows")
+    workflow_items = _walk_skills(
+        host, "workflows", sand / "workflows", project=roots.project
+    )
     items.extend(workflow_items)
     workflow_skill_names = {
         str(it.meta.get("skill"))
@@ -815,7 +989,7 @@ COLLECTORS = {
 
 def run_context_audit(roots: Roots) -> dict[str, Any]:
     collector = COLLECTORS[roots.host]
-    items = collector(roots)
+    items = _dedupe_items(collector(roots))
     wins = rank_context_wins(items)
     return {
         "audit": "context",
