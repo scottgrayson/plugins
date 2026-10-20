@@ -1047,25 +1047,37 @@ def _fold_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(chars), idx
 
 
-# A product name followed by an assignment-like separator and a value is a key.
-_PRODUCT_ASSIGN_RE = re.compile(r"\s*(?::=|=>|=|:|[\"'`])\s*\S|\s+(?:is|are)\s+\S")
-# ... or by a glued tail holding a digit (1password-hunter2, 1password_dragon7, 1passwordx9).
-_PRODUCT_TAIL_RE = re.compile(r"(?:[-_.]+)?([a-z0-9]+)")
+# A password-manager product name is exempt only when what follows is on this
+# allowlist of safe contexts. Anything else (any separator followed by a value)
+# makes the product name act as the secret word, so the rest is hidden.
+_ALPHA_WORD = r"[^\W\d_]+(?=$|\s|[.,;!?)\]])"
+_SAFE_PAREN_RE = re.compile(r"\s+\(")
+_SAFE_WORD_RE = re.compile(r"\s+(?!(?:is|are)(?=\s|$))" + _ALPHA_WORD)
+_SAFE_CLOSE_RE = re.compile(r"[.,)\]]+(?:$|\s+" + _ALPHA_WORD + ")")
+_SAFE_TAIL_RE = re.compile(r"(?:[-_.]*[^\W\d_]+)+(?![^\W_])")
+
+
+def _safe_follow(rest: str, tail_ok: bool = True) -> bool:
+    if not rest:
+        return True
+    if _SAFE_PAREN_RE.match(rest) or _SAFE_WORD_RE.match(rest) or _SAFE_CLOSE_RE.match(rest):
+        return True
+    if tail_ok:
+        # word-only glued tail (1password-dragonfly): the remainder must be safe too
+        m = _SAFE_TAIL_RE.match(rest)
+        return bool(m) and _safe_follow(rest[m.end() :], tail_ok=False)
+    return False
 
 
 def _product_is_key(folded: str, end: int) -> bool:
-    rest = folded[end:]
-    if _PRODUCT_ASSIGN_RE.match(rest):
-        return True
-    m = _PRODUCT_TAIL_RE.match(rest)
-    return bool(m) and any(c.isdigit() for c in m.group(1))
+    return not _safe_follow(folded[end:])
 
 
 def _strong_matches(folded: str) -> list["re.Match[str]"]:
     """Strong secret words, minus those inside a product name such as 1password.
 
-    The exemption does not apply when the product name acts as a key: followed by
-    an assignment separator and a value, or by a glued tail with a digit.
+    The exemption applies only when an allowlisted context follows the product name
+    (see _safe_follow); otherwise the product name acts as a key.
     """
     exempt: list[tuple[int, int]] = []
     keys: list["re.Match[str]"] = []

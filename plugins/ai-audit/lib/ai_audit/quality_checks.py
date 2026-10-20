@@ -68,6 +68,13 @@ _PLACEHOLDER_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:path/to|your[-_]|my[-_]|example|sample|foo|bar|baz|xxx+|"
     r"file(?:name)?\.\w+|name\.\w+|\.\.\.)"
 )
+# Absolute refs: example* directories are judged by _is_example_abs_path (first or
+# second segment only); here example* and foo/bar/baz count only as the file name
+# (foo/bar/baz also as the first directory).
+_PLACEHOLDER_ABS_RE = re.compile(
+    r"(?i)(?:^|/)(?:path/to|your[-_]|my[-_]|sample|xxx+|"
+    r"file(?:name)?\.\w+|name\.\w+|\.\.\.)|^/(?:foo|bar|baz)|/(?:example|foo|bar|baz)[^/]*$"
+)
 
 # @file / @path style includes. The @ must start a token (not e-mail / @scope/pkg).
 _AT_FILE_RE = re.compile(
@@ -146,7 +153,8 @@ def _mask_non_refs(text: str) -> str:
 
 
 def _looks_like_file_ref(ref: str) -> bool:
-    if "://" in ref or "*" in ref or _PLACEHOLDER_PATH_RE.search(ref):
+    placeholder = _PLACEHOLDER_ABS_RE if ref.startswith("/") else _PLACEHOLDER_PATH_RE
+    if "://" in ref or "*" in ref or placeholder.search(ref):
         return False
     ext = ref.rsplit(".", 1)[-1].lower()
     return ext in _FILE_EXTS
@@ -297,10 +305,14 @@ _EXAMPLE_ABS_ROOTS = frozenset({"workspace", "app", "tmp"})
 
 
 def _is_example_abs_path(ref: str) -> bool:
-    """Sandbox/container/temp roots and placeholder dirs (example*) in prose."""
+    """Sandbox/container/temp roots and placeholder dirs (example*) in prose.
+
+    example* counts only as the first or second directory (/example/x, /etc/example/x),
+    so /Users/x/Code/examples-app/missing.md is still checked.
+    """
     parts = [p for p in ref.split("/") if p]
     return bool(parts) and (
-        parts[0] in _EXAMPLE_ABS_ROOTS or any(p.startswith("example") for p in parts[:-1])
+        parts[0] in _EXAMPLE_ABS_ROOTS or any(p.startswith("example") for p in parts[:-1][:2])
     )
 
 

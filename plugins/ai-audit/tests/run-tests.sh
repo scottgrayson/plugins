@@ -546,6 +546,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-29 (product allowlist, example* segment limit) =="
+R29_OUT="$(python3 -B "$PLUGIN/tests/test_round29.py" 2>&1)" && R29_RC=0 || R29_RC=$?
+if [[ $R29_RC -eq 0 ]]; then
+  echo "PASS $R29_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round29 (rc=$R29_RC)"
+  echo "  $R29_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then
