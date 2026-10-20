@@ -17,7 +17,13 @@ from test_redaction_corpus import load_labeled  # noqa: E402
 REPLACEMENTS = ("1password", "1Password", "lastpass", "bitwarden")
 
 # (input, replacement) -> one-line reason the variant cannot redact.
-EXCEPTIONS: dict[tuple[str, str], str] = {}
+_DIR_REASON = (
+    "path/source field: a / after a product name is a directory name (round 34), "
+    "so the next segment is scanned as if the name were absent and a plain word stays"
+)
+EXCEPTIONS: dict[tuple[str, str], str] = {
+    ("~/.cursor/password/hunter2", rep): _DIR_REASON for rep in REPLACEMENTS
+}
 
 
 def variants() -> list[tuple[str, str, str, str, str]]:

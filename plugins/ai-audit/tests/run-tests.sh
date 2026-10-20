@@ -590,6 +590,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-34 (product dir in path fields, comma connective remainder) =="
+R34_OUT="$(python3 -B "$PLUGIN/tests/test_round34.py" 2>&1)" && R34_RC=0 || R34_RC=$?
+if [[ $R34_RC -eq 0 ]]; then
+  echo "PASS $R34_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round34 (rc=$R34_RC)"
+  echo "  $R34_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then

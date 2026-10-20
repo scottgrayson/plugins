@@ -1092,9 +1092,18 @@ _PM_RE = re.compile(r"password managers?")
 _PM_TAIL_RE = re.compile(r"(?i)managers?")
 
 
-def _safe_follow(rest: str) -> bool:
+_COMMA_CONNECTIVE_RE = re.compile(r",[^\S\t]+(?:and|or|but|then|etc)(?=[\s.,]|$)")
+
+
+def _safe_follow(rest: str, path: bool = False) -> bool:
     if not rest:
         return True
+    if path and rest[0] == "/":
+        return True  # path field: the product name is just a directory name
+    c = _COMMA_CONNECTIVE_RE.match(rest)
+    if c:
+        # The connective is fine; whatever follows it must be safe too.
+        return _safe_follow(rest[c.end() :])
     w = _SAFE_WORD_RE.match(rest)
     if w and _VALUE_AFTER_FILLER_RE.match(rest, w.end()):
         return False
@@ -1104,13 +1113,13 @@ def _safe_follow(rest: str) -> bool:
     )
 
 
-def _strong_matches(folded: str) -> list["re.Match[str]"]:
+def _strong_matches(folded: str, path: bool = False) -> list["re.Match[str]"]:
     """Strong secret words, minus the product-name token (1password) and the phrase
     "password manager" when what follows is not a value attached to them."""
     exempt: list[tuple[int, int]] = []
     keys: list["re.Match[str]"] = []
     for m in _PRODUCT_RE.finditer(folded):
-        if _safe_follow(folded[m.end() :]):
+        if _safe_follow(folded[m.end() :], path):
             exempt.append((m.start(), m.end()))
         else:
             keys.append(m)  # the product name itself acts as the secret word
@@ -1181,14 +1190,15 @@ def _hide_from(text: str, idx: list[int], end: int) -> str:
     return text[:cut] + HIDDEN_MARKER
 
 
-def _hide_path_secret(text: str) -> str:
+def _hide_path_secret(text: str, field: bool = False) -> str:
     """Path-like field: a strong word may be followed by / . - _ a letter or nothing.
 
     Anything else (= : | ? % ( [ < > a digit, ...) hides the rest. password/X and
-    password.X stay readable by design.
+    password.X stay readable by design. With field=True (a real path/source field),
+    a "/" right after a password-manager product name keeps it a directory name.
     """
     folded, idx = _fold_with_map(text)
-    for m in _strong_matches(folded):
+    for m in _strong_matches(folded, path=field):
         end = _strong_tail_start(folded, m)
         nxt = folded[end : end + 1]
         if nxt and not (nxt in "/.-_" or nxt.isalpha()):
@@ -1221,7 +1231,7 @@ def _bare_name_is_safe(text: str) -> bool:
 def _redact_field(text: str, key: str | None) -> str:
     out = redact_secrets(text)
     if key in _BACKSTOP_PATH_KEYS and not re.search(r"\s", text):
-        return _hide_path_secret(text if key in _PATH_FIELD_KEYS else out)
+        return _hide_path_secret(text if key in _PATH_FIELD_KEYS else out, field=True)
     if _BARE_NAME_RE.fullmatch(out) and _bare_name_is_safe(out):
         return out
     # Path-shaped text is kept only under the strict path rule; never on its own.

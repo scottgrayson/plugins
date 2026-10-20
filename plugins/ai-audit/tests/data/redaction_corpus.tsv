@@ -706,3 +706,14 @@ redact	1password-dragonfly: hunter2Fake	hunter2Fake
 redact	1password-dragonfly:x9	x9
 redact	my_lastpass_key=abc1	abc1
 redact	BITWARDEN_TOKEN=x9	x9
+# Round 34
+keep	~/.cursor/plugins/cache/m/1password/1.2.3/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/1password/1.2.3/skills/x/SKILL.md			path
+keep	~/.cursor/plugins/cache/m/bitwarden/2.0.0/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/bitwarden/2.0.0/skills/x/SKILL.md			path
+redact	m/1password=hunter2	hunter2		path
+redact	m/1password/password=x9	x9		source
+redact	m/1password:x9	x9		path
+redact	1password/hunter2	hunter2
+redact	Bitwarden, etc, x9y8z7	x9y8z7
+redact	1Password, and x9y8z7	x9y8z7
