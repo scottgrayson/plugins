@@ -124,6 +124,21 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("ghu_abcdefghijklmnopqrstuv", "ghu_abcdefghijklmnopqrstuv"),
     ("ghr_abcdefghijklmnopqrstuv", "ghr_abcdefghijklmnopqrstuv"),
     ("db password=admin", "admin"),
+    # --- round-15: colon single-word weak passwords (status allowlist only) ---
+    ("password: dragon", "dragon"),
+    ("password: monkey", "monkey"),
+    ("password: sunshine", "sunshine"),
+    ("PASSWORD: iloveyou", "iloveyou"),
+    ("DB_PASSWORD: welcome", "welcome"),
+    ("pwd: qwerty", "qwerty"),
+    ("token: hunter", "hunter"),
+    ("secret: banana", "banana"),
+    ("api_key: abcdefghij", "abcdefghij"),
+    ("pw: shadow", "shadow"),
+    ("auth: trustno", "trustno"),
+    ("token: Hunter", "Hunter"),
+    ("secret: Banana", "Banana"),
+    ("password: correct horse", "correct horse"),
 ]
 
 KEEP_CASES: list[str] = [
@@ -160,8 +175,8 @@ KEEP_CASES: list[str] = [
     "token: grok-2",
     "token: gemini-1.5-pro",
     "token: o1-preview",
-    "Default token: Composer model",
-    "Explain token: what counts",
+    "Default token: Composer is the default model",
+    "Explain token: what actually counts",
     "secret: the deploy key",
     "MONKEY_KEY=banana",
     "REACT_APP_PUBLIC_KEY=pk_test_x",
@@ -180,13 +195,18 @@ KEEP_CASES: list[str] = [
     "/home/box/sand-data/workflows/why/references/epistemics.md",
     "commit abcdef1",
     "id 550e8400-e29b-41d4-a716-446655440000",
-    # --- R8 single-word / colon prose ---
+    # --- status-word allowlist + pass/fail variants ---
     "token: optional",
     "password: changed",
-    "auth: github",
-    "session: weekly",
     "Authorization: required",
-    "cookie: consent banner",
+    "password: reset",
+    "token: expired",
+    "secret: unknown",
+    "session: deprecated",
+    "auth: revoked",
+    "Tests: pass=196 failed=0",
+    "PASS: 12 FAIL: 0",
+    "pass=3 failures=1",
 ]
 
 
@@ -391,6 +411,30 @@ def run_project_eq_home_dedupe() -> None:
         shutil.rmtree(td, ignore_errors=True)
 
 
+def run_same_file_duplicate_lines() -> None:
+    """A line written twice in one file must still be reported as a duplicate."""
+    td = Path(tempfile.mkdtemp(prefix="ai-audit-samedup."))
+    try:
+        home = td / "home"
+        rules = home / ".cursor" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "c.mdc").write_text(
+            "---\ndescription: d\n---\n"
+            "- Same line twice for duplicate detection.\n"
+            "- Same line twice for duplicate detection.\n",
+            encoding="utf-8",
+        )
+        roots = detect_host(host="cursor", home=home, project=home)
+        result = run_facts_audit(roots, stale_days=30)
+        texts = [f["text"] for f in result["facts"]]
+        assert texts.count("Same line twice for duplicate detection.") == 2, texts
+        dups = [i for i in result["issues"] if i["kind"] == "duplicate"]
+        assert len(dups) >= 1, result["issues"]
+        assert "Same line twice" in dups[0]["detail"]
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def run_all() -> tuple[int, int]:
     for raw, leak in REDACT_CASES:
         _assert_redact(raw, leak)
@@ -430,6 +474,7 @@ def run_all() -> tuple[int, int]:
 
     run_cli_e2e()
     run_project_eq_home_dedupe()
+    run_same_file_duplicate_lines()
 
     redact_n = len(REDACT_CASES) + 3  # + pem/pgp/slack
     keep_n = len(KEEP_CASES)

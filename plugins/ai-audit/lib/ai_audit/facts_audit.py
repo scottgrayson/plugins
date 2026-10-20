@@ -44,6 +44,7 @@ class Fact:
     date: str = ""
     source: str = ""
     agent_id: str = ""
+    line: int = 0  # 1-based source line; used to preserve same-file repeats
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,13 +55,14 @@ class Fact:
             "source": self.source,
             "agent_id": self.agent_id,
             "est_tokens": est_tokens(len(self.text)),
+            "line": self.line,
         }
 
 
 def _parse_grok_profile(path: Path, agent_id: str) -> list[Fact]:
     text = safe_read_text(path) or ""
     facts: list[Fact] = []
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines(), 1):
         m = GROK_FACT_RE.match(line)
         if not m:
             continue
@@ -71,7 +73,8 @@ def _parse_grok_profile(path: Path, agent_id: str) -> list[Fact]:
                 text=m.group(2).strip(),
                 date=m.group(1),
                 source="profile.md",
-                agent_id=agent_id
+                agent_id=agent_id,
+                line=lineno,
             )
         )
     return facts
@@ -80,7 +83,7 @@ def _parse_grok_profile(path: Path, agent_id: str) -> list[Fact]:
 def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
     """Extract bullets and non-bullet prose lines/sentences as facts."""
     facts: list[Fact] = []
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines(), 1):
         s = line.strip()
         if not s or s.startswith("#") or s.startswith("@"):
             continue
@@ -88,7 +91,13 @@ def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
             continue
         if s.startswith("-") and len(s) > 8:
             facts.append(
-                Fact(host=host, path=str(path), text=s.lstrip("- ").strip(), source=source)
+                Fact(
+                    host=host,
+                    path=str(path),
+                    text=s.lstrip("- ").strip(),
+                    source=source,
+                    line=lineno,
+                )
             )
             continue
         # Non-bullet prose: same 8-char minimum as bullets (catch short policy lines).
@@ -98,7 +107,15 @@ def _bullet_facts(host: str, path: Path, text: str, source: str) -> list[Fact]:
             for part in parts:
                 p = part.strip()
                 if len(p) > 8:
-                    facts.append(Fact(host=host, path=str(path), text=p, source=source))
+                    facts.append(
+                        Fact(
+                            host=host,
+                            path=str(path),
+                            text=p,
+                            source=source,
+                            line=lineno,
+                        )
+                    )
     return facts
 
 
@@ -123,11 +140,16 @@ def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
 
 
 def _dedupe_facts(facts: list[Fact]) -> list[Fact]:
-    """Drop identical entries from the same resolved path (project == HOME double-scan)."""
-    seen: set[tuple[str, str, str, str]] = set()
+    """
+    Collapse project==HOME double-scans of the same source line.
+
+    Key is (resolved path, line number, source) so a line written twice in one
+    file (different line numbers) is kept and can still flag as a duplicate.
+    """
+    seen: set[tuple[str, int, str]] = set()
     out: list[Fact] = []
     for f in facts:
-        key = (str(_resolved(Path(f.path))), f.text, f.date, f.source)
+        key = (str(_resolved(Path(f.path))), f.line, f.source)
         if key in seen:
             continue
         seen.add(key)
@@ -244,7 +266,8 @@ def collect_claude_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], lis
                             path=str(topic),
                             text=body_text,
                             date=modified[:10] if modified else "",
-                            source=f"topic:{ftype}"
+                            source=f"topic:{ftype}",
+                            line=1,
                         )
                     )
                     d = parse_iso_date(modified)
@@ -305,7 +328,7 @@ def collect_cursor_facts(
     if memories_path and Path(memories_path).is_file():
         text = safe_read_text(Path(memories_path)) or ""
         _, body = parse_front_matter(text)
-        for line in body.splitlines():
+        for lineno, line in enumerate(body.splitlines(), 1):
             s = line.strip()
             if s.startswith("-") and len(s) > 2:
                 facts.append(
@@ -313,12 +336,19 @@ def collect_cursor_facts(
                         host="cursor",
                         path=str(memories_path),
                         text=s.lstrip("- ").strip(),
-                        source="memories_export"
+                        source="memories_export",
+                        line=lineno,
                     )
                 )
             elif s and not s.startswith("#") and len(s) > 8:
                 facts.append(
-                    Fact(host="cursor", path=str(memories_path), text=s, source="memories_export")
+                    Fact(
+                        host="cursor",
+                        path=str(memories_path),
+                        text=s,
+                        source="memories_export",
+                        line=lineno,
+                    )
                 )
         notes.append(f"Loaded memories export: {memories_path}")
     else:
@@ -418,22 +448,21 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
     for f in facts:
         by_hash.setdefault(fact_hash(f.text), []).append(f)
     for _h, group in by_hash.items():
-        # A fact can only duplicate a *different* entry (different resolved path
-        # or different line text). Same path + same text is a self-hit, not a dup.
+        # Different entry = different resolved path or different line number.
+        # Same path + same line (double-scan remnant) is not a duplicate.
         distinct: list[Fact] = []
-        seen_keys: set[tuple[str, str]] = set()
+        seen_keys: set[tuple[str, int]] = set()
         for g in group:
-            key = (str(_resolved(Path(g.path))), g.text)
+            key = (str(_resolved(Path(g.path))), g.line)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             distinct.append(g)
         if len(distinct) < 2:
             continue
-        # Still require at least two distinct resolved paths *or* two different texts
         paths = sorted({str(_resolved(Path(g.path))) for g in distinct})
-        texts = {g.text for g in distinct}
-        if len(paths) < 2 and len(texts) < 2:
+        lines = {g.line for g in distinct}
+        if len(paths) < 2 and len(lines) < 2:
             continue
         path_display = sorted({g.path for g in distinct})
         agents = sorted({g.agent_id for g in distinct if g.agent_id})
@@ -455,7 +484,11 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
     for i in range(n):
         for j in range(i + 1, n):
             a, b = facts[i], facts[j]
-            if str(_resolved(Path(a.path))) == str(_resolved(Path(b.path))) and a.text == b.text:
+            if (
+                str(_resolved(Path(a.path))) == str(_resolved(Path(b.path)))
+                and a.line == b.line
+                and a.text == b.text
+            ):
                 continue
             sim = similarity(a.text, b.text)
             conflict = _polarity_conflict(a.text, b.text)

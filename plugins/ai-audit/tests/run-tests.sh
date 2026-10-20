@@ -899,11 +899,13 @@ pem_out = redact_secrets(pem)
 assert "MIIEowIBAAKCAQEAfakePEM" not in pem_out, pem_out
 assert "REDACTED" in pem_out
 
-# token:/secret: prose — ordinary words stay
-assert "Composer" in redact_secrets("Default token: Composer model")
-assert "REDACTED" not in redact_secrets("Default token: Composer model")
-assert "counts" in redact_secrets("Explain token: what counts")
+# token:/secret: prose — 3+ word instructional lines stay; status words stay
+assert "Composer" in redact_secrets("Default token: Composer is the default model")
+assert "REDACTED" not in redact_secrets("Default token: Composer is the default model")
+assert "counts" in redact_secrets("Explain token: what actually counts")
 assert "REDACTED" not in redact_secrets("secret: the deploy key")
+assert "REDACTED" not in redact_secrets("token: optional")
+assert "dragon" not in redact_secrets("password: dragon")
 # but secret-looking values still redact
 assert "tok_live_abc123XYZ999" not in redact_secrets("token: tok_live_abc123XYZ999")
 assert looks_like_secret_value("tok_live_abc123XYZ999")

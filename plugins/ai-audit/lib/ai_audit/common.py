@@ -263,8 +263,34 @@ _KNOWN_SECRET_PREFIX_RE = re.compile(
     r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|glpat-|npm_|whsec_|hf_|"
     r"xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)"
 )
-# R8: single lowercase dictionary-like word, no digits (token: optional).
+# Colon-form status words only (case-insensitive). Other single words redact.
+_STATUS_WORDS = frozenset(
+    {
+        "required",
+        "optional",
+        "none",
+        "changed",
+        "reset",
+        "expired",
+        "rotated",
+        "unknown",
+        "needed",
+        "set",
+        "unset",
+        "missing",
+        "enabled",
+        "disabled",
+        "deprecated",
+        "revoked",
+        "n/a",
+        "na",
+    }
+)
 _DICT_WORD_RE = re.compile(r"^[a-z]+(?:-[a-z]+)?$")
+# pass=N fail(ed|ures)?=M  or  PASS: N FAIL: M
+_PASS_FAIL_FOLLOW_RE = re.compile(
+    r"(?i)\s+fail(?:ed|ures)?\s*(?:=|:)\s*\d+"
+)
 
 
 def _strip_value_quotes(value: str) -> str:
@@ -347,17 +373,16 @@ def classify_value(value: str) -> str:
         return "model"
     if _KNOWN_SECRET_PREFIX_RE.match(v):
         return "secretlike"
-    # Unquoted multi-word → instructional prose ("8+ chars required", "none needed")
+    # Unquoted multi-word → instructional prose (word count checked at decide time)
     if (" " in v or "\t" in v) and not quoted:
         return "prose"
     if quoted:
         # Quoted non-placeholder content is treated as a secret payload
         return "secretlike"
-    # Single lowercase dictionary-like word, no digits, short (R8 keep after colon).
-    # Long lowercase blobs (Bearer abcdefghijklmnop) stay secretlike.
+    # Short lowercase word — may be status allowlist or a weak password
     if _DICT_WORD_RE.match(v) and len(v) <= 12:
         return "dictword"
-    # Titlecase English without digits (Composer). Password-family still redacts these.
+    # Titlecase English without digits (Composer / Hunter / Dragon)
     if re.fullmatch(r"[A-Z][a-z]+", v):
         return "titleword"
     return "secretlike"
@@ -365,6 +390,22 @@ def classify_value(value: str) -> str:
 
 # Always-safe kinds for any secret-ish name (leaked secret > redacted word).
 _ALWAYS_SAFE_KINDS = frozenset({"empty", "placeholder", "boolean", "null"})
+
+
+def _colon_phrase_words(value: str, following: str) -> list[str]:
+    """Value atom(s) plus trailing prose words (stop before nested name=/name:)."""
+    v = _strip_value_quotes(value).strip()
+    words: list[str] = v.split() if v else []
+    for tok in re.findall(r"[^\s,;&]+", following or ""):
+        # Nested assignment or another labeled field
+        if "=" in tok:
+            break
+        if re.match(r"(?i)^[A-Za-z_][A-Za-z0-9_-]*:", tok):
+            break
+        words.append(tok)
+        if len(words) >= 12:
+            break
+    return words
 
 
 def should_redact_assignment(
@@ -379,8 +420,8 @@ def should_redact_assignment(
 
     Policy (owner): a leaked secret is worse than a redacted word.
     Safe for secret-ish names: empty / placeholder / null / boolean.
-    Numbers only for knob names and pass=N fail=M test counts.
-    Colon form: multi-word prose and single lowercase dict words may stay (R8).
+    Numbers only for knob names and pass=N fail(ed|ures)?=M test counts.
+    Colon form: explicit status-word allowlist, or 3+ word instructional prose.
     Paths only for pwd=. Model ids never safe for password-family names.
     """
     if not is_secret_name(name):
@@ -391,10 +432,11 @@ def should_redact_assignment(
 
     n = _norm_name(name)
     pw_family = _is_password_family(name)
+    v_plain = _strip_value_quotes(value).strip()
 
-    # pass=N fail=M / PASS=12 FAIL=0 test counters
-    if n == "pass" and kind == "number" and re.match(
-        r"(?i)\s+fail\s*=\s*\d+", following or ""
+    # pass=N fail=M / failed= / failures= / PASS: 12 FAIL: 0
+    if n == "pass" and kind == "number" and _PASS_FAIL_FOLLOW_RE.match(
+        following or ""
     ):
         return False
 
@@ -410,19 +452,23 @@ def should_redact_assignment(
         return False
 
     if form == "colon":
-        # Multi-word instructional prose ("8+ chars required" / "none needed")
-        if kind == "prose":
+        phrase = _colon_phrase_words(value, following)
+        first = phrase[0] if phrase else v_plain
+        # Explicit status allowlist on the first atom (password: changed / none needed)
+        if first.lower() in _STATUS_WORDS:
             return False
-        # R8: single lowercase dictionary word, no digits
-        if kind == "dictword":
+        if classify_value(first) in _ALWAYS_SAFE_KINDS:
             return False
-        # Titlecase label words on non-password names (Default token: Composer …)
-        if kind == "titleword" and not pw_family:
+        # 3+ word instructional prose ("8+ chars required"); 2-word passphrases redact
+        if len(phrase) >= 3:
             return False
-        # Count/limit style after token:/secret: ("8192", "v2", "8+") — not password family
+        # Count/limit style after token:/secret: ("8192", "v2") — not password family
         if not pw_family and kind in {"number", "version"}:
             return False
-        # password: 1234 / password: Dragon → redact
+        # Also when value was expanded, kind may be prose — check first atom alone
+        if not pw_family and classify_value(first) in {"number", "version"}:
+            return False
+        # password: dragon / token: hunter / secret: Banana → redact
         return True
 
     # eq / flag / query: anything else after a secret name is a secret
@@ -455,15 +501,13 @@ def _auth_token_looks_credential(tok: str) -> bool:
         "bad",
         "news",
         "required",
+        "optional",
     }:
         return False
+    if low in _STATUS_WORDS:
+        return False
     kind = classify_value(tok)
-    if kind in _ALWAYS_SAFE_KINDS or kind in {
-        "dictword",
-        "prose",
-        "titleword",
-        "model",
-    }:
+    if kind in _ALWAYS_SAFE_KINDS or kind == "model":
         return False
     # Long opaque tokens (incl. lowercase 16+ with no digit)
     if len(tok) >= 16 and re.fullmatch(r"[A-Za-z0-9_\-\.=+/]+", tok):
@@ -545,6 +589,8 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
 
     # Every name: occurrence (including nested password: inside A: password: x).
     # Skip when the atom is really the name of a nested name=value (Cookie: session=…).
+    # Expand the value through trailing prose words so "correct horse" redacts as a
+    # unit and "8+ chars required" is counted as 3-word instructional prose.
     for m in _ASSIGN_COLON_START_RE.finditer(text):
         name = m.group(2)
         parsed = _parse_value_at(text, m.end(), colon=True)
@@ -553,6 +599,17 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         val, vs, ve = parsed
         if ve < len(text) and text[ve] == "=":
             continue
+        words = _colon_phrase_words(val, text[ve:])
+        if len(words) > 1:
+            # Extend ve to the end of the last included trailing word
+            pos = ve
+            for w in words[1:]:
+                wm = re.match(r"\s*" + re.escape(w), text[pos:])
+                if not wm:
+                    break
+                pos = pos + wm.end()
+            val = text[vs:pos]
+            ve = pos
         prefix = text[m.start() : vs]
         hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "colon"))
 
