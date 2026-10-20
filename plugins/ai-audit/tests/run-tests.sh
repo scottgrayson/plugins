@@ -1062,32 +1062,7 @@ finally:
     shutil.rmtree(empty)
 PY
 
-# N2 keep-list (prose FPs) — also covered in round12 table
-py_check "redact false-positive prose stays intact" <<PY
-import sys
-sys.path.insert(0, "$LIB")
-from ai_audit.common import redact_secrets
-keep = [
-    "Key: use pnpm not npm",
-    "API key: stored in 1Password",
-    "primary_key: user_id",
-    "sort_key: created_at",
-    "cache_key: v2-node20",
-    "MAX_TOKEN=4096",
-    "pwd: /Users/x",
-    "password: none needed",
-    "token: claude-sonnet-4-5",
-    "token: gpt-4o-mini-2024",
-    "MONKEY_KEY=banana",
-    "REACT_APP_PUBLIC_KEY=pk_test_x",
-]
-for raw in keep:
-    got = redact_secrets(raw)
-    assert got == raw, (raw, got)
-    assert "REDACTED" not in got
-assert "Hunter2FakePass" not in redact_secrets("password=Hunter2FakePass!99xx")
-assert "REDACTED" in redact_secrets("password=Hunter2FakePass!99xx")
-PY
+# N2 keep-list + N4 shapes: covered by plugins/ai-audit/tests/test_redact_cases.py
 
 # N3: project enabledPlugins false overrides user true; local overrides project
 py_check "enabledPlugins precedence local > project > user" <<PY
@@ -1129,46 +1104,6 @@ try:
     assert any(i.get("scope") == "plugin" for i in inv2)
 finally:
     shutil.rmtree(td)
-PY
-
-# N4: additional common secret shapes
-py_check "redact N4 shapes Bearer Basic glpat npm sk_test whsec Slack PGP pass" <<PY
-import sys
-sys.path.insert(0, "$LIB")
-from ai_audit.common import redact_secrets
-cases = [
-    ("Authorization: Bearer opaqueTokenValue99XYZ", "opaqueTokenValue99XYZ"),
-    ("Authorization: Basic dXNlcjpwYXNzMTIzNDU2", "dXNlcjpwYXNzMTIzNDU2"),
-    ("glpat-abcdefghijklmnopqrstuv", "glpat-abcdefghijklmnopqrstuv"),
-    ("npm_abcdefghijklmnopqrstuvwx", "npm_abcdefghijklmnopqrstuvwx"),
-    ("sk_test_51FAKEabcdefghijklmnop", "sk_test_51FAKEabcdefghijklmnop"),
-    ("whsec_abcdefghijklmnopqrstuvwx", "whsec_abcdefghijklmnopqrstuvwx"),
-    ("x-api-key: SuperSecretApiKey99ab", "SuperSecretApiKey99ab"),
-    ("redis://:EmptyUserPass99ab@db.host/0", "EmptyUserPass99ab"),
-    ("pass=SuperSecretPass99abxx", "SuperSecretPass99abxx"),
-    ("passphrase: SuperSecretPhrase99", "SuperSecretPhrase99"),
-    ("DB_PASS=DbPassValue1234567", "DbPassValue1234567"),
-    ("MYSQL_PWD=MysqlPwdValue12345", "MysqlPwdValue12345"),
-    ("'password': 'singleQuotedSecret99'", "singleQuotedSecret99"),
-    ('password = "Fake Pass With Spaces99"', "Fake Pass With Spaces99"),
-]
-# Build Slack webhook at runtime so the commit has no scanner-shaped URL literal
-slack_tok = "FAKE" + ("x" * 20)
-slack_url = "https://hooks.slack.com/services/%s/%s/%s" % ("TFAKE0000", "BFAKE0000", slack_tok)
-cases.append((slack_url, slack_tok))
-for raw, leak in cases:
-    got = redact_secrets(raw)
-    assert leak not in got, (raw, got)
-    assert "REDACTED" in got, (raw, got)
-pgp = (
-    "-----BEGIN PGP PRIVATE KEY BLOCK-----"
-    + chr(10)
-    + "lQHYFakePGPMaterial123"
-    + chr(10)
-    + "-----END PGP PRIVATE KEY BLOCK-----"
-)
-assert "lQHYFakePGPMaterial123" not in redact_secrets(pgp)
-assert "REDACTED" in redact_secrets(pgp)
 PY
 
 # N5: idempotent local copy + marketplace path mentioned
@@ -1240,66 +1175,17 @@ finally:
     shutil.rmtree(home)
 PY
 
-# R2 + N4 leftovers: table-driven redact vs keep
-py_check "redact table-driven short secrets + keep prose" <<PY
-import sys
-sys.path.insert(0, "$LIB")
-from ai_audit.common import redact_secrets
-
-REDACT = [
-    "password=hunter2",
-    "db password=FakePw99",
-    "password=correct-horse-battery-staple",
-    "DB_PASSWORD=short1",
-    "DB_PASSWORD=EnvFakePw12345",
-    "TOKEN=FakeTok99",
-    "token: FakeTok12345",
-    "SECRET=shortFake1",
-    "API_KEY=abc123def",
-    "GITHUB_TOKEN=ghfake",
-    "pass=FakePass12345",
-    "passphrase: FakePhrase123",
-    "credentials: FakeCred12345",
-    "x-api-key: FakeHdr12345678",
-    "MYSQL_PWD=FakeMy123",
-    'password: "FakeQuoted123"',
-    "password: Hunter2!",
-    "password: FakeQuoted123",
-]
-KEEP = [
-    "Key: use pnpm not npm",
-    "API key: stored in 1Password",
-    "primary_key: user_id",
-    "sort_key: created_at",
-    "cache_key: v2-node20",
-    "MAX_TOKEN=4096",
-    "pwd: /Users/x",
-    "password: none needed",
-    "token: claude-sonnet-4-5",
-    "token: gpt-4o-mini-2024",
-    "token: grok-2",
-    "token: gemini-1.5-pro",
-    "token: o1-preview",
-    "Basic authentication is disabled",
-    "Use Bearer authentication for the API",
-    "password=" + chr(36) + "{DB_PASSWORD}",
-    "password=" + chr(36) + "TOKEN",
-    "token=<redacted>",
-    "secret=***",
-    "API_KEY=changeme",
-]
-for raw in REDACT:
-    got = redact_secrets(raw)
-    assert "REDACTED" in got, (raw, got)
-    # original secret fragment should not remain as a bare value after =
-    assert got != raw, (raw, got)
-for raw in KEEP:
-    got = redact_secrets(raw)
-    assert got == raw, (raw, got)
-# Bearer/Basic with credentials still redact
-assert "opaqueTokenValue99XYZ" not in redact_secrets("Authorization: Bearer opaqueTokenValue99XYZ")
-assert "dXNlcjpwYXNzMTIzNDU2" not in redact_secrets("Authorization: Basic dXNlcjpwYXNzMTIzNDU2")
-PY
+# Canonical redact/keep table (R5/R6 + rounds 10–13). Single source of truth.
+echo "== redact_cases table =="
+REDACT_OUT="$(python3 -B "$PLUGIN/tests/test_redact_cases.py" 2>&1)" && REDACT_RC=0 || REDACT_RC=$?
+if [[ $REDACT_RC -eq 0 ]]; then
+  echo "PASS $REDACT_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL redact_cases table (rc=$REDACT_RC)"
+  echo "  $REDACT_OUT"
+  FAIL=$((FAIL + 1))
+fi
 
 # R3: step-4 checks FAIL when AI_AUDIT unset
 py_check "HUMAN-TEST step4 FAIL when AI_AUDIT unset" <<PY
