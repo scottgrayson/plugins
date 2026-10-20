@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+# os used by readonly-dir test
+
 LIB = Path(__file__).resolve().parents[1] / "lib"
 PLUGIN = Path(__file__).resolve().parents[1]
 FIX = PLUGIN / "fixtures" / "cursor"
@@ -32,10 +34,10 @@ def test_tokenizer_and_specials() -> None:
     assert count_tokens("<|endoftext|> hello") >= 1
 
 
-def test_mcp_preamble_measured() -> None:
-    # D7: real preamble ≈ 637 measured on Mac (stand-in must be in that band)
+def test_mcp_preamble_estimate_band() -> None:
+    # Fixed estimate stand-in tokenizes near the Mac-measured ~637
     tok = count_tokens(_MCP_PREAMBLE)
-    assert 600 <= tok <= 700, f"MCP preamble tokens={tok} (expected ~637)"
+    assert 600 <= tok <= 700, f"MCP preamble tokens={tok} (expected ~637 band)"
 
 
 def test_no_tmpdir_files_during_run() -> None:
@@ -113,11 +115,103 @@ def test_vscdb_wal_readonly_sees_recent_write() -> None:
         assert row and row[0] == "rules-v2-wal", row
 
 
+def test_vscdb_immutable_no_wal_creates_nothing() -> None:
+    """When no -wal/-shm exist, immutable=1 must not create them."""
+    with tempfile.TemporaryDirectory(prefix="ai-audit-nowal.") as tmp:
+        db = Path(tmp) / "state.vscdb"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable(key, value) VALUES (?, ?)",
+            ("aicontext.personalContext", "plain"),
+        )
+        conn.commit()
+        conn.close()
+        wal, shm = Path(str(db) + "-wal"), Path(str(db) + "-shm")
+        # Remove any wal/shm left by close
+        wal.unlink(missing_ok=True)
+        shm.unlink(missing_ok=True)
+        before = set(Path(tmp).iterdir())
+        ro = _open_vscdb_readonly(db)
+        row = ro.execute(
+            "SELECT value FROM ItemTable WHERE key = ?",
+            ("aicontext.personalContext",),
+        ).fetchone()
+        ro.close()
+        after = set(Path(tmp).iterdir())
+        assert row and row[0] == "plain"
+        assert not wal.exists() and not shm.exists(), (wal.exists(), shm.exists())
+        assert after == before or after - before == set(), after - before
+
+
+def test_vscdb_readonly_dir_unreadable() -> None:
+    """Readonly directory / locked DB → User Rules unreadable row, no traceback."""
+    with tempfile.TemporaryDirectory(prefix="ai-audit-ro.") as tmp:
+        home = Path(tmp) / "home"
+        gs = home / ".cursor" / "User" / "globalStorage"
+        gs.mkdir(parents=True)
+        db = gs / "state.vscdb"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable(key, value) VALUES (?, ?)",
+            ("aicontext.personalContext", "x"),
+        )
+        conn.commit()
+        conn.close()
+        # Make directory read-only so sqlite cannot create wal/shm sidecars
+        os.chmod(gs, 0o555)
+        try:
+            from ai_audit.detect import Roots
+
+            roots = Roots(
+                host="cursor",
+                home=home,
+                project=home,
+                cursor_home=home / ".cursor",
+            )
+            row = _read_user_rules(roots)
+            # Either reads successfully with immutable=1, or reports unreadable
+            assert row.group == "User Rules"
+            if "unreadable" in row.item:
+                assert (row.meta or {}).get("unreadable") is True
+        finally:
+            os.chmod(gs, 0o755)
+
+
+def test_layout_fixture_shapes() -> None:
+    """Synthetic layout fixture: symlinks, nested plugins, disabled, empty-window."""
+    layout = PLUGIN / "fixtures" / "cursor-layout"
+    if not layout.is_dir():
+        return
+    roots = detect_host(host="cursor", root=layout)
+    payload = run_context_audit(roots, env_override="Cursor · Mac")
+    blob = str(payload)
+    assert "should-not-load" not in blob
+    items = " ".join(r["item"] for r in payload["rows"])
+    assert "linked-alpha" in items
+    assert "global.mdc" in items
+    assert "nested-alpha" in items
+    assert any("repeats per prompt" in r["item"] for r in payload["rows"])
+    assert payload["skill_budget"]["unique_realpaths"] >= 1
+    assert "unique_names_lower_bound" in payload["skill_budget"]
+    # From project root → basename/project slug, not stale Users-fixture
+    mcp_notes = [
+        (r.get("meta") or {}).get("mcp_selection", "")
+        for r in payload["rows"]
+        if r["group"] == "MCP servers"
+    ]
+    assert any("Users-fixture" not in n or "empty-window" in n or "project" in n for n in mcp_notes)
+
+
 def main() -> int:
     test_tokenizer_and_specials()
-    test_mcp_preamble_measured()
+    test_mcp_preamble_estimate_band()
     test_no_tmpdir_files_during_run()
     test_vscdb_wal_readonly_sees_recent_write()
+    test_vscdb_immutable_no_wal_creates_nothing()
+    test_vscdb_readonly_dir_unreadable()
+    test_layout_fixture_shapes()
 
     roots = detect_host(host="cursor", root=FIX)
     payload = run_context_audit(roots)
@@ -176,9 +270,14 @@ def main() -> int:
     assert "Skill descriptions" in md or "Skill descriptions" in str(
         payload.get("groups")
     )
-    assert "Purpose" in md and "AI suggestion" in md
+    assert "| Item | Tokens | Description | Source |" in md
+    assert "AI suggestion" not in md
+    assert "| Purpose |" not in md
     assert "LEAKED_VERIFIER" not in md
     assert "temp copy" not in md.lower()
+    # Preamble is a fixed estimate, not measured
+    pre = [r for r in payload["rows"] if "preamble" in r["item"].lower()]
+    assert pre and (pre[0].get("meta") or {}).get("fixed_estimate") is True
     # Sorted groups
     groups = payload["groups"]
     subs = payload["subtotals"]

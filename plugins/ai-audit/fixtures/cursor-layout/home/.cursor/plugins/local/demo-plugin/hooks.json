@@ -1,0 +1,1 @@
+{"hooks": {"sessionStart": [{"additionalContext": "Demo plugin static hook context."}, {"command": "echo runtime"}]}}

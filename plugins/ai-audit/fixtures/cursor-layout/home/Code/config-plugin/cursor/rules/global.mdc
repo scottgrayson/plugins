@@ -1,0 +1,6 @@
+---
+description: Global always-apply from custom rules path
+alwaysApply: true
+---
+# Global
+Always prefer facts.

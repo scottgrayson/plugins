@@ -140,6 +140,7 @@ def is_cursor_cloud(
 
 
 def is_claude_cloud(env: Mapping[str, str] | None = None) -> tuple[bool, list[str]]:
+    """Claude Cloud requires ≥2 independent markers (round-19 #4)."""
     e = env if env is not None else os.environ
     hits: list[str] = []
     kind = (e.get("CLAUDE_CODE_ENVIRONMENT_KIND") or "").strip()
@@ -152,7 +153,7 @@ def is_claude_cloud(env: Mapping[str, str] | None = None) -> tuple[bool, list[st
         hits.append("CLAUDE_CODE_REMOTE_SESSION_ID")
     if _truthy(e.get("CLAUDE_CODE_REMOTE")):
         hits.append("CLAUDE_CODE_REMOTE")
-    return (len(hits) >= 1, hits)  # Claude remote markers are each high-confidence
+    return (len(hits) >= 2, hits)
 
 
 def is_grok_cloud(
@@ -163,7 +164,7 @@ def is_grok_cloud(
 ) -> tuple[bool, list[str]]:
     """
     Grok Bot cloud: require 2+ markers. sand-data alone (fixtures / local desktop)
-    is not enough (round-18 D4).
+    is not enough. Box-only markers: SAND_BOX_ID / BOX_ID + /home/box (round-19 #4).
     """
     e = env if env is not None else os.environ
     exists = path_exists or (lambda p: Path(p).exists())
@@ -173,9 +174,16 @@ def is_grok_cloud(
             hits.append(key)
     if _truthy(e.get("SAND_DATA")):
         hits.append("SAND_DATA")
-    # sand_data path alone does NOT count toward cloud (fixture/local).
+    # Box-only cloud markers (Grok desktop sand-data is not enough).
+    for key in ("SAND_BOX_ID", "BOX_ID", "CURSOR_CLOUD_AGENT_ID"):
+        if _truthy(e.get(key)):
+            hits.append(key)
     if exists("/home/box"):
         hits.append("/home/box")
+    if exists("/home/box/sand-data") and _truthy(e.get("SAND_BOX_ID") or e.get("BOX_ID")):
+        # Reinforces box pairing; already counted via keys + /home/box.
+        pass
+    # sand_data path alone does NOT count toward cloud (fixture/local).
     return (len(hits) >= 2, hits)
 
 

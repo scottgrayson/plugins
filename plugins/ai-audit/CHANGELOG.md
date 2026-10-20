@@ -7,10 +7,11 @@
 - **Tokenizer:** vendored **tiktoken o200k_base** ranks (offline; `tiktoken` package required). Cursor report states the tokenizer name.
 - **Provider · environment** headings (e.g. `Cursor · Cloud`): auto-detect local OS vs cloud agent markers; `--env` override; JSON carries `provider` + `environment`.
 - **Sort:** groups by subtotal descending; rows by tokens descending (skill rows use `--context-window` 200k|1m).
-- **Cursor grouped report:** Always-apply rules, User Rules, Skill descriptions (200k + 1M budget cascade, realpath dedupe), MCP (startup lines + on-demand schema size / tool counts / caps / needs-auth), Model/settings (hooks). Purpose and AI suggestion columns left blank for the agent.
-- **User Rules:** exact-key read of `aicontext.personalContext` from `state.vscdb` via SQLite `mode=ro&immutable=0` (no temp copy; WAL-aware).
-- **Round 18:** redact once before any renderer (JSON + markdown); MCP preamble measured (~637 tok); active plugin versions only; script hooks labelled unmeasured; Cloud needs ≥2 markers; `--env` sanitised; vendor README + pinned `tiktoken==0.14.0`.
-- Shared assignment redaction (rounds 16–18): whole-value after secret-like name + separator; exceptions only when the entire value matches; wider names/separators (`access key`, `DBPASS`, `pa$$word`, `-pX`, …); `changeme` is not a placeholder. Inventory filesystem paths are never rewritten.
+- **Cursor grouped report:** Always-apply rules, User Rules, Skill descriptions (200k + 1M budget cascade, realpath dedupe + name-dedupe lower bound), MCP (startup lines + on-demand schema size / tool counts / caps / needs-auth), Model/settings (hooks). Columns: **Item | Tokens | Description | Source** (facts only).
+- **User Rules:** exact-key read of `aicontext.personalContext` from `state.vscdb` via SQLite `mode=ro` with `immutable=1` when no WAL/SHM (no sidecar create); WAL-aware when present; errors → unreadable row.
+- **Round 18:** redact once before any renderer; Cloud ≥2 markers; vendor README + pinned `tiktoken==0.14.0`.
+- **Round 19:** `-p` only in mysql-like / secret-shaped contexts; follow skill/dir symlinks; nested `pluginRoot` + custom `plugin.json` paths; enabled/disabled from `cursor.plugins.installedIds.*`; MCP `empty-window` vs project slug; Claude session hooks measure `rule.txt`; synthetic `fixtures/cursor-layout`.
+- Shared assignment redaction (rounds 16–19): whole-value after secret-like name + separator; `-p` keep cases for hyphenated names/ports; i18n password names; quoted trailing words; zero-width strip. Inventory filesystem paths are never rewritten.
 - Context audit: bounded project scan; skips plugin cache/marketplace trees and this plugin's fixtures; dedupes resolved paths; does not treat `~` as a project tree.
 - Nested package `.claude/skills` marked on-demand. Enabled plugin skills from `enabledPlugins` + `installed_plugins.json`.
 - **Later stages (not in this release):** token usage attribution, facts/memory hygiene.

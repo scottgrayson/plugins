@@ -127,7 +127,7 @@ else
 fi
 ```
 
-On Cursor, expect a heading like `Cursor · Mac` or `Cursor · Cloud`, columns `Item | Tokens | Purpose | AI suggestion` (Purpose/suggestion blank for the agent), groups ordered by subtotal descending, and rows within each group by tokens descending.
+On Cursor, expect a heading like `Cursor · Mac` or `Cursor · Cloud`, columns `Item | Tokens | Description | Source` (facts only — do not invent Purpose/suggestion text), groups ordered by subtotal descending, and rows within each group by tokens descending.
 
 ---
 

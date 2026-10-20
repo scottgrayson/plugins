@@ -22,7 +22,6 @@ def _env_heading(payload: dict[str, Any]) -> str:
 
 
 def _legacy_context_markdown(payload: dict[str, Any]) -> str:
-    host = payload.get("host", "unknown")
     heading = _env_heading(payload)
     items = payload.get("inventory") or []
     always = [i for i in items if i.get("load") == "always"]
@@ -90,10 +89,11 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
         "",
         f"Tokenizer: **{tokenizer}** (offline, vendored).",
         "",
-        "Legend: **Item** and **Tokens** are scripted. "
-        "**Purpose** and **AI suggestion** are blank for the agent to fill "
-        "(see context-audit skill). Skill rows show `200k (1M)` when descriptions "
-        "differ by budget. Groups and rows are sorted by tokens descending.",
+        "Legend: **Item**, **Tokens**, **Description**, and **Source** are "
+        "scripted facts only (description is quoted/truncated from the file; "
+        "source is a short path). The agent must not add generated text to the "
+        "table. Skill rows show `200k (1M)` when descriptions differ by budget. "
+        "Groups and rows are sorted by tokens descending.",
         "",
     ]
 
@@ -107,7 +107,7 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
         else:
             lines.append(f"### {group} · subtotal {sub_200:,}")
         lines.append("")
-        lines.append("| Item | Tokens | Purpose | AI suggestion |")
+        lines.append("| Item | Tokens | Description | Source |")
         lines.append("|---|---:|---|---|")
         for r in grow:
             item = str(r.get("item") or "").replace("|", "\\|")
@@ -117,9 +117,9 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
                 tok_cell = f"{t200} ({int(t1m)})"
             else:
                 tok_cell = str(t200)
-            purpose = str(r.get("purpose") or "")
-            suggestion = str(r.get("suggestion") or "")
-            lines.append(f"| {item} | {tok_cell} | {purpose} | {suggestion} |")
+            desc = str(r.get("description") or "").replace("|", "\\|")
+            source = str(r.get("source") or "").replace("|", "\\|")
+            lines.append(f"| {item} | {tok_cell} | {desc} | {source} |")
         if not grow:
             lines.append("| _(none)_ | 0 |  |  |")
         lines.append("")
@@ -152,6 +152,7 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
             "- User Rules: only `aicontext.personalContext` is read from "
             "`state.vscdb` via SQLite `mode=ro` (exact-key query; no copy).",
             "- Secret-shaped values in notes/meta were redacted.",
+            "- Facts only: do not invent Purpose/suggestion columns.",
             "",
         ]
     )

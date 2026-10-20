@@ -93,9 +93,21 @@ def test_cursor_cloud_markers() -> None:
 
 
 def test_claude_cloud_markers() -> None:
-    assert is_claude_cloud({"CLAUDE_CODE_ENVIRONMENT_KIND": "byoc"})[0] is True
-    assert is_claude_cloud({"CLAUDE_CODE_ENTRYPOINT": "remote"})[0] is True
-    assert is_claude_cloud({"CLAUDE_CODE_REMOTE_SESSION_ID": "rs"})[0] is True
+    # Round-19: Claude needs ≥2 markers
+    assert is_claude_cloud({"CLAUDE_CODE_ENVIRONMENT_KIND": "byoc"})[0] is False
+    assert is_claude_cloud({"CLAUDE_CODE_ENTRYPOINT": "remote"})[0] is False
+    assert is_claude_cloud(
+        {
+            "CLAUDE_CODE_ENVIRONMENT_KIND": "byoc",
+            "CLAUDE_CODE_ENTRYPOINT": "remote",
+        }
+    )[0] is True
+    assert is_claude_cloud(
+        {
+            "CLAUDE_CODE_REMOTE_SESSION_ID": "rs",
+            "CLAUDE_CODE_REMOTE": "1",
+        }
+    )[0] is True
     assert is_claude_cloud({"CLAUDE_CODE_ENTRYPOINT": "cli"})[0] is False
     assert is_claude_cloud({"CLAUDE_CODE_REMOTE": "no"})[0] is False
 
@@ -110,6 +122,12 @@ def test_grok_cloud_sand_data_alone() -> None:
         path_exists=lambda p: False,
     )
     assert cloud is False
+    # /home/box alone is not enough (box without SAND_BOX_ID)
+    cloud, hits = is_grok_cloud(
+        {},
+        path_exists=lambda p: p == "/home/box",
+    )
+    assert cloud is False
     # GROK_BOT=no is falsy
     cloud, hits = is_grok_cloud(
         {"GROK_BOT": "no"},
@@ -118,6 +136,12 @@ def test_grok_cloud_sand_data_alone() -> None:
     assert cloud is False
     cloud, hits = is_grok_cloud(
         {"GROK_BOT": "1"},
+        path_exists=lambda p: p == "/home/box",
+    )
+    assert cloud is True
+    # Box-only pairing: SAND_BOX_ID + /home/box
+    cloud, hits = is_grok_cloud(
+        {"SAND_BOX_ID": "box-1"},
         path_exists=lambda p: p == "/home/box",
     )
     assert cloud is True

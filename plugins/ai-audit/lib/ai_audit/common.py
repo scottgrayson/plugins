@@ -111,10 +111,11 @@ _PASSWORD_FAMILY = frozenset(
         "p",
     }
 )
-# password/token/secret as a word anywhere (password_prod, passwordProd → password_prod)
+# password/token/secret as a word anywhere (password_prod, passwordProd → password_prod).
+# `pin` is exact-only / "pin code" — not a suffix (avoids web-pin, stickpin).
 _SECRET_NAME_WORD_RE = re.compile(
     r"(?i)(?:^|_)(password|passwd|passcode|passphrase|pass|pwd|pw|token|secret|"
-    r"sessionid|session|pin)(?:_|$|\[|\.)"
+    r"sessionid|session)(?:_|$|\[|\.|\{)"
 )
 _SECRET_NAME_SUFFIX_RE = re.compile(
     r"(?i)(?:PASSWORD|PASSWD|PASSCODE|TOKEN|SECRET|_API_KEY|_SECRET_KEY|_ACCESS_KEY|"
@@ -134,36 +135,50 @@ _VALUE_COLON = (
     r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\$\{[^}]+\}|<[^>\n]+>|"
     r"https?://\S+|[^\s,;&=:：]+)"
 )
-# Identifier incl. password[prod] / password[] / password.prod / p@ssword / pa$$word.
-# Multi-word api/secret/access/private key and pin code handled separately.
+# Identifier incl. password[prod] / password[] / password.prod / password{prod}
+# / p@ssword / pa$$word / p@ss / p@55word.
 _NAME_ATOM = (
-    r"(?:p@ssword|pa\$\$word|"
+    r"(?:p@ssword|pa\$\$word|p@55word|p@ss|"
+    r"passwort|contrase(?:ñ|n)a|"
     r"[A-Za-z_][A-Za-z0-9_-]*"
     r"(?:\[[^\]]*\])*"  # password[] / password[a][b]
+    r"(?:\{[^}]*\})*"  # password{prod}
     r"(?:\.[A-Za-z0-9_-]+)*"  # password.prod
     r"(?:\([^)]*\))?"  # password(prod)
     r")"
 )
-_NAME_SPACED = r"(?:api|secret|access|private)\s+key|pin\s+code"
+# Spaced secret names (incl. "pass word", i18n password words).
+_NAME_SPACED = (
+    r"(?:api|secret|access|private)\s+key|pin\s+code|pass\s+word|"
+    r"mot\s+de\s+passe|contrase(?:ñ|n)a|passwort"
+)
 _NAME_ANY = rf"(?:{_NAME_SPACED}|{_NAME_ATOM})"
 # Unicode colon lookalikes used as separators (∶ U+2236, ꞉ U+A789, ﹕ U+FE55)
 _COLON_SEPS = r"(?::=|：|:|\u2236|\ua789|\ufe55)"
+# Name must not start mid-hyphenated-token (web-pin) or mid-word.
+_NAME_BOUND = r"(?<![\w@$-])"
 # name= / name: / name:= / name： starters
 _ASSIGN_EQ_START_RE = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_@$])({_NAME_ANY})\s*=\s*"
+    rf"(?i){_NAME_BOUND}({_NAME_ANY})\s*=\s*"
 )
 _ASSIGN_COLON_START_RE = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_@$])([\"']?)({_NAME_ANY})\1\s*{_COLON_SEPS}\s*"
+    rf"(?i){_NAME_BOUND}([\"']?)({_NAME_ANY})\1\s*{_COLON_SEPS}\s*"
 )
-# --name value / --name=value / -p value / -pVALUE (glued short password flag).
-# Glued -p must not eat long flags (-plugin, -project, -port, …).
-_GLUED_P_NOT_FLAG = (
-    r"(?!(?:lugin|roject|ort|ath|rofile|roxy|refix|retty|ager|rompt|ython|"
-    r"arent|arse|ublish|ull|ush|rune|ackage|ositional|ager)\b)"
-)
+# Long --flags only here. Short -p is handled separately (round-19 #1):
+# only as a standalone flag token in mysql-like context or with a secret-shaped value.
 _ASSIGN_FLAG_RE = re.compile(
-    rf"(?i)(?:(--([A-Za-z][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))|"
-    rf"(-p)(?:(=|\s+)|{_GLUED_P_NOT_FLAG})({_VALUE_EQ}))"
+    rf"(?i)(--([A-Za-z][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))"
+)
+# Standalone -p / -pVALUE (not mid hyphenated name; not -port/-plugin/…).
+# Groups: 1=-p, 2=sep, 3=spaced/eq value, 4=glued value.
+_ASSIGN_P_FLAG_RE = re.compile(
+    rf"(?i)(?<![\w-])(-p)(?:(=|\s+)({_VALUE_EQ})|"
+    rf"(?!lugin|roject|ort|ath|rofile|roxy|erf\b|ractices\b|rs\b|ostgres|"
+    rf"rompt|ython|arse|ublish|ull|ush|rune|ackage)({_VALUE_EQ}))"
+)
+_MYSQL_CTX_RE = re.compile(
+    r"(?i)(?:\b(?:mysql|mysqldump|mariadb|psql|postgres(?:ql)?)\b|"
+    r"-u\w+|--user(?:name)?\b|--password\b)"
 )
 # URL query ?name=value &name=value
 _ASSIGN_QUERY_RE = re.compile(
@@ -359,7 +374,7 @@ def is_secret_name(name: str) -> bool:
     if not name:
         return False
     raw = name.strip()
-    # Spaced forms: "api key", "secret key", "access key", "private key", "pin code"
+    # Spaced forms + i18n password words
     low = re.sub(r"\s+", " ", raw.lower())
     if low in {
         "api key",
@@ -367,24 +382,42 @@ def is_secret_name(name: str) -> bool:
         "access key",
         "private key",
         "pin code",
+        "pass word",
+        "mot de passe",
+        "contraseña",
+        "contrasena",
+        "passwort",
     }:
         return True
-    if raw.lower() in {"p@ssword", "pa$$word"} or low in {"p@ssword", "pa$$word"}:
+    if raw.lower() in {
+        "p@ssword",
+        "pa$$word",
+        "p@ss",
+        "p@55word",
+        "passwort",
+    } or low in {"p@ssword", "pa$$word", "p@ss", "p@55word", "passwort"}:
         return True
-    # Strip password[prod] / password[] / password(prod) / password.prod → password
+    # Strip password[prod] / password[] / password{prod} / password(prod) / .prod
     bare = re.sub(r"\[.*?\]", "", raw)
+    bare = re.sub(r"\{.*?\}", "", bare)
     bare = re.sub(r"\([^)]*\)", "", bare)
     bare = re.sub(r"\.[A-Za-z0-9_-]+$", "", bare)
     n = _norm_name(bare)
     if n in _SECRET_NAME_EXACT:
         return True
     # Compound names without underscore: DBPASS, mypwd, userpass (not compass/bypass)
-    if n in {"dbpass", "mypwd", "userpass", "mysqlpwd"} or (
+    if n in {"dbpass", "mypwd", "userpass", "mysqlpwd", "passwort"} or (
         len(n) >= 5 and n.endswith("pwd")
     ):
         return True
     if _SECRET_NAME_WORD_RE.search(n) or _SECRET_NAME_WORD_RE.search(
-        _norm_name(raw.replace("[", "_").replace("]", "").replace(".", "_"))
+        _norm_name(
+            raw.replace("[", "_")
+            .replace("]", "")
+            .replace("{", "_")
+            .replace("}", "")
+            .replace(".", "_")
+        )
     ):
         return True
     if _SECRET_NAME_SUFFIX_RE.search(raw) or _SECRET_NAME_SUFFIX_RE.search(n):
@@ -399,16 +432,44 @@ def is_secret_name(name: str) -> bool:
 
 def _is_password_family(name: str) -> bool:
     bare = re.sub(r"\[.*?\]", "", name or "")
+    bare = re.sub(r"\{.*?\}", "", bare)
     bare = re.sub(r"\([^)]*\)", "", bare)
     bare = re.sub(r"\.[A-Za-z0-9_-]+$", "", bare)
     n = _norm_name(bare)
-    if n in _PASSWORD_FAMILY:
+    if n in _PASSWORD_FAMILY or n in {
+        "dbpass",
+        "mypwd",
+        "userpass",
+        "mysqlpwd",
+        "passwort",
+        "p@ss",
+        "p@55word",
+    }:
         return True
-    if n in {"dbpass", "mypwd", "userpass", "mysqlpwd"} or (
-        len(n) >= 5 and n.endswith("pwd")
-    ):
+    if len(n) >= 5 and n.endswith("pwd"):
         return True
     return bool(re.search(r"(?i)(?:PASSWORD|PASSWD|_PASS|_PWD|DBPASS)$", name or ""))
+
+
+def _p_flag_value_is_secret(value: str) -> bool:
+    """True when -p VALUE looks like a password, not a port/path/mkdir target."""
+    v = _strip_value_quotes((value or "").strip())
+    if not v:
+        return False
+    # Ports and port maps: 22, 8080:80, 0.0.0.0:443
+    if re.fullmatch(r"\d{1,5}", v):
+        return False
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}", v):
+        return False
+    if re.fullmatch(r"\d{1,5}:\d{1,5}", v):
+        return False
+    kind = classify_value(v)
+    if kind in _ALWAYS_SAFE_KINDS | {"number", "path", "version"}:
+        return False
+    if kind in {"secretlike", "dictword", "titleword"}:
+        return True
+    # Mixed secret-ish tokens (SecretPw99, dragon1)
+    return bool(re.search(r"[A-Za-z]", v)) and not v.startswith("/")
 
 
 def _is_knob_name(name: str) -> bool:
@@ -474,11 +535,13 @@ def _value_extent_end(text: str, start: int) -> int:
     """
     End index of an assignment value starting at start.
 
-    Consumes through end of line, closing quote, or the next ', key=value' pair.
+    Consumes through end of line or the next ', key=value' pair. Quoted values
+    include trailing prose after the closer (``password: 'X' dragon``, round-19).
     """
     n = len(text)
     if start >= n:
         return start
+    i = start
     # Quoted value: consume through matching closer (allow escapes).
     q = text[start]
     if q in ("'", '"'):
@@ -489,13 +552,15 @@ def _value_extent_end(text: str, start: int) -> int:
                 i += 2
                 continue
             if ch == q:
-                return i + 1
+                i += 1
+                break
             if ch in "\r\n":
                 return i
             i += 1
-        return n
+        else:
+            return n
+        # Continue into trailing words after the quote (whole-value rule).
 
-    i = start
     while i < n:
         ch = text[i]
         if ch in "\r\n":
@@ -705,30 +770,51 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
             hits.append(hit)
 
     for m in _ASSIGN_FLAG_RE.finditer(text):
-        # Groups: (--long)(name)(sep)(value) | (-p)(sep)(value)
-        # Long: 1=--flag, 2=name, 3=sep, 4=value; short: 5=-p, 6=sep, 7=value
-        if m.group(5):  # -p / -pVALUE / -p VALUE
-            name = "p"
-            flag = m.group(5)
-            sep = m.group(6) or ""
-            if m.group(7) is None:
-                continue
-            vs = m.start(7)
-        else:
-            long_flag, long_name = m.group(1), m.group(2)
-            sep = m.group(3) or ""
-            if m.group(4) is None:
-                continue
-            name = long_name
-            flag = long_flag
-            vs = m.start(4)
-        hit = _hit_from_name_sep(text, m.start(), name, vs, "flag")
+        # Groups: 1=--flag, 2=name, 3=sep, 4=value
+        long_flag, long_name = m.group(1), m.group(2)
+        sep = m.group(3) or ""
+        if m.group(4) is None:
+            continue
+        vs = m.start(4)
+        hit = _hit_from_name_sep(text, m.start(), long_name, vs, "flag")
         if hit:
             hits.append(
                 _AssignHit(
                     hit.start,
                     hit.end,
-                    name,
+                    long_name,
+                    hit.value_start,
+                    hit.value_end,
+                    hit.value,
+                    f"{long_flag}{sep}",
+                    "flag",
+                )
+            )
+
+    # Round-19 #1: -p only as a standalone flag (not mid hyphenated name), and
+    # only when mysql-like context OR the value is obviously secret-shaped.
+    for m in _ASSIGN_P_FLAG_RE.finditer(text):
+        flag = m.group(1)
+        if m.group(3) is not None:
+            sep = m.group(2) or ""
+            vs = m.start(3)
+        elif m.group(4) is not None:
+            sep = ""
+            vs = m.start(4)
+        else:
+            continue
+        before = text[max(0, m.start() - 80) : m.start()]
+        val_atom = _parse_value_at(text, vs, colon=False)
+        val = val_atom[0] if val_atom else text[vs : _value_extent_end(text, vs)]
+        if not (_MYSQL_CTX_RE.search(before) or _p_flag_value_is_secret(val)):
+            continue
+        hit = _hit_from_name_sep(text, m.start(), "p", vs, "flag")
+        if hit:
+            hits.append(
+                _AssignHit(
+                    hit.start,
+                    hit.end,
+                    "p",
                     hit.value_start,
                     hit.value_end,
                     hit.value,
@@ -811,6 +897,10 @@ def _apply_assignment_redactions(text: str) -> str:
     return out
 
 
+# Zero-width / soft-hyphen chars stripped before matching (round-19 #5).
+_ZW_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad]")
+
+
 def redact_secrets(text: str) -> str:
     """
     Replace secret-shaped values in user-sourced strings.
@@ -823,7 +913,8 @@ def redact_secrets(text: str) -> str:
         return ""
     if not isinstance(text, str):
         text = str(text)
-    out = text
+    # Strip zero-width separators so pass​word: x still matches.
+    out = _ZW_RE.sub("", text)
 
     out = _PEM_PRIVATE_RE.sub(
         "-----BEGIN PRIVATE KEY-----…REDACTED-----END PRIVATE KEY-----", out

@@ -44,16 +44,11 @@ bash "$AI_AUDIT" context --host grok
 
 Show the markdown report to the user.
 
-### Fill Purpose and AI suggestion (Cursor grouped table)
+### Report is facts only (Cursor grouped table)
 
-The script fills **Item**, **Tokens**, group subtotals, dup flags, and MCP/tool metadata. Columns **Purpose** and **AI suggestion** are left blank on purpose.
+The script fills **Item**, **Tokens**, **Description** (quoted/truncated from the file, redacted), and **Source** (short path). The report is the source of truth.
 
-For each row in the table, fill:
-
-- **Purpose** — one short phrase for what the item does in context
-- **AI suggestion** — keep / trim / remove / disable, with a brief reason
-
-Do not invent token numbers. Do not edit files; suggestions only.
+**Do not** add generated text to the table. Do not invent Purpose, AI suggestion, or token numbers. Do not edit files. Quality checks may come in a later step — not now.
 
 ## When to ask the user
 

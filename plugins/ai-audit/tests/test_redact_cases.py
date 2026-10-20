@@ -198,11 +198,30 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("pin code: 4821", "4821"),
     ("-pdragon", "dragon"),
     ("mysql -uroot -pSecretPw99", "SecretPw99"),
+    # --- round-19 #5: quoted trailing, pass word, ZW, i18n, braces, p@ss ---
+    ("password: 'Hunter2Fake' dragon", "Hunter2Fake"),
+    ("pass word: dragon", "dragon"),
+    ("Passwort: geheim99xx", "geheim99xx"),
+    ("mot de passe: secret99xx", "secret99xx"),
+    ("contraseña: secreto99", "secreto99"),
+    ("password{prod}=dragon", "dragon"),
+    ("p@ss: dragon", "dragon"),
+    ("p@55word: dragon", "dragon"),
 ]
 
 # Still kept under the simple rule (empty / placeholder / null / bool / status
 # alone / knob numbers / pass=N counts / pwd paths / non-secret names).
+# Round-19 #1: -p must not eat hyphenated names / port / mkdir.
 KEEP_CASES: list[str] = [
+    "workers-best-practices",
+    "web-perf",
+    "split-to-prs",
+    "mkdir -p /tmp/x",
+    "ssh -p 22",
+    "docker -p 8080:80",
+    "web-pin: x",
+    "supabase-postgres-best-practices",
+    "local-security-prompts.mdc",
     "pwd=/Users/scott/Code",
     "PWD=/home/box",
     "pass=1 fail=0",
