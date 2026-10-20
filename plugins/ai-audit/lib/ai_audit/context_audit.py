@@ -1244,6 +1244,7 @@ def run_context_audit(
                 "subtotals",
                 "groups",
                 "rows",
+                "checks",
                 "skill_budget",
             )
             if k in payload

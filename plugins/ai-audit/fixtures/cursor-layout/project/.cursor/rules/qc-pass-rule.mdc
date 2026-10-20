@@ -1,0 +1,5 @@
+---
+description: Quality-check pass rule that always applies
+alwaysApply: true
+---
+Pass rule body.

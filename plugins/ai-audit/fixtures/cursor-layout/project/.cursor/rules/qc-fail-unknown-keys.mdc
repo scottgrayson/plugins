@@ -1,0 +1,7 @@
+---
+description: Unknown front-matter keys for mdc
+alwaysApply: true
+totallyUnknownKey: yes
+anotherBadKey: 1
+---
+Unknown keys.

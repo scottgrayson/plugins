@@ -1291,6 +1291,10 @@ def build_cursor_startup_report(
     total_200k_all = sum(s["tokens_200k"] for s in subtotals.values())
     total_1m_all = sum(s["tokens_1m"] for s in subtotals.values())
 
+    from .quality_checks import run_quality_checks
+
+    checks = run_quality_checks(roots)
+
     return {
         "host": "cursor",
         "audit": "context",
@@ -1301,6 +1305,7 @@ def build_cursor_startup_report(
         "subtotals": subtotals,
         "groups": groups_order,
         "rows": sorted_rows,
+        "checks": checks,
         "skill_budget": {
             "limit_200k": _AGENT_LIMIT_200K,
             "budget_200k": int(_AGENT_LIMIT_200K * 0.02),

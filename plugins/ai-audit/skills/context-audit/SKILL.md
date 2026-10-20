@@ -46,9 +46,9 @@ Show the markdown report to the user.
 
 ### Report is facts only (Cursor grouped table)
 
-The script fills **Item**, **Tokens**, **Description** (quoted/truncated from the file, redacted), and **Source** (short path). The report is the source of truth.
+The script fills **Item**, **Tokens**, **Description** (quoted/truncated from the file, redacted), and **Source** (short path). Below the inventory table, a **Checks** section lists deterministic, token-free findings (`Item | Check | Finding | Source`), sorted by severity. Every finding is a fact with `file:line`.
 
-**Do not** add generated text to the table. Do not invent Purpose, AI suggestion, or token numbers. Do not edit files. Quality checks may come in a later step — not now.
+**Do not** add generated text to the inventory table or the Checks table. Do not invent Purpose, AI suggestion, or token numbers. Report check findings **verbatim** — add no judgement. Do not edit files. Pattern hints (vague words, shouting) are not in this release.
 
 ## When to ask the user
 

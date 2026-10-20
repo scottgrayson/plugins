@@ -11,6 +11,7 @@
 - **User Rules:** exact-key read of `aicontext.personalContext` from `state.vscdb` via SQLite `mode=ro` with `immutable=1` when no WAL/SHM (no sidecar create); WAL-aware when present; errors → unreadable row.
 - **Round 18:** redact once before any renderer; Cloud ≥2 markers; vendor README + pinned `tiktoken==0.14.0`.
 - **Round 19:** `-p` only in mysql-like / secret-shaped contexts; follow skill/dir symlinks; nested `pluginRoot` + custom `plugin.json` paths; enabled/disabled from `cursor.plugins.installedIds.*`; MCP `empty-window` vs project slug; Claude session hooks measure `rule.txt`; synthetic `fixtures/cursor-layout`.
+- **Quality checks:** deterministic, token-free Checks section (`Item | Check | Finding | Source`) below the Cursor table — broken references, dead/contradictory rules, skill description length/triggers, files over 500 lines, same-name drift, stale names, broken front matter. No AI; findings are facts with `file:line`; agent reports them verbatim.
 - Shared assignment redaction (rounds 16–19): whole-value after secret-like name + separator; `-p` keep cases for hyphenated names/ports; i18n password names; quoted trailing words; zero-width strip. Inventory filesystem paths are never rewritten.
 - Context audit: bounded project scan; skips plugin cache/marketplace trees and this plugin's fixtures; dedupes resolved paths; does not treat `~` as a project tree.
 - Nested package `.claude/skills` marked on-demand. Enabled plugin skills from `enabledPlugins` + `installed_plugins.json`.

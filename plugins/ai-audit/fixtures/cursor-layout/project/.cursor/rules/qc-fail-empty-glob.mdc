@@ -1,0 +1,7 @@
+---
+description: Globs that match nothing under project
+alwaysApply: false
+globs:
+  - "zz-no-such-extension-qc.zzzz"
+---
+Empty glob.

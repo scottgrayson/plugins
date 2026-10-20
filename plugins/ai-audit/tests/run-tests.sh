@@ -480,6 +480,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== quality checks (deterministic, token-free) =="
+QC_OUT="$(python3 -B "$PLUGIN/tests/test_quality_checks.py" 2>&1)" && QC_RC=0 || QC_RC=$?
+if [[ $QC_RC -eq 0 ]]; then
+  echo "PASS $QC_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL quality_checks (rc=$QC_RC)"
+  echo "  $QC_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== environment heading + sort =="
 ENV_OUT="$(python3 -B "$PLUGIN/tests/test_environment.py" 2>&1)" && ENV_RC=0 || ENV_RC=$?
 if [[ $ENV_RC -eq 0 ]]; then

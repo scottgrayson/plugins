@@ -70,6 +70,31 @@ def _legacy_context_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _checks_markdown(payload: dict[str, Any]) -> list[str]:
+    """Deterministic quality Checks table (facts only; already severity-sorted)."""
+    checks = payload.get("checks") or []
+    lines = [
+        "### Checks",
+        "",
+        "Deterministic, token-free facts (no AI). Report each finding verbatim; "
+        "do not add judgement.",
+        "",
+        "| Item | Check | Finding | Source |",
+        "|---|---|---|---|",
+    ]
+    if not checks:
+        lines.append("| _(none)_ |  |  |  |")
+    else:
+        for c in checks:
+            item = str(c.get("item") or "").replace("|", "\\|")
+            check = str(c.get("check") or "").replace("|", "\\|")
+            finding = str(c.get("finding") or "").replace("|", "\\|")
+            source = str(c.get("source") or "").replace("|", "\\|")
+            lines.append(f"| {item} | {check} | {finding} | {source} |")
+    lines.append("")
+    return lines
+
+
 def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
     heading = _env_heading(payload)
     tokenizer = payload.get("tokenizer") or "tiktoken o200k_base"
@@ -123,6 +148,8 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
         if not grow:
             lines.append("| _(none)_ | 0 |  |  |")
         lines.append("")
+
+    lines.extend(_checks_markdown(payload))
     return lines
 
 
@@ -153,6 +180,7 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
             "`state.vscdb` via SQLite `mode=ro` (exact-key query; no copy).",
             "- Secret-shaped values in notes/meta were redacted.",
             "- Facts only: do not invent Purpose/suggestion columns.",
+            "- Checks: deterministic findings only — report verbatim, no judgement.",
             "",
         ]
     )
