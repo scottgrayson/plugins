@@ -1047,14 +1047,39 @@ def _fold_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(chars), idx
 
 
+# A product name followed by an assignment-like separator and a value is a key.
+_PRODUCT_ASSIGN_RE = re.compile(r"\s*(?::=|=>|=|:|[\"'`])\s*\S|\s+(?:is|are)\s+\S")
+# ... or by a glued tail holding a digit (1password-hunter2, 1password_dragon7, 1passwordx9).
+_PRODUCT_TAIL_RE = re.compile(r"(?:[-_.]+)?([a-z0-9]+)")
+
+
+def _product_is_key(folded: str, end: int) -> bool:
+    rest = folded[end:]
+    if _PRODUCT_ASSIGN_RE.match(rest):
+        return True
+    m = _PRODUCT_TAIL_RE.match(rest)
+    return bool(m) and any(c.isdigit() for c in m.group(1))
+
+
 def _strong_matches(folded: str) -> list["re.Match[str]"]:
-    """Strong secret words, minus those inside a product name such as 1password."""
-    products = [m.span() for m in _PRODUCT_RE.finditer(folded)]
-    return [
+    """Strong secret words, minus those inside a product name such as 1password.
+
+    The exemption does not apply when the product name acts as a key: followed by
+    an assignment separator and a value, or by a glued tail with a digit.
+    """
+    exempt: list[tuple[int, int]] = []
+    keys: list["re.Match[str]"] = []
+    for m in _PRODUCT_RE.finditer(folded):
+        if _product_is_key(folded, m.end()):
+            keys.append(m)  # the product name itself acts as the secret word
+        else:
+            exempt.append(m.span())
+    found = [
         m
         for m in _STRONG_SECRET_RE.finditer(folded)
-        if not any(a <= m.start() and m.end() <= b for a, b in products)
+        if not any(a <= m.start() and m.end() <= b for a, b in exempt)
     ]
+    return sorted(keys + found, key=lambda m: (m.start(), m.end()))
 
 
 # Letter suffixes that may be glued to a strong word without hiding it.

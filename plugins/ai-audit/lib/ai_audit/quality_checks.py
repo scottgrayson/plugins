@@ -293,6 +293,17 @@ def _known_rule_names(rule_files: Sequence[Path]) -> set[str]:
     return {p.stem for p in rule_files} | {p.name for p in rule_files}
 
 
+_EXAMPLE_ABS_ROOTS = frozenset({"workspace", "app", "tmp"})
+
+
+def _is_example_abs_path(ref: str) -> bool:
+    """Sandbox/container/temp roots and placeholder dirs (example*) in prose."""
+    parts = [p for p in ref.split("/") if p]
+    return bool(parts) and (
+        parts[0] in _EXAMPLE_ABS_ROOTS or any(p.startswith("example") for p in parts[:-1])
+    )
+
+
 def check_broken_references(
     roots: Roots,
     *,
@@ -338,9 +349,13 @@ def check_broken_references(
                 continue
             cands.append((target, m.start(1), "link"))
         for ref, start, kind in cands:
-            if not _looks_like_file_ref(ref) or ref.startswith("/"):
-                continue  # absolute non-home paths: sandbox, container, temp
-            if ref.startswith("~/"):
+            if not _looks_like_file_ref(ref):
+                continue
+            if ref.startswith("/"):
+                if _in_ranges(code, start) or _is_example_abs_path(ref):
+                    continue  # code samples, sandbox/container/temp roots, placeholders
+                cand = Path(ref)
+            elif ref.startswith("~/"):
                 cand = home / ref[2:]
             else:
                 if ref.startswith("./") and _in_ranges(code, start):

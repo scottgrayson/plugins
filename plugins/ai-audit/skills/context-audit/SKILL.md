@@ -50,7 +50,7 @@ The script fills **Item**, **Tokens**, **Description** (quoted/truncated from th
 
 **Do not** add generated text to the inventory table or the Checks table. Do not invent Purpose, AI suggestion, or token numbers. Report check findings **verbatim** — add no judgement. Do not edit files. Pattern hints (vague words, shouting) are not in this release.
 
-Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked.
+Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked. Absolute non-home paths (for example `/opt/...`, `/srv/...`) are checked in prose and skipped inside inline or fenced code. Sandbox, container and temp roots (`/workspace/`, `/app/`, `/tmp/`) and placeholder directories starting with `example` are treated as examples and skipped in prose too.
 
 ## When to ask the user
 

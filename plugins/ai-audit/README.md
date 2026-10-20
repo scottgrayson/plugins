@@ -91,4 +91,4 @@ Free-text fields the context report and checks can render:
 
 Known by-design gaps are kept as `by-design` rows in `tests/data/redaction_corpus.tsv`.
 
-Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked.
+Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked. Absolute non-home paths (for example `/opt/...`, `/srv/...`) are checked in prose and skipped inside inline or fenced code. Sandbox, container and temp roots (`/workspace/`, `/app/`, `/tmp/`) and placeholder directories starting with `example` are treated as examples and skipped in prose too.

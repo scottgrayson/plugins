@@ -653,7 +653,23 @@ redact	/x/bearer/eyJhbGciOiJIUzI1NiJ9	eyJhbGciOiJIUzI1NiJ9
 keep	local-security-prompts	
 keep	~/.secrets/	
 keep	~/.secrets/			source
-keep	~/.claude/plugins/cache/m/secret-scanner/0.15.25/skills/a/SKILL.md			source
+keep	~/.claude/plugins/cache/m/secret-scanner/9.9.9/skills/a/SKILL.md			source
 overredact	password-v2	
 keep	/x/password-dragonfly		by-design
 keep	DB_PASSWORD_dragonfly		by-design
+redact	1Password: hunter2Fake	hunter2Fake
+redact	1Password=hunter2Fake	hunter2Fake
+redact	1password: hunter2Fake	hunter2Fake
+redact	1password=hunter2Fake	hunter2Fake
+redact	lastpass: hunter2Fake	hunter2Fake
+redact	lastpass=hunter2Fake	hunter2Fake
+redact	keepass: hunter2Fake	hunter2Fake
+redact	keepass=hunter2Fake	hunter2Fake
+redact	bitwarden: hunter2Fake	hunter2Fake
+redact	bitwarden=hunter2Fake	hunter2Fake
+redact	1password-hunter2	hunter2
+redact	1password_dragon7	dragon7
+redact	lastpass-hunter2	hunter2
+redact	bitwarden_hunter2	hunter2
+keep	1password-dragonfly		by-design
+keep	user-1password (15 tools)	
