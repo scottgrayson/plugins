@@ -1048,7 +1048,7 @@ empty = tempfile.mkdtemp(prefix="ai-audit-empty-home.")
 try:
     for bi, block in enumerate(checks):
         # Simulate paste with empty HOME (no plugin installs)
-        script = "HOME=%r\nexport HOME\n%s\n" % (empty, block)
+        script = "HOME=%r\nexport HOME\nunset AI_AUDIT PLUGIN\n%s\n" % (empty, block)
         proc = subprocess.run(
             ["bash", "--norc", "--noprofile", "-c", script],
             capture_output=True,
@@ -1062,7 +1062,7 @@ finally:
     shutil.rmtree(empty)
 PY
 
-# N2: prose / key / pwd / model-name false positives stay intact
+# N2 keep-list (prose FPs) — also covered in round12 table
 py_check "redact false-positive prose stays intact" <<PY
 import sys
 sys.path.insert(0, "$LIB")
@@ -1085,7 +1085,6 @@ for raw in keep:
     got = redact_secrets(raw)
     assert got == raw, (raw, got)
     assert "REDACTED" not in got
-# Still redact real secrets
 assert "Hunter2FakePass" not in redact_secrets("password=Hunter2FakePass!99xx")
 assert "REDACTED" in redact_secrets("password=Hunter2FakePass!99xx")
 PY
@@ -1177,28 +1176,146 @@ assert_contains "HUMAN-TEST mentions Cursor cache marketplace path" \
   "$(cat "$PLUGIN/HUMAN-TEST.md")" ".cursor/plugins/cache"
 assert_contains "HUMAN-TEST idempotent rm before cp" \
   "$(cat "$PLUGIN/HUMAN-TEST.md")" "rm -rf ~/.cursor/plugins/local/ai-audit"
-py_check "Cursor local copy does not nest ai-audit/ai-audit" <<PY
+py_check "Cursor local copy does not nest; placeholder skips rm" <<PY
 import pathlib, re, subprocess, tempfile, shutil, os
 ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
 blocks = re.findall(r"\`\`\`(?:bash|sh|zsh)\n(.*?)\`\`\`", ht, flags=re.DOTALL)
-cp_blocks = [b for b in blocks if "rm -rf" in b and "plugins/local/ai-audit" in b and "cp -R" in b]
-assert cp_blocks, "missing idempotent Cursor cp block"
+cp_blocks = [b for b in blocks if "rm -rf" in b and "plugins/local/ai-audit" in b and "cp -R" in b and "SRC=" in b]
+assert cp_blocks, "missing idempotent Cursor cp block with SRC="
 src = pathlib.Path("$PLUGIN")
 home = pathlib.Path(tempfile.mkdtemp(prefix="ai-audit-cursor-cp."))
 try:
-    # First install
-    script = cp_blocks[0].replace("/path/to/plugins/ai-audit", str(src))
-    script = "HOME=%r\nexport HOME\n%s\n" % (str(home), script)
-    subprocess.run(["bash", "--norc", "-c", script], check=True, capture_output=True, text=True)
     dest = home / ".cursor" / "plugins" / "local" / "ai-audit"
+    dest.mkdir(parents=True)
+    (dest / "bin").mkdir()
+    (dest / "bin" / "ai-audit").write_text("#!/bin/sh\n")
+    # Placeholder SRC must NOT wipe existing install
+    script = "HOME=%r\nexport HOME\n%s\n" % (str(home), cp_blocks[0])
+    proc = subprocess.run(["bash", "--norc", "-c", script], capture_output=True, text=True)
+    assert "FAIL" in (proc.stdout or ""), proc.stdout
+    assert (dest / "bin" / "ai-audit").is_file(), "placeholder wiped install"
+    # Real SRC: install + re-run without nesting
+    script2 = cp_blocks[0].replace("/path/to/plugins/ai-audit", str(src))
+    script2 = "HOME=%r\nexport HOME\n%s\n" % (str(home), script2)
+    subprocess.run(["bash", "--norc", "-c", script2], check=True, capture_output=True, text=True)
     assert (dest / "bin" / "ai-audit").is_file()
     assert not (dest / "ai-audit").exists(), "nested on first copy"
-    # Second install must not nest
-    subprocess.run(["bash", "--norc", "-c", script], check=True, capture_output=True, text=True)
-    assert (dest / "bin" / "ai-audit").is_file()
+    subprocess.run(["bash", "--norc", "-c", script2], check=True, capture_output=True, text=True)
     assert not (dest / "ai-audit").exists(), "nested on re-run"
 finally:
     shutil.rmtree(home)
+PY
+
+echo "== round12 regressions =="
+# R1: real Claude versioned layout must PASS; empty HOME FAIL (already above)
+py_check "HUMAN-TEST install PASS on versioned cache layout" <<PY
+import pathlib, re, subprocess, tempfile, shutil
+ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
+blocks = re.findall(r"\`\`\`(?:bash|sh|zsh)\n(.*?)\`\`\`", ht, flags=re.DOTALL)
+claude_check = next(b for b in blocks if "PASS Claude install paths" in b)
+cursor_check = next(b for b in blocks if "PASS Cursor install paths" in b)
+assert "ai-audit/*/bin/ai-audit" in claude_check or "*/ai-audit/*/bin/ai-audit" in claude_check
+src = pathlib.Path("$PLUGIN")
+home = pathlib.Path(tempfile.mkdtemp(prefix="ai-audit-r12-layout."))
+try:
+    # Claude: cache/<marketplace>/ai-audit/<version>/…
+    ver = home / ".claude" / "plugins" / "cache" / "scottgrayson-plugins" / "ai-audit" / "0.1.0"
+    shutil.copytree(src, ver)
+    script = "HOME=%r\nexport HOME\nunset AI_AUDIT PLUGIN\n%s\necho AI_AUDIT=\$AI_AUDIT\n" % (str(home), claude_check)
+    proc = subprocess.run(["bash", "--norc", "-c", script], capture_output=True, text=True)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert "PASS Claude install paths" in out, out
+    assert "FAIL Claude" not in out, out
+    assert "/0.1.0" in out, out
+    assert "AI_AUDIT=" in out and "bin/ai-audit" in out.split("AI_AUDIT=")[-1], out
+    # Cursor versioned cache fallback (no local)
+    cver = home / ".cursor" / "plugins" / "cache" / "mp" / "ai-audit" / "1.2.3"
+    shutil.copytree(src, cver)
+    script_c = "HOME=%r\nexport HOME\nunset AI_AUDIT PLUGIN\n%s\necho AI_AUDIT=\$AI_AUDIT\n" % (str(home), cursor_check)
+    proc_c = subprocess.run(["bash", "--norc", "-c", script_c], capture_output=True, text=True)
+    out_c = (proc_c.stdout or "") + (proc_c.stderr or "")
+    assert "PASS Cursor install paths" in out_c, out_c
+    assert "/1.2.3" in out_c or "local/ai-audit" in out_c, out_c
+finally:
+    shutil.rmtree(home)
+PY
+
+# R2 + N4 leftovers: table-driven redact vs keep
+py_check "redact table-driven short secrets + keep prose" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.common import redact_secrets
+
+REDACT = [
+    "password=hunter2",
+    "db password=FakePw99",
+    "password=correct-horse-battery-staple",
+    "DB_PASSWORD=short1",
+    "DB_PASSWORD=EnvFakePw12345",
+    "TOKEN=FakeTok99",
+    "token: FakeTok12345",
+    "SECRET=shortFake1",
+    "API_KEY=abc123def",
+    "GITHUB_TOKEN=ghfake",
+    "pass=FakePass12345",
+    "passphrase: FakePhrase123",
+    "credentials: FakeCred12345",
+    "x-api-key: FakeHdr12345678",
+    "MYSQL_PWD=FakeMy123",
+    'password: "FakeQuoted123"',
+    "password: Hunter2!",
+    "password: FakeQuoted123",
+]
+KEEP = [
+    "Key: use pnpm not npm",
+    "API key: stored in 1Password",
+    "primary_key: user_id",
+    "sort_key: created_at",
+    "cache_key: v2-node20",
+    "MAX_TOKEN=4096",
+    "pwd: /Users/x",
+    "password: none needed",
+    "token: claude-sonnet-4-5",
+    "token: gpt-4o-mini-2024",
+    "token: grok-2",
+    "token: gemini-1.5-pro",
+    "token: o1-preview",
+    "Basic authentication is disabled",
+    "Use Bearer authentication for the API",
+    "password=" + chr(36) + "{DB_PASSWORD}",
+    "password=" + chr(36) + "TOKEN",
+    "token=<redacted>",
+    "secret=***",
+    "API_KEY=changeme",
+]
+for raw in REDACT:
+    got = redact_secrets(raw)
+    assert "REDACTED" in got, (raw, got)
+    # original secret fragment should not remain as a bare value after =
+    assert got != raw, (raw, got)
+for raw in KEEP:
+    got = redact_secrets(raw)
+    assert got == raw, (raw, got)
+# Bearer/Basic with credentials still redact
+assert "opaqueTokenValue99XYZ" not in redact_secrets("Authorization: Bearer opaqueTokenValue99XYZ")
+assert "dXNlcjpwYXNzMTIzNDU2" not in redact_secrets("Authorization: Basic dXNlcjpwYXNzMTIzNDU2")
+PY
+
+# R3: step-4 checks FAIL when AI_AUDIT unset
+py_check "HUMAN-TEST step4 FAIL when AI_AUDIT unset" <<PY
+import pathlib, re, subprocess, tempfile
+ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
+blocks = re.findall(r"\`\`\`(?:bash|sh|zsh)\n(.*?)\`\`\`", ht, flags=re.DOTALL)
+secret_block = next(b for b in blocks if "PASS secrets json redacted" in b)
+csv_block = next(b for b in blocks if "PASS bad csv exit non-zero" in b)
+for name, block in (("secrets", secret_block), ("csv", csv_block)):
+    assert "AI_AUDIT unset or missing" in block
+    assert "-f" in block and "AI_AUDIT" in block
+    script = "unset AI_AUDIT PLUGIN\nHOME=/tmp\nexport HOME\n%s\n" % block
+    proc = subprocess.run(["bash", "--norc", "-c", script], capture_output=True, text=True)
+    out = proc.stdout or ""
+    assert "FAIL AI_AUDIT unset or missing" in out, (name, out)
+    assert "PASS secrets" not in out and "PASS bad csv" not in out and "PASS crsr_" not in out, (name, out)
 PY
 
 echo "== public-repo clean =="

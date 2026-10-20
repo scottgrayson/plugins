@@ -48,30 +48,38 @@ SECRET_JSON_KEYS = frozenset(
     }
 )
 
-# Label/env names that redact only when the value looks secret-shaped.
-_CONDITIONAL_KV_NAMES = frozenset(
+# Secret-ish assignment names (NAME=value always redacts; label: uses digit/quoted/prefix rules).
+# No bare KEY / primary_key / sort_key / cache_key (avoids Key: / *_key: prose FPs).
+_SECRET_NAME_EXACT = frozenset(
     {
         "password",
         "passwd",
-        "secret",
-        "token",
-        "api_key",
-        "api-key",
         "pass",
         "passphrase",
+        "pwd",
+        "token",
+        "secret",
+        "api_key",
+        "api-key",
+        "access_key",
+        "private_key",
         "credentials",
         "x-api-key",
         "x_api_key",
+        "db_pass",
+        "mysql_pwd",
     }
 )
-
-# Env-style names: PASSWORD/PASSWD/TOKEN/SECRET, or *_API_KEY/*_SECRET_KEY/*_ACCESS_KEY/PRIVATE_KEY.
-# No bare KEY / *_KEY (avoids Key:/primary_key:/MAX_TOKEN= false positives). No pwd.
-_ENV_SECRET_NAME_RE = re.compile(
-    r"(?i)^(?:[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET)|"
-    r"[A-Za-z_][A-Za-z0-9_]*(?:_API_KEY|_SECRET_KEY|_ACCESS_KEY)|"
-    r"PRIVATE_KEY|DB_PASS|MYSQL_PWD)$"
+_SECRET_NAME_SUFFIX_RE = re.compile(
+    r"(?i)(?:PASSWORD|PASSWD|TOKEN|SECRET|_API_KEY|_SECRET_KEY|_ACCESS_KEY|"
+    r"_PRIVATE_KEY|_PWD)$"
 )
+# MAX_/MIN_/LIMIT_/DEFAULT_… with a purely numeric value — keep (e.g. MAX_TOKEN=4096).
+_MAX_LIMIT_NAME_RE = re.compile(r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT)_[A-Za-z0-9_]+$")
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"(?i)^(?:\$\{[^}]+\}$|\$[A-Za-z_][A-Za-z0-9_]*$|<[^>]+>$|\*{3,}$|x{3,}$|changeme)$"
+)
+_MODEL_NAME_RE = re.compile(r"(?i)^(?:claude-|gpt-|grok-|gemini-|o1|o3)")
 # key=value / key: value — value may be single- or double-quoted (incl. spaces)
 _KV_ASSIGN_RE = re.compile(
     r"(?i)\b([A-Za-z_][A-Za-z0-9_-]*)\s*([=:])\s*"
@@ -129,19 +137,14 @@ _SECRET_TOKEN_RES = (
         ),
         "https://hooks.slack.com/services/…REDACTED",
     ),
-    # Bearer JWT (header.payload.sig) then opaque Bearer / Basic
-    (
-        re.compile(
-            r"(?i)\bBearer\s+eyJ[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+){2,}"
-        ),
-        "Bearer …REDACTED",
-    ),
-    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.=+/]{8,}"), "Bearer …REDACTED"),
-    (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}"), "Basic …REDACTED"),
+    # Bare JWT (header.payload.sig). Bearer/Basic handled in redact_secrets with credential check.
     (
         re.compile(r"\beyJ[A-Za-z0-9_\-]+=*(?:\.[A-Za-z0-9_\-]+=*){2,}\b"),
         "eyJ…REDACTED",
     ),
+)
+_BEARER_BASIC_RE = re.compile(
+    r"(?i)\b(Bearer|Basic)\s+([A-Za-z0-9_\-\.=+/]{4,})"
 )
 # Bare 40-char AWS secret access key shape (base64-ish). Only applied with context.
 _AWS_SECRET_RE = re.compile(
@@ -183,44 +186,89 @@ _KNOWN_SECRET_PREFIX_RE = re.compile(
     r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|github_pat_|glpat-|npm_|whsec_|"
     r"xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)"
 )
-# Model / kebab ids like claude-sonnet-4-5, gpt-4o-mini-2024 — not secrets.
-_KEBAB_MODEL_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9.]+)+$")
+
+
+def _is_placeholder_value(value: str) -> bool:
+    v = _strip_value_quotes(value).strip()
+    if not v:
+        return True
+    return bool(_PLACEHOLDER_VALUE_RE.match(v))
+
+
+def _is_secret_assignment_name(name: str) -> bool:
+    """True for password/token/secret/api_key/… names (not bare key / primary_key)."""
+    n = name.lower().replace("-", "_")
+    if n in _SECRET_NAME_EXACT:
+        return True
+    # Hyphenated header form
+    if name.lower() in _SECRET_NAME_EXACT:
+        return True
+    if _SECRET_NAME_SUFFIX_RE.search(name):
+        # Reject bare KEY / *_key that are not api/secret/access/private
+        if re.search(r"(?i)_key$", name) and not re.search(
+            r"(?i)(?:api_key|secret_key|access_key|private_key)$", name
+        ):
+            return False
+        return True
+    return False
+
+
+def _auth_token_looks_credential(tok: str) -> bool:
+    """Bearer/Basic follow-on: base64-ish, has a digit, 16+ mixed, or known prefix."""
+    if not tok or tok.lower() in {"authentication", "auth", "token", "header", "scheme"}:
+        return False
+    if _KNOWN_SECRET_PREFIX_RE.match(tok) or tok.startswith("eyJ"):
+        return True
+    if re.search(r"\d", tok):
+        return True
+    if re.search(r"[+/=]", tok):  # base64 alphabet extras
+        return True
+    if len(tok) >= 16 and re.search(r"[A-Za-z]", tok) and re.search(r"[0-9]", tok):
+        return True
+    # Long base64-looking (mixed case) without requiring a digit
+    if (
+        len(tok) >= 16
+        and re.fullmatch(r"[A-Za-z0-9+/=]+", tok)
+        and re.search(r"[A-Z]", tok)
+        and re.search(r"[a-z]", tok)
+    ):
+        return True
+    return False
 
 
 def looks_like_secret_value(value: str) -> bool:
-    """True when a label value looks like a credential (not ordinary prose / model ids)."""
+    """Label-form value: no spaces + (digit or quoted or known prefix); not model ids."""
     raw = (value or "").strip()
+    if not raw or _is_placeholder_value(raw):
+        return False
     quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"')
-    v = _strip_value_quotes(value).strip()
+    v = _strip_value_quotes(raw).strip()
     if not v:
         return False
-    # Quoted multi-word passwords (spaces inside quotes) still count
+    if _MODEL_NAME_RE.match(v):
+        return False
+    if quoted:
+        return True
     if " " in v or "\t" in v:
-        return quoted and len(v) >= 8
+        return False
     if _KNOWN_SECRET_PREFIX_RE.match(v):
         return True
-    # Opaque token: 16+ chars, letters+digits, no spaces; exclude kebab model names
-    if len(v) >= 16 and re.search(r"[A-Za-z]", v) and re.search(r"[0-9]", v):
-        if _KEBAB_MODEL_RE.match(v):
-            return False
+    if re.search(r"\d", v):
         return True
     return False
 
 
-def _kv_should_redact(name: str, value: str) -> bool:
-    n = name.lower().replace("-", "_")
-    if n in _CONDITIONAL_KV_NAMES or n.endswith("_password") or n.endswith("_passwd"):
-        return looks_like_secret_value(value)
-    if _ENV_SECRET_NAME_RE.match(name):
-        v = _strip_value_quotes(value).strip()
-        if not v:
-            return False
-        # Env KEY=value: treat long non-prose values as secrets (digits optional)
-        if " " not in v and "\t" not in v and len(v) >= 12 and re.search(r"[A-Za-z]", v):
-            if not _KEBAB_MODEL_RE.match(v):
-                return True
-        return looks_like_secret_value(value)
-    return False
+def _kv_should_redact(name: str, sep: str, value: str) -> bool:
+    if not _is_secret_assignment_name(name):
+        return False
+    # MAX_TOKEN=4096 / LIMIT_*=N — keep purely numeric config knobs
+    if _MAX_LIMIT_NAME_RE.match(name) and _strip_value_quotes(value).strip().isdigit():
+        return False
+    if sep == "=":
+        # NAME=value: always redact unless empty / placeholder
+        return not _is_placeholder_value(value)
+    # label: value — digit / quoted / known prefix; plain English stays
+    return looks_like_secret_value(value)
 
 
 _PATH_WORD_RE = re.compile(
@@ -289,14 +337,23 @@ def redact_secrets(text: str) -> str:
 
     out = _JSON_SECRET_RE.sub(_json_sub, out)
 
-    # key=value / key: value — only when the value looks secret-shaped
+    # key=value (always for secret names) / key: value (digit/quoted/prefix)
     def _kv_sub(m: re.Match[str]) -> str:
         name, sep, value = m.group(1), m.group(2), m.group(3)
-        if _kv_should_redact(name, value):
+        if _kv_should_redact(name, sep, value):
             return f"{name}{sep}…REDACTED"
         return m.group(0)
 
     out = _KV_ASSIGN_RE.sub(_kv_sub, out)
+
+    # Bearer/Basic only when the follow-on token looks like a credential
+    def _auth_sub(m: re.Match[str]) -> str:
+        kind, tok = m.group(1), m.group(2)
+        if _auth_token_looks_credential(tok):
+            return f"{kind} …REDACTED"
+        return m.group(0)
+
+    out = _BEARER_BASIC_RE.sub(_auth_sub, out)
 
     for rx, repl in _SECRET_TOKEN_RES:
         out = rx.sub(repl, out)
