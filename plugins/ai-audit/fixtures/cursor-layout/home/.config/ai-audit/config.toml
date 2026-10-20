@@ -1,0 +1,2 @@
+# Stale-name list for the fixture (public plugin default is empty).
+stale_names = ["agent-environment", "ai-plugins"]

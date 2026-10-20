@@ -19,7 +19,10 @@ from .detect import Roots
 # Severity sort key (lower = first).
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 
-DEFAULT_STALE_NAMES: tuple[str, ...] = ("agent-environment", "ai-plugins")
+# The public plugin ships no stale names. Set AI_AUDIT_STALE_NAMES (comma-separated)
+# or `stale_names = ["a", "b"]` in ~/.config/ai-audit/config.toml.
+DEFAULT_STALE_NAMES: tuple[str, ...] = ()
+STALE_NAMES_ENV = "AI_AUDIT_STALE_NAMES"
 
 # Cursor .mdc front-matter keys we recognise.
 _MDC_KNOWN_KEYS = frozenset(
@@ -34,15 +37,46 @@ _MDC_KNOWN_KEYS = frozenset(
 )
 
 _TRIGGER_RE = re.compile(
-    r"(?i)\b(?:when|use when|use for|apply when)\b"
+    r"(?i)\b(?:when|whenever|use when|use for|apply when|apply to|apply before|"
+    r"apply after|use this skill to|use this skill when|use to)\b"
 )
 
-# @file / @path style includes and bare path-looking tokens in rules/skills.
+_FILE_EXTS = frozenset(
+    "md mdc txt rst json jsonc yaml yml toml ini cfg conf env py js mjs cjs ts tsx jsx "
+    "sh bash zsh rb go rs java kt swift c h cpp hpp cs php sql html htm css scss xml "
+    "csv tsv log pdf png jpg jpeg gif svg lock gradle tf ipynb".split()
+)
+_DOMAIN_TLDS = "com|org|net|io|dev|ai|app|co|edu|gov|xyz|cloud|tech|info|biz"
+
+# Spans that are never file references: URLs, e-mail, bare domains, and any
+# whitespace-delimited token holding a template placeholder (<name>, ${X}, {var},
+# {{x}}, $VAR, %VAR%).
+_MASK_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]{1,20}://[^\s<>\"'`]*|\bmailto:\S+")
+_MASK_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_MASK_DOMAIN_RE = re.compile(
+    r"(?i)(?<![\w./~@-])(?:[a-z0-9][a-z0-9-]*\.)+(?:%s)(?![\w-])"
+    r"(?:[/:][^\s`'\"<>)\]]*)?" % _DOMAIN_TLDS
+)
+_PLACEHOLDER = (
+    r"(?:<[^<>\n]{0,80}>|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{[^{}\n]*\}|"
+    r"\$[A-Za-z_]\w*|%[A-Za-z_]+%)"
+)
+_PLAIN = r"[^\s`'\"()<>{}$%]"
+_MASK_PLACEHOLDER_RE = re.compile(rf"(?:{_PLAIN}*{_PLACEHOLDER})+{_PLAIN}*")
+# Example paths: path/to/x, your-file.md, example.md, .../x, foo/bar.
+_PLACEHOLDER_PATH_RE = re.compile(
+    r"(?i)(?:^|/)(?:path/to|your[-_]|my[-_]|example|sample|foo|bar|baz|xxx+|"
+    r"file(?:name)?\.\w+|name\.\w+|\.\.\.)"
+)
+
+# @file / @path style includes. The @ must start a token (not e-mail / @scope/pkg).
 _AT_FILE_RE = re.compile(
-    r"(?i)@(?:file|path|include)?\s*[`'\"]?([^\s`'\"]+\.[A-Za-z0-9]+)[`'\"]?"
+    r"(?i)(?<![\w@./:+-])@(?:(?:file|path|include)\s+)?[`'\"]?"
+    r"((?:\./|\.\./|~/|/)?[\w.\-/]+\.[A-Za-z][A-Za-z0-9]{0,7})(?![\w/@-])"
 )
 _PATH_REF_RE = re.compile(
-    r"(?i)(?<![\w/])((?:\./|\.\./|~/|/)[^\s`'\"]+\.[A-Za-z0-9]+)(?![\w/])"
+    r"(?i)(?<![\w/.@-])((?:\./|\.\./|~/|/)[^\s`'\"<>()\[\]{}|,;*]+"
+    r"\.[A-Za-z][A-Za-z0-9]{0,7})(?![\w/-])"
 )
 # skill/rule name references: quoted/backticked, or kebab-case (avoids
 # prose like "skill descriptions").
@@ -88,6 +122,24 @@ def _short(path: Path, home: Path, project: Path | None = None) -> str:
     return str(path).replace("\\", "/")
 
 
+def _mask_non_refs(text: str) -> str:
+    """Blank (same length, newlines kept) spans that can never be file references."""
+
+    def blank(m: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    for rx in (_MASK_URL_RE, _MASK_EMAIL_RE, _MASK_DOMAIN_RE, _MASK_PLACEHOLDER_RE):
+        text = rx.sub(blank, text)
+    return text
+
+
+def _looks_like_file_ref(ref: str) -> bool:
+    if "://" in ref or "*" in ref or _PLACEHOLDER_PATH_RE.search(ref):
+        return False
+    ext = ref.rsplit(".", 1)[-1].lower()
+    return ext in _FILE_EXTS
+
+
 def _line_at(text: str, offset: int) -> int:
     return text.count("\n", 0, max(0, offset)) + 1
 
@@ -97,63 +149,39 @@ def _content_hash(text: str) -> str:
 
 
 def _iter_skill_files(roots: Roots) -> list[Path]:
-    """User/project skills plus enabled plugin skills (same set as startup report)."""
+    """Same skill set the startup context table lists (user, project, all plugin shapes)."""
     # Lazy import avoids circular import with cursor_startup → quality_checks.
-    from .cursor_startup import (
-        _claude_plugin_skill_roots,
-        _plugin_skill_roots,
-        _read_enabled_plugin_map,
-    )
+    from .cursor_startup import _iter_skill_mds, _skill_roots
 
-    home = roots.home
-    cursor_home = roots.cursor_home or (home / ".cursor")
-    project = roots.project
-    enabled_map = _read_enabled_plugin_map(roots)
-    dirs: list[Path] = [
-        cursor_home / "skills",
-        project / ".cursor" / "skills",
-        home / ".claude" / "skills",
-        project / ".claude" / "skills",
-    ]
-    for skills_dir, _label in _plugin_skill_roots(cursor_home, enabled_map=enabled_map):
-        dirs.append(skills_dir)
-    for skills_dir, _label in _claude_plugin_skill_roots(home):
-        dirs.append(skills_dir)
     out: list[Path] = []
     seen: set[str] = set()
-    for d in dirs:
-        if not d.is_dir() and not d.is_symlink():
-            continue
-        try:
-            for skill_md in d.rglob("SKILL.md"):
-                try:
-                    key = str(skill_md.resolve())
-                except OSError:
-                    key = str(skill_md)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(skill_md)
-        except OSError:
-            continue
+    for skills_dir, _label, _state in _skill_roots(roots):
+        for skill_md in _iter_skill_mds(skills_dir):
+            try:
+                key = str(skill_md.resolve())
+            except OSError:
+                key = str(skill_md)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(skill_md)
     return out
 
 
 def _iter_rule_files(roots: Roots) -> list[Path]:
-    """User/project rules plus enabled plugin .mdc rules."""
-    from .cursor_startup import _active_plugin_roots, _plugin_rel_dir, _read_enabled_plugin_map
+    """User/project rules plus Cursor and Claude plugin .mdc rules."""
+    from .cursor_startup import _active_plugin_roots, _claude_plugin_roots, _plugin_rel_dir
 
     home = roots.home
     cursor_home = roots.cursor_home or (home / ".cursor")
     project = roots.project
-    enabled_map = _read_enabled_plugin_map(roots)
     dirs: list[Path] = [
         project / ".cursor" / "rules",
         cursor_home / "rules",
         project / ".claude" / "rules",
         home / ".claude" / "rules",
     ]
-    for plugin_root in _active_plugin_roots(cursor_home, enabled_map=enabled_map):
+    for plugin_root in _active_plugin_roots(cursor_home):
         rules = _plugin_rel_dir(plugin_root, "rules", "rules")
         if rules is not None:
             dirs.append(rules)
@@ -161,6 +189,9 @@ def _iter_rule_files(roots: Roots) -> list[Path]:
         nested = plugin_root / "cursor" / "rules"
         if nested.is_dir():
             dirs.append(nested)
+    for plugin_root, _state in _claude_plugin_roots(home):
+        if (plugin_root / "rules").is_dir():
+            dirs.append(plugin_root / "rules")
     out: list[Path] = []
     seen: set[str] = set()
     for d in dirs:
@@ -240,11 +271,11 @@ def check_broken_references(
             body_offset = 0
         base = path.parent
         src = _short(path, home, project)
+        scan = _mask_non_refs(scan)
         for rx in (_AT_FILE_RE, _PATH_REF_RE):
             for m in rx.finditer(scan):
                 ref = m.group(1)
-                # Skip URLs and glob-like fragments
-                if "://" in ref or "*" in ref:
+                if not _looks_like_file_ref(ref):
                     continue
                 cand = Path(ref)
                 if not cand.is_absolute():
@@ -472,7 +503,7 @@ def check_skill_descriptions(
                     check="skill_description",
                     finding=(
                         f"{src}:{desc_line}: skill description has no trigger "
-                        f"wording (when/use when/use for/apply when)"
+                        f"wording (when/whenever/use when/use for/apply to/use this skill to)"
                     ),
                     source=src,
                     severity="low",
@@ -572,10 +603,40 @@ def check_same_name_drift(
     return findings
 
 
+def _config_stale_names(config_path: Path) -> list[str]:
+    """`stale_names = [...]` (top level or [checks]) from a TOML file; [] if absent."""
+    text = safe_read_text(config_path)
+    if not text:
+        return []
+    try:
+        import tomllib
+
+        data = tomllib.loads(text)
+    except ImportError:  # Python < 3.11: one-line array fallback
+        m = re.search(r"(?m)^\s*stale_names\s*=\s*\[(.*?)\]", text, re.DOTALL)
+        return re.findall(r"[\"']([^\"']+)[\"']", m.group(1)) if m else []
+    except ValueError:
+        return []
+    val = data.get("stale_names")
+    if val is None and isinstance(data.get("checks"), dict):
+        val = data["checks"].get("stale_names")
+    return [str(v) for v in val] if isinstance(val, list) else []
+
+
+def load_stale_names(roots: Optional[Roots] = None) -> tuple[str, ...]:
+    """Stale names from AI_AUDIT_STALE_NAMES (comma-separated) and config.toml."""
+    names: list[str] = []
+    env = os.environ.get(STALE_NAMES_ENV, "")
+    names.extend(n.strip() for n in env.split(",") if n.strip())
+    home = roots.home if roots is not None else Path.home()
+    names.extend(_config_stale_names(home / ".config" / "ai-audit" / "config.toml"))
+    return tuple(dict.fromkeys(names))
+
+
 def check_stale_names(
     roots: Roots,
     *,
-    stale_names: Sequence[str] = DEFAULT_STALE_NAMES,
+    stale_names: Optional[Sequence[str]] = None,
     skill_files: Optional[Sequence[Path]] = None,
     rule_files: Optional[Sequence[Path]] = None,
 ) -> list[CheckFinding]:
@@ -585,6 +646,8 @@ def check_stale_names(
     skills = list(skill_files) if skill_files is not None else _iter_skill_files(roots)
     rules = list(rule_files) if rule_files is not None else _iter_rule_files(roots)
     findings: list[CheckFinding] = []
+    if stale_names is None:
+        stale_names = load_stale_names(roots)
     if not stale_names:
         return findings
     # Whole-word, case-insensitive
@@ -729,7 +792,7 @@ _FRONT_OPEN = re.compile(r"\A---\s*\n(.*?)(?:\n---\s*(?:\n|$))", re.DOTALL)
 def run_quality_checks(
     roots: Roots,
     *,
-    stale_names: Sequence[str] = DEFAULT_STALE_NAMES,
+    stale_names: Optional[Sequence[str]] = None,
 ) -> list[dict[str, Any]]:
     """Run all checks; return findings sorted by severity then check then finding."""
     skills = _iter_skill_files(roots)

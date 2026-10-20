@@ -95,6 +95,17 @@ def _checks_markdown(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _per_prompt_line(payload: dict[str, Any]) -> list[str]:
+    n = int(payload.get("per_prompt_tokens") or 0)
+    if "Per prompt" not in (payload.get("groups") or []):
+        return []
+    return [
+        f"Per-prompt hooks add **{n:,}** tokens on every prompt. They are listed "
+        "under **Per prompt** and are not part of the startup total.",
+        "",
+    ]
+
+
 def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
     heading = _env_heading(payload)
     tokenizer = payload.get("tokenizer") or "tiktoken o200k_base"
@@ -112,6 +123,7 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
         f"**{total_1m:,}** on a 1M model. "
         f"Sort window: **{window}**.",
         "",
+        *_per_prompt_line(payload),
         f"Tokenizer: **{tokenizer}** (offline, vendored).",
         "",
         "Legend: **Item**, **Tokens**, **Description**, and **Source** are "
@@ -129,11 +141,13 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
         sub_1m = int(sub.get("tokens_1m") or 0)
         if group == "Skill descriptions":
             lines.append(f"### {group} · subtotal {sub_200:,} ({sub_1m:,})")
+        elif group == "Per prompt":
+            lines.append(f"### {group} · {sub_200:,} per prompt (not in startup total)")
         else:
             lines.append(f"### {group} · subtotal {sub_200:,}")
         lines.append("")
-        lines.append("| Item | Tokens | Description | Source |")
-        lines.append("|---|---:|---|---|")
+        lines.append("| Item | Tokens | Description | Source | Enabled |")
+        lines.append("|---|---:|---|---|---|")
         for r in grow:
             item = str(r.get("item") or "").replace("|", "\\|")
             t200 = int(r.get("tokens") or 0)
@@ -144,9 +158,10 @@ def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
                 tok_cell = str(t200)
             desc = str(r.get("description") or "").replace("|", "\\|")
             source = str(r.get("source") or "").replace("|", "\\|")
-            lines.append(f"| {item} | {tok_cell} | {desc} | {source} |")
+            enabled = str(r.get("enabled") or "yes")
+            lines.append(f"| {item} | {tok_cell} | {desc} | {source} | {enabled} |")
         if not grow:
-            lines.append("| _(none)_ | 0 |  |  |")
+            lines.append("| _(none)_ | 0 |  |  |  |")
         lines.append("")
 
     lines.extend(_checks_markdown(payload))
@@ -171,6 +186,12 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
         ]
         lines.extend(_one_section_markdown(payload))
 
+    keys: list[str] = []
+    for sec in (payload.get("sections") or [payload]):
+        for k in sec.get("state_vscdb_keys") or []:
+            if k not in keys:
+                keys.append(k)
+    key_list = ", ".join(f"`{k}`" for k in keys) if keys else "none (no state.vscdb found)"
     lines.extend(
         [
             "## Notes",
@@ -178,6 +199,12 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
             "- Read-only: no files were changed; MCP servers were not launched.",
             "- User Rules: only `aicontext.personalContext` is read from "
             "`state.vscdb` via SQLite `mode=ro` (exact-key query; no copy).",
+            f"- state.vscdb keys read (read-only): {key_list}.",
+            "- Enabled column: `yes`/`no` for Cursor plugins comes from the "
+            "`cursor.plugins.installedIds.*` keys, whose format is unverified, so "
+            "no plugin is excluded or discounted because of it; `unknown` means no "
+            "key matched. Claude Code plugins use `enabledPlugins` in settings.json. "
+            "Everything else is `yes` (present on disk).",
             "- Secret-shaped values in notes/meta were redacted.",
             "- Facts only: do not invent Purpose/suggestion columns.",
             "- Checks: deterministic findings only — report verbatim, no judgement.",

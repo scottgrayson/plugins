@@ -15,6 +15,17 @@
 - Shared assignment redaction (rounds 16–19): whole-value after secret-like name + separator; `-p` keep cases for hyphenated names/ports; i18n password names; quoted trailing words; zero-width strip. Inventory filesystem paths are never rewritten.
 - Context audit: bounded project scan; skips plugin cache/marketplace trees and this plugin's fixtures; dedupes resolved paths; does not treat `~` as a project tree.
 - Nested package `.claude/skills` marked on-demand. Enabled plugin skills from `enabledPlugins` + `installed_plugins.json`.
+- **Round 20:**
+  - `broken_references` skips URLs, bare domains, e-mail, template tokens (`<name>`, `${X}`, `{var}`, `$VAR`) and example paths (`path/to/x`, `.../x`); it flags only relative, absolute and `~` paths and `@file` includes with a real file extension.
+  - MCP rows match `mcp.json` and plugin server names to synced descriptor folders (`user-<name>`, `plugin-<plugin>-<server>`) before flagging `failed-to-start-or-empty`. `duplicate servers` needs two distinct folders for one server.
+  - Plugin discovery covers flat `cache/<market>/<plugin>/`, `cache/<market>-ai-skills/<sha>/plugins/<name>/` (marketplace `pluginRoot`) and Claude `cache/<market>/<plugin>/<semver>/`. The context table and Checks share one discovered set.
+  - `UserPromptSubmit` hooks move to a **Per prompt** group outside the startup total. Hook rows use the plugin name, and each `hooks.json` is read once.
+  - Redaction keeps kebab names that start with a secret word (`token-budget`, `secret-scanning`) and prose such as `auth,`. Added `Kennwort`, `senha`, `パスワード`.
+  - Grok Bot cloud needs two of `SAND_BOX_TENANT_ID`, `SAND_BOX_STORE_ID`, `SAND_BOX_BOOT_ID`, `/home/box/agent-data`. A bare `/home/box` no longer counts.
+  - Trigger check also accepts `whenever`, `apply to/before/after`, `use this skill to/when`, `use to`.
+  - Stale names default to empty. Set `AI_AUDIT_STALE_NAMES` (comma-separated) or `stale_names = [...]` in `~/.config/ai-audit/config.toml`.
+  - Plugins are never excluded because of `state.vscdb` (format unverified). The report has an **Enabled** column (`yes`/`no`/`unknown`) and its notes list every `state.vscdb` key read.
+  - The skills wrapper row now holds only the fixed `<agent_skills>` text. Skills the 200k budget omits are listed as their own rows, so the 1M column is itemised.
 - **Later stages (not in this release):** token usage attribution, facts/memory hygiene.
 - Out of scope: scheduled runs and savings estimates.
 - HUMAN-TEST: Claude / Cursor install, context command, secret check on context output.

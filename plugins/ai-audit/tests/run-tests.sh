@@ -502,6 +502,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-20 (references, MCP, plugin shapes, hooks, redaction) =="
+R20_OUT="$(python3 -B "$PLUGIN/tests/test_round20.py" 2>&1)" && R20_RC=0 || R20_RC=$?
+if [[ $R20_RC -eq 0 ]]; then
+  echo "PASS $R20_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round20 (rc=$R20_RC)"
+  echo "  $R20_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 py_check "HUMAN-TEST secret check FAIL when AI_AUDIT unset" <<PY
 import pathlib, re, subprocess
 ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")

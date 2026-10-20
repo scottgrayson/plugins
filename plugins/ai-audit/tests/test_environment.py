@@ -33,13 +33,13 @@ def test_cursor_cloud_markers() -> None:
     # Bare CURSOR_AGENT alone is not enough (local CLI also sets it).
     # HOSTNAME overridden so this cloud VM does not add hostname=cursor.
     cloud, hits = is_cursor_cloud(
-        {"HOSTNAME": "scotts-macbook", "CURSOR_AGENT": "1"},
+        {"HOSTNAME": "dev-macbook", "CURSOR_AGENT": "1"},
         path_exists=lambda p: False,
     )
     assert cloud is False
     # Single marker is not enough (D4: need >=2)
     cloud, hits = is_cursor_cloud(
-        {"HOSTNAME": "scotts-macbook", "CURSOR_AGENT_WORKER_ID": "w-1"},
+        {"HOSTNAME": "dev-macbook", "CURSOR_AGENT_WORKER_ID": "w-1"},
         path_exists=lambda p: False,
     )
     assert cloud is False
@@ -47,7 +47,7 @@ def test_cursor_cloud_markers() -> None:
     # cloud VM's hostname=cursor does not add a second marker).
     cloud, hits = is_cursor_cloud(
         {
-            "HOSTNAME": "scotts-macbook",
+            "HOSTNAME": "dev-macbook",
             "CURSOR_AGENT_SOCKET": "/Users/scott/.cursor/agent.sock",
             "CURSOR_AGENT_WORKER_ID": "w-1",
         },
@@ -56,7 +56,7 @@ def test_cursor_cloud_markers() -> None:
     assert cloud is False, hits
     cloud, hits = is_cursor_cloud(
         {
-            "HOSTNAME": "scotts-macbook",
+            "HOSTNAME": "dev-macbook",
             "CURSOR_AGENT": "1",
             "CURSOR_AGENT_SOCKET": "/run/cursor/api.sock",
             "CLOUD_AGENT_ALL_SECRET_NAMES": "X",
@@ -69,7 +69,7 @@ def test_cursor_cloud_markers() -> None:
     # Local CLI mode wins
     cloud, hits = is_cursor_cloud(
         {
-            "HOSTNAME": "scotts-macbook",
+            "HOSTNAME": "dev-macbook",
             "CURSOR_AGENT": "1",
             "CURSOR_AGENT_CLI_LOCAL_MODE": "true",
             "CURSOR_AGENT_WORKER_ID": "w-1",
@@ -81,7 +81,7 @@ def test_cursor_cloud_markers() -> None:
     # Falsy values (no/off/0/false) are not markers (D4)
     cloud, hits = is_cursor_cloud(
         {
-            "HOSTNAME": "scotts-macbook",
+            "HOSTNAME": "dev-macbook",
             "CURSOR_AGENT_WORKER_ID": "no",
             "CURSOR_WORKER_POOL_NAME": "false",
             "CLOUD_AGENT_ALL_SECRET_NAMES": "0",

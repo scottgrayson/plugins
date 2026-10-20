@@ -139,7 +139,8 @@ _VALUE_COLON = (
 # / p@ssword / pa$$word / p@ss / p@55word.
 _NAME_ATOM = (
     r"(?:p@ssword|pa\$\$word|p@55word|p@ss|"
-    r"passwort|contrase(?:ñ|n)a|"
+    r"passwort|kennwort|senha|contrase(?:ñ|n)a|"
+    r"パスワード|密码|пароль|"
     r"[A-Za-z_][A-Za-z0-9_-]*"
     r"(?:\[[^\]]*\])*"  # password[] / password[a][b]
     r"(?:\{[^}]*\})*"  # password{prod}
@@ -156,7 +157,8 @@ _NAME_ANY = rf"(?:{_NAME_SPACED}|{_NAME_ATOM})"
 # Unicode colon lookalikes used as separators (∶ U+2236, ꞉ U+A789, ﹕ U+FE55)
 _COLON_SEPS = r"(?::=|：|:|\u2236|\ua789|\ufe55)"
 # Name must not start mid-hyphenated-token (web-pin) or mid-word.
-_NAME_BOUND = r"(?<![\w@$-])"
+# ASCII-only so CJK text without spaces ("あなたのパスワード: x") still matches.
+_NAME_BOUND = r"(?<![A-Za-z0-9_@$-])"
 # name= / name: / name:= / name： starters
 _ASSIGN_EQ_START_RE = re.compile(
     rf"(?i){_NAME_BOUND}({_NAME_ANY})\s*=\s*"
@@ -215,11 +217,18 @@ _NAME_IS_VALUE_RE = re.compile(
     rf"(?i)\b({_NAME_ANY}|auth|authorization|cookie|session|credential|credentials|"
     r"bearer|passphrase|token|secret)\s+is\s*:?\s+"
 )
-# "password - value" / "token → value" / "secret -> value" / "password; value" / "password, value"
+# "password - value" / "token → value" / "secret -> value": spaced separators only,
+# so kebab names (token-budget, secret-scanning) are never split on the hyphen.
 _ASSIGN_DASH_ARROW_RE = re.compile(
     rf"(?i)(?<![A-Za-z0-9_@])({_NAME_ANY}|auth|authorization|cookie|session|"
     r"credential|credentials|bearer|passphrase|token|secret)"
-    r"\s*(?:-|→|->|;|,)\s*"
+    r"(?:\s*(?:→|->)\s*|\s+-\s+)"
+)
+# "password; value" / "password, value": only for strong password-family words.
+# Weak words in prose ("auth, then", "token, is", "pass.") are not assignments.
+_ASSIGN_COMMA_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_@-])(password|passwd|passphrase|passcode|pwd|"
+    r"kennwort|senha|パスワード|密码|пароль)\s*[;,]\s*"
 )
 # Whitespace form only for password/passwd: "passwd dragon"
 _ASSIGN_PASSWORD_WS_RE = re.compile(
@@ -369,6 +378,16 @@ def _norm_name(name: str) -> str:
     return s.replace("-", "_").lower()
 
 
+_KEBAB_LEAD_WORDS = frozenset(
+    {"token", "secret", "auth", "session", "pass", "password", "passwd", "cookie",
+     "credential", "credentials", "pin", "pw", "pwd"}
+)
+_KEBAB_TAIL_WORDS = frozenset(
+    {"password", "passwd", "pass", "pwd", "token", "secret", "key", "credential",
+     "credentials", "passphrase", "passcode", "id"}
+)
+
+
 def is_secret_name(name: str) -> bool:
     """Classify assignment/header/flag name as secret-ish."""
     if not name:
@@ -387,6 +406,11 @@ def is_secret_name(name: str) -> bool:
         "contraseña",
         "contrasena",
         "passwort",
+        "kennwort",
+        "senha",
+        "パスワード",
+        "密码",
+        "пароль",
     }:
         return True
     if raw.lower() in {
@@ -405,6 +429,12 @@ def is_secret_name(name: str) -> bool:
     n = _norm_name(bare)
     if n in _SECRET_NAME_EXACT:
         return True
+    # Lowercase kebab names that merely start with a secret word are skill/rule
+    # names (token-budget, secret-scanning, auth-flow), not credential names.
+    if re.fullmatch(r"[a-z]+(?:-[a-z]+)+", bare):
+        words = bare.split("-")
+        if words[0] in _KEBAB_LEAD_WORDS and words[-1] not in _KEBAB_TAIL_WORDS:
+            return False
     # Compound names without underscore: DBPASS, mypwd, userpass (not compass/bypass)
     if n in {"dbpass", "mypwd", "userpass", "mysqlpwd", "passwort"} or (
         len(n) >= 5 and n.endswith("pwd")
@@ -838,6 +868,11 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
     for m in _ASSIGN_DASH_ARROW_RE.finditer(text):
         name = m.group(1)
         hit = _hit_from_name_sep(text, m.start(), name, m.end(), "dash")
+        if hit:
+            hits.append(hit)
+
+    for m in _ASSIGN_COMMA_RE.finditer(text):
+        hit = _hit_from_name_sep(text, m.start(), m.group(1), m.end(), "dash")
         if hit:
             hits.append(hit)
 

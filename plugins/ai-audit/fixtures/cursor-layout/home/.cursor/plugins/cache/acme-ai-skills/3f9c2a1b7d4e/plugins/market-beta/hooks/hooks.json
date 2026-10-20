@@ -1,0 +1,1 @@
+{"hooks": {"UserPromptSubmit": [{"additionalContext": "Per-prompt reminder from the beta plugin."}], "SessionStart": [{"additionalContext": "Startup note from the beta plugin."}]}}

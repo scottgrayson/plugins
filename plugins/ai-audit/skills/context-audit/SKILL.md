@@ -46,7 +46,7 @@ Show the markdown report to the user.
 
 ### Report is facts only (Cursor grouped table)
 
-The script fills **Item**, **Tokens**, **Description** (quoted/truncated from the file, redacted), and **Source** (short path). Below the inventory table, a **Checks** section lists deterministic, token-free findings (`Item | Check | Finding | Source`), sorted by severity. Every finding is a fact with `file:line`.
+The script fills **Item**, **Tokens**, **Description** (quoted/truncated from the file, redacted), **Source** (short path), and **Enabled** (`yes`, `no` or `unknown`; reporting only, nothing is excluded by it). Below the inventory table, a **Checks** section lists deterministic, token-free findings (`Item | Check | Finding | Source`), sorted by severity. Every finding is a fact with `file:line`.
 
 **Do not** add generated text to the inventory table or the Checks table. Do not invent Purpose, AI suggestion, or token numbers. Report check findings **verbatim** — add no judgement. Do not edit files. Pattern hints (vague words, shouting) are not in this release.
 
@@ -57,4 +57,4 @@ The script fills **Item**, **Tokens**, **Description** (quoted/truncated from th
 | Grok connectors (not on disk) | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
 | Claude live breakdown | Paste `/context` output to calibrate |
 
-Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases. User Rules: the CLI reads only `aicontext.personalContext` from `state.vscdb` via SQLite `mode=ro` (no temp copy) — never other keys.
+Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases. User Rules: the CLI reads only `aicontext.personalContext` and the `cursor.plugins.installedIds.*` keys (Enabled column) from `state.vscdb` via SQLite `mode=ro` (no temp copy). The report notes list every key read. Never other keys.

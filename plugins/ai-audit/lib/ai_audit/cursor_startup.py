@@ -62,6 +62,7 @@ class ReportRow:
     description: str = ""  # from file (first line / frontmatter), ~60 chars, redacted
     source: str = ""  # short path e.g. ~/.claude/skills via symlink
     meta: dict[str, Any] = field(default_factory=dict)
+    enabled: str = "yes"  # yes | no | unknown (plugin rows only; reporting, not filtering)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -213,6 +214,53 @@ def _load_plugin_manifest(plugin_root: Path) -> dict[str, Any]:
     return {}
 
 
+_MARKETPLACE_FILES = (
+    ".cursor-plugin/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    "marketplace.json",
+)
+_PLUGIN_MARKER_NAMES = (
+    "skills", "rules", "commands", "agents", "hooks", "hooks.json", "mcp.json", ".mcp.json",
+)
+_HEX_SHA_RE = re.compile(r"(?i)^[0-9a-f]{7,40}$")
+_VERSION_DIR_RE = re.compile(r"(?i)^v?\d+(?:\.\d+){0,3}(?:[-+][\w.]+)?$|^[0-9a-f]{7,40}$")
+
+
+def _load_marketplace(root: Path) -> dict[str, Any]:
+    for rel in _MARKETPLACE_FILES:
+        data = load_json_safe(root / rel)
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _is_plugin_dir(path: Path) -> bool:
+    """A plugin (or marketplace) root: has a manifest, marketplace.json, or content dirs."""
+    if _load_plugin_manifest(path) or _load_marketplace(path):
+        return True
+    return any((path / n).exists() for n in _PLUGIN_MARKER_NAMES)
+
+
+def _plugin_name(root: Path) -> str:
+    """Display name: manifest name, else dir name (version/sha dirs use the parent)."""
+    name = _load_plugin_manifest(root).get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    if _VERSION_DIR_RE.match(root.name) and root.parent.name:
+        return root.parent.name
+    return root.name
+
+
+def _plugin_root_rel(root: Path) -> str:
+    """marketplace pluginRoot (e.g. "plugins") from plugin.json or marketplace.json."""
+    for manifest in (_load_plugin_manifest(root), _load_marketplace(root)):
+        meta = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        rel = meta.get("pluginRoot") or manifest.get("pluginRoot")
+        if isinstance(rel, str) and rel.strip():
+            return rel.strip()
+    return ""
+
+
 def _plugin_rel_dir(plugin_root: Path, key: str, default: str) -> Optional[Path]:
     """Resolve a plugin.json path field (e.g. rules: \"cursor/rules\")."""
     manifest = _load_plugin_manifest(plugin_root)
@@ -226,30 +274,104 @@ def _plugin_rel_dir(plugin_root: Path, key: str, default: str) -> Optional[Path]
 
 
 def _expand_nested_plugins(plugin_root: Path) -> list[Path]:
-    """Include marketplace nested plugins via metadata.pluginRoot."""
+    """Include marketplace sub-plugins under pluginRoot (e.g. <sha>/plugins/<name>/)."""
     out = [plugin_root]
-    manifest = _load_plugin_manifest(plugin_root)
-    meta = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
-    plugin_root_rel = meta.get("pluginRoot") or manifest.get("pluginRoot")
-    if isinstance(plugin_root_rel, str) and plugin_root_rel.strip():
-        nested_root = plugin_root / plugin_root_rel
+    rel = _plugin_root_rel(plugin_root)
+    if rel:
+        nested_root = plugin_root / rel
         if nested_root.is_dir():
             for sub in sorted(nested_root.iterdir(), key=lambda p: p.name):
+                if sub.name.startswith("."):
+                    continue
                 if sub.is_dir() or (sub.is_symlink() and sub.resolve().is_dir()):
                     out.append(sub)
     return out
 
 
-def _read_enabled_plugin_map(roots: Roots) -> dict[str, bool]:
+def _version_key(path: Path) -> tuple[Any, ...]:
+    nums = tuple(int(n) for n in re.findall(r"\d+", path.name)[:4])
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (nums, mtime)
+
+
+def _cache_units(
+    plugin_dir: Path, *, latest_only: bool = False, preferred: frozenset[str] = frozenset()
+) -> list[Path]:
+    """
+    One cache entry -> plugin root(s). A flat plugin (or a marketplace checkout dir)
+    is its own root; otherwise its subdirs are version dirs.
+    """
+    if _is_plugin_dir(plugin_dir):
+        return [plugin_dir]
+    vers = [
+        v for v in sorted(plugin_dir.iterdir(), key=lambda p: p.name)
+        if v.is_dir() and not v.name.startswith(".")
+    ]
+    if latest_only and len(vers) > 1:
+        chosen = [v for v in vers if str(v.resolve()) in preferred]
+        vers = chosen or [max(vers, key=_version_key)]
+    return vers or [plugin_dir]
+
+
+def _discover_cache_plugins(
+    cache: Path, *, latest_only: bool = False, preferred: frozenset[str] = frozenset()
+) -> list[Path]:
+    """
+    Plugin roots under a plugin cache. Handles:
+      <cache>/<market>/<plugin>/                         (flat)
+      <cache>/<market>/<plugin>/<version>/               (versioned)
+      <cache>/<market>-ai-skills/<sha>/plugins/<name>/   (marketplace pluginRoot)
+    """
+    if not cache.is_dir():
+        return []
+    roots: list[Path] = []
+    for market in sorted(cache.iterdir(), key=lambda x: x.name):
+        if not market.is_dir() or market.name.startswith("."):
+            continue
+        children = [
+            c for c in sorted(market.iterdir(), key=lambda x: x.name)
+            if c.is_dir() and not c.name.startswith(".")
+        ]
+        # Several marketplace checkouts (shas): only the newest is live.
+        shas = [c for c in children if _HEX_SHA_RE.match(c.name) and _load_marketplace(c)]
+        if len(shas) > 1:
+            newest = max(shas, key=lambda p: p.stat().st_mtime)
+            children = [c for c in children if c not in shas or c == newest]
+        for child in children:
+            for unit in _cache_units(child, latest_only=latest_only, preferred=preferred):
+                roots.extend(_expand_nested_plugins(unit))
+    return _dedupe_paths(roots)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    out: list[Path] = []
+    seen: set[str] = set()
+    for r in paths:
+        try:
+            key = str(r.resolve())
+        except OSError:
+            key = str(r)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _read_enabled_plugin_state(roots: Roots) -> tuple[dict[str, bool], list[str]]:
     """
     Read cursor.plugins.installedIds.* from state.vscdb (exact key prefix only).
-    Value JSON may include {\"enabled\": bool}. Missing keys → treat as enabled
-    when present on disk (legacy); explicit enabled:false excludes.
+    Returns (enabled map, keys read). The value format is UNVERIFIED: the map only
+    feeds the report's Enabled column and never excludes a plugin.
     """
     db_path = _find_state_vscdb(roots)
     if db_path is None:
-        return {}
+        return {}, []
     enabled: dict[str, bool] = {}
+    keys: list[str] = []
     try:
         conn = _open_vscdb_readonly(db_path)
         try:
@@ -258,6 +380,7 @@ def _read_enabled_plugin_map(roots: Roots) -> dict[str, bool]:
                 (_PLUGIN_IDS_PREFIX + "%",),
             )
             for key, value in cur.fetchall():
+                keys.append(str(key))
                 suffix = str(key)[len(_PLUGIN_IDS_PREFIX) :]
                 # suffix examples: marketplace/plugin or publisher.plugin
                 on = True
@@ -288,30 +411,49 @@ def _read_enabled_plugin_map(roots: Roots) -> dict[str, bool]:
         finally:
             conn.close()
     except sqlite3.Error:
-        return {}
-    return enabled
+        return {}, []
+    return enabled, keys
 
 
-def _plugin_is_enabled(plugin_root: Path, enabled_map: dict[str, bool]) -> bool:
-    if not enabled_map:
-        return True  # no DB info → include (fixture without vscdb keys)
-    name = plugin_root.name
-    # version dir → parent is plugin id
-    parent = plugin_root.parent.name if plugin_root.parent else name
-    for key in (name, parent, f"{plugin_root.parent.parent.name}/{parent}"):
-        if key in enabled_map:
-            return enabled_map[key]
-    return True
+def _read_enabled_plugin_map(roots: Roots) -> dict[str, bool]:
+    return _read_enabled_plugin_state(roots)[0]
+
+
+def state_vscdb_keys_read(roots: Roots) -> list[str]:
+    """Every state.vscdb key this audit reads (exact key or prefix match results)."""
+    if _find_state_vscdb(roots) is None:
+        return []
+    return [_USER_RULES_KEY, *sorted(_read_enabled_plugin_state(roots)[1])]
+
+
+def _plugin_state(root: Path, cursor_home: Path, emap: dict[str, bool]) -> str:
+    """yes / no / unknown from state.vscdb. Reporting only; never used to exclude."""
+    if not emap:
+        return "unknown"
+    name = _plugin_name(root)
+    market = ""
+    try:
+        market = root.relative_to(cursor_home / "plugins" / "cache").parts[0]
+    except ValueError:
+        pass
+    keys = [f"{market}/{name}"] if market else []
+    keys += [name, root.name]
+    if root.parent.name:
+        keys += [root.parent.name, f"{root.parent.parent.name}/{root.parent.name}"]
+    for key in keys:
+        if key in emap:
+            return "yes" if emap[key] else "no"
+    return "unknown"
 
 
 def _active_plugin_roots(
     cursor_home: Path, *, enabled_map: Optional[dict[str, bool]] = None
 ) -> list[Path]:
     """
-    Plugin roots: local (follow symlinks) + cache versions + nested pluginRoot.
-    Exclude plugins explicitly disabled in state.vscdb.
+    Plugin roots: local (follow symlinks) + cache (flat, versioned, and
+    marketplace pluginRoot sub-plugins). Nothing is excluded by state.vscdb
+    (its format is unverified); ``enabled_map`` is accepted for compatibility.
     """
-    emap = enabled_map or {}
     roots: list[Path] = []
     local = cursor_home / "plugins" / "local"
     if local.is_dir():
@@ -324,86 +466,131 @@ def _active_plugin_roots(
                 target = p
             if not target.is_dir():
                 continue
-            if not _plugin_is_enabled(p, emap) and not _plugin_is_enabled(target, emap):
-                continue
             roots.extend(_expand_nested_plugins(target))
-    cache = cursor_home / "plugins" / "cache"
-    if cache.is_dir():
-        for market in sorted(cache.iterdir(), key=lambda x: x.name):
-            if not market.is_dir():
-                continue
-            for plugin in sorted(market.iterdir(), key=lambda x: x.name):
-                if not plugin.is_dir():
-                    continue
-                versions = [v for v in plugin.iterdir() if v.is_dir()]
-                candidates = versions or [plugin]
-                # All version dirs (layout facts: usually one); do not collapse
-                # distinct plugins that share skill names.
-                for ver in candidates:
-                    if not _plugin_is_enabled(ver, emap) and not _plugin_is_enabled(
-                        plugin, emap
-                    ):
-                        continue
-                    roots.extend(_expand_nested_plugins(ver))
-    # Dedupe by realpath
-    out: list[Path] = []
-    seen: set[str] = set()
-    for r in roots:
-        try:
-            key = str(r.resolve())
-        except OSError:
-            key = str(r)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(r)
-    return out
+    roots.extend(_discover_cache_plugins(cursor_home / "plugins" / "cache"))
+    return _dedupe_paths(roots)
+
+
+def _plugin_skill_roots_state(
+    cursor_home: Path, *, emap: Optional[dict[str, bool]] = None
+) -> list[tuple[Path, str, str]]:
+    """(skills_dir, source_label, enabled) for Cursor plugins."""
+    found: list[tuple[Path, str, str]] = []
+    for plugin_root in _active_plugin_roots(cursor_home):
+        skills = _plugin_rel_dir(plugin_root, "skills", "skills")
+        if skills is not None:
+            found.append(
+                (
+                    skills,
+                    f"plugin:{_plugin_name(plugin_root)}",
+                    _plugin_state(plugin_root, cursor_home, emap or {}),
+                )
+            )
+    return found
 
 
 def _plugin_skill_roots(
     cursor_home: Path, *, enabled_map: Optional[dict[str, bool]] = None
 ) -> list[tuple[Path, str]]:
-    """Return (skills_dir, source_label) for enabled Cursor plugins."""
-    found: list[tuple[Path, str]] = []
-    for plugin_root in _active_plugin_roots(cursor_home, enabled_map=enabled_map):
-        skills = _plugin_rel_dir(plugin_root, "skills", "skills")
-        if skills is not None:
-            found.append((skills, f"plugin:{plugin_root.name}"))
-    return found
+    """Return (skills_dir, source_label) for Cursor plugins."""
+    return [(d, label) for d, label, _s in _plugin_skill_roots_state(cursor_home, emap=enabled_map)]
+
+
+def _claude_plugin_roots(home: Path) -> list[tuple[Path, str]]:
+    """
+    ~/.claude/plugins/cache/<market>/<plugin>/<version>/ roots (and pluginRoot
+    sub-plugins) as (root, enabled). Newest version per plugin unless
+    installed_plugins.json names an installPath. enabledPlugins:false (verified
+    Claude Code settings format) excludes; true -> yes; absent -> unknown.
+    """
+    cache = home / ".claude" / "plugins" / "cache"
+    if not cache.is_dir():
+        return []
+    settings = load_json_safe(home / ".claude" / "settings.json") or {}
+    enabled = settings.get("enabledPlugins") if isinstance(settings, dict) else None
+    emap: dict[str, bool] = {}
+    if isinstance(enabled, dict):
+        emap = {str(k): bool(v) for k, v in enabled.items()}
+    elif isinstance(enabled, list):
+        emap = {str(x): True for x in enabled}
+    preferred: set[str] = set()
+    inst = load_json_safe(home / ".claude" / "plugins" / "installed_plugins.json")
+    plugins = inst.get("plugins") if isinstance(inst, dict) else None
+    if isinstance(plugins, dict):
+        for entries in plugins.values():
+            for ent in entries if isinstance(entries, list) else []:
+                ip = ent.get("installPath") if isinstance(ent, dict) else None
+                if isinstance(ip, str):
+                    try:
+                        preferred.add(str(Path(ip).resolve()))
+                    except OSError:
+                        pass
+    out: list[tuple[Path, str]] = []
+    for root in _discover_cache_plugins(
+        cache, latest_only=True, preferred=frozenset(preferred)
+    ):
+        try:
+            parts = root.relative_to(cache).parts
+        except ValueError:
+            parts = ()
+        market = parts[0] if parts else ""
+        plugin = parts[1] if len(parts) > 1 else root.name
+        name = _plugin_name(root)
+        ids = {
+            f"{plugin}@{market}", f"{market}/{plugin}", plugin,
+            f"{name}@{market}", f"{market}/{name}", name,
+        }
+        states = [emap[i] for i in ids if i in emap]
+        if states and not any(states):
+            continue
+        out.append((root, "yes" if states else "unknown"))
+    return out
 
 
 def _claude_plugin_skill_roots(home: Path) -> list[tuple[Path, str]]:
     """~/.claude/plugins/cache skills (and nested), honouring enabledPlugins."""
-    found: list[tuple[Path, str]] = []
-    settings = load_json_safe(home / ".claude" / "settings.json") or {}
-    enabled = settings.get("enabledPlugins") if isinstance(settings, dict) else None
-    enabled_set: Optional[set[str]] = None
-    if isinstance(enabled, dict):
-        enabled_set = {k for k, v in enabled.items() if v}
-    elif isinstance(enabled, list):
-        enabled_set = set(str(x) for x in enabled)
-    cache = home / ".claude" / "plugins" / "cache"
-    if not cache.is_dir():
-        return found
-    for market in sorted(cache.iterdir(), key=lambda x: x.name):
-        if not market.is_dir():
-            continue
-        for plugin in sorted(market.iterdir(), key=lambda x: x.name):
-            if not plugin.is_dir():
-                continue
-            plugin_id = f"{market.name}/{plugin.name}"
-            if enabled_set is not None and plugin_id not in enabled_set and plugin.name not in enabled_set:
-                # Also allow installed_plugins.json presence
-                pass  # still scan unless explicitly disabled false
-            if isinstance(enabled, dict) and enabled.get(plugin_id) is False:
-                continue
-            versions = [v for v in plugin.iterdir() if v.is_dir()]
-            for ver in versions or [plugin]:
-                for root in _expand_nested_plugins(ver):
-                    skills = root / "skills"
-                    if skills.is_dir():
-                        found.append((skills, f"claude-plugin:{root.name}"))
-    return found
+    return [
+        (root / "skills", f"claude-plugin:{_plugin_name(root)}")
+        for root, _state in _claude_plugin_roots(home)
+        if (root / "skills").is_dir()
+    ]
+
+
+def _skill_roots(roots: Roots) -> list[tuple[Path, str, str]]:
+    """
+    Every skills dir as (dir, source label, enabled). Shared by the context table
+    and the quality Checks so both see the same discovered set.
+    """
+    home = roots.home
+    cursor_home = roots.cursor_home or (home / ".cursor")
+    project = roots.project
+    enabled_map = _read_enabled_plugin_map(roots)
+    roots_list: list[tuple[Path, str, str]] = [
+        (d, label, "yes")
+        for d, label in (
+            (cursor_home / "skills", "user_cursor"),
+            (cursor_home / "skills-cursor", "builtin"),
+            (project / ".cursor" / "skills", "project_cursor"),
+            (home / ".claude" / "skills", "user_claude"),
+            (project / ".claude" / "skills", "project_claude"),
+            (home / ".codex" / "skills", "user_codex"),
+            (project / ".codex" / "skills", "project_codex"),
+            (home / ".agents" / "skills", "user_agents"),
+            (project / ".agents" / "skills", "project_agents"),
+            (home / ".grok" / "skills", "user_grok"),
+            (project / ".grok" / "skills", "project_grok"),
+        )
+    ]
+    roots_list.extend(_plugin_skill_roots_state(cursor_home, emap=enabled_map))
+    claude_state = {
+        (root / "skills"): st for root, st in _claude_plugin_roots(home)
+    }
+    roots_list.extend(
+        (d, label, claude_state.get(d, "unknown"))
+        for d, label in _claude_plugin_skill_roots(home)
+    )
+    return roots_list
+
 
 
 def _collect_skill_entries(
@@ -417,30 +604,13 @@ def _collect_skill_entries(
     real name-dedupe behaviour is unconfirmed — round-19 layout facts).
     """
     home = roots.home
-    cursor_home = roots.cursor_home or (home / ".cursor")
-    project = roots.project
-    enabled_map = _read_enabled_plugin_map(roots)
-    roots_list: list[tuple[Path, str]] = [
-        (cursor_home / "skills", "user_cursor"),
-        (cursor_home / "skills-cursor", "builtin"),
-        (project / ".cursor" / "skills", "project_cursor"),
-        (home / ".claude" / "skills", "user_claude"),
-        (project / ".claude" / "skills", "project_claude"),
-        (home / ".codex" / "skills", "user_codex"),
-        (project / ".codex" / "skills", "project_codex"),
-        (home / ".agents" / "skills", "user_agents"),
-        (project / ".agents" / "skills", "project_agents"),
-        (home / ".grok" / "skills", "user_grok"),
-        (project / ".grok" / "skills", "project_grok"),
-    ]
-    roots_list.extend(_plugin_skill_roots(cursor_home, enabled_map=enabled_map))
-    roots_list.extend(_claude_plugin_skill_roots(home))
+    roots_list = _skill_roots(roots)
 
     by_realpath: dict[str, dict[str, Any]] = {}
     name_paths: dict[str, list[str]] = {}
     link_note: dict[str, str] = {}
 
-    for root, source in roots_list:
+    for root, source, enabled in roots_list:
         for skill_md in _iter_skill_mds(root):
             text = safe_read_text(skill_md) or ""
             meta, _ = parse_front_matter(text)
@@ -468,6 +638,7 @@ def _collect_skill_entries(
                 "source": src_label,
                 "description": desc,
                 "display_source": _short_source(skill_md, home),
+                "enabled": enabled,
             }
             if real in by_realpath:
                 by_realpath[real].setdefault("aliases", []).append(str(skill_md))
@@ -553,7 +724,7 @@ def _always_apply_rules(roots: Roots) -> list[ReportRow]:
     seen: set[str] = set()
     enabled_map = _read_enabled_plugin_map(roots)
 
-    def add_rule(path: Path, source: str) -> None:
+    def add_rule(path: Path, source: str, enabled: str = "yes") -> None:
         try:
             key = str(path.resolve())
         except OSError:
@@ -575,6 +746,7 @@ def _always_apply_rules(roots: Roots) -> list[ReportRow]:
                 description=desc,
                 source=_short_source(path, home),
                 meta={"path": str(path), "source": source, "alwaysApply": True},
+                enabled=enabled,
             )
         )
 
@@ -592,28 +764,20 @@ def _always_apply_rules(roots: Roots) -> list[ReportRow]:
                 # follow rule-dir symlinks via rglob on real dirs; resolve files
                 add_rule(path, source)
 
-    for plugin_root in _active_plugin_roots(cursor_home, enabled_map=enabled_map):
+    for plugin_root in _active_plugin_roots(cursor_home):
         rules_dir = _plugin_rel_dir(plugin_root, "rules", "rules")
         if rules_dir is None:
             continue
+        state = _plugin_state(plugin_root, cursor_home, enabled_map)
         for path in sorted(rules_dir.rglob("*.mdc")):
-            add_rule(path, f"plugin:{plugin_root.name}")
+            add_rule(path, f"plugin:{_plugin_name(plugin_root)}", state)
 
     # Claude plugin cache rules
-    claude_cache = home / ".claude" / "plugins" / "cache"
-    if claude_cache.is_dir():
-        for market in claude_cache.iterdir():
-            if not market.is_dir():
-                continue
-            for plugin in market.iterdir():
-                if not plugin.is_dir():
-                    continue
-                for ver in [v for v in plugin.iterdir() if v.is_dir()] or [plugin]:
-                    for root in _expand_nested_plugins(ver):
-                        rules_dir = root / "rules"
-                        if rules_dir.is_dir():
-                            for path in sorted(rules_dir.glob("*.mdc")):
-                                add_rule(path, f"claude-plugin:{root.name}")
+    for root, state in _claude_plugin_roots(home):
+        rules_dir = root / "rules"
+        if rules_dir.is_dir():
+            for path in sorted(rules_dir.glob("*.mdc")):
+                add_rule(path, f"claude-plugin:{_plugin_name(root)}", state)
 
     return rows
 
@@ -823,13 +987,28 @@ def _mcp_project_dir(roots: Roots) -> tuple[Optional[Path], str]:
     return None, "no project mcps dir; server lines from mcp.json only"
 
 
-def _mcp_server_names(roots: Roots) -> list[str]:
+def _mcp_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+
+
+def _mcp_configured(roots: Roots) -> list[dict[str, Any]]:
+    """Servers named in mcp.json files (user, project) and active plugins' mcp.json."""
     cursor_home = roots.cursor_home or (roots.home / ".cursor")
-    names: list[str] = []
-    seen: set[str] = set()
-    for cfg in (
-        cursor_home / "mcp.json",
-        roots.project / ".cursor" / "mcp.json",
+    emap = _read_enabled_plugin_map(roots)
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(name: Any, origin: str, plugin: str = "", state: str = "yes") -> None:
+        key = (origin + ":" + plugin, str(name))
+        if key not in seen:
+            seen.add(key)
+            entries.append(
+                {"name": str(name), "origin": origin, "plugin": plugin, "enabled": state}
+            )
+
+    for cfg, origin in (
+        (cursor_home / "mcp.json", "user"),
+        (roots.project / ".cursor" / "mcp.json", "project"),
     ):
         data = load_json_safe(cfg)
         if not isinstance(data, dict):
@@ -837,32 +1016,47 @@ def _mcp_server_names(roots: Roots) -> list[str]:
         servers = data.get("mcpServers") or data.get("servers") or {}
         if isinstance(servers, dict):
             for name in servers:
-                if name not in seen:
-                    seen.add(name)
-                    names.append(str(name))
+                add(name, origin)
     # Active plugin mcp.json only (skip stale cached versions — D7)
     for plugin_root in _active_plugin_roots(cursor_home):
+        pname = _plugin_name(plugin_root)
+        state = _plugin_state(plugin_root, cursor_home, emap)
         paths = [plugin_root / "mcp.json"]
-        if not paths[0].is_file():
+        if not paths[0].is_file() and not _plugin_root_rel(plugin_root):
+            # (a pluginRoot container's sub-plugins are separate roots)
             paths = [p for p in plugin_root.glob("**/mcp.json") if p.is_file()]
         for path in paths:
-            if not path.is_file():
-                continue
-            data = load_json_safe(path)
+            data = load_json_safe(path) if path.is_file() else None
             if not isinstance(data, dict):
                 continue
             servers = data.get("mcpServers") or data.get("servers") or {}
             if isinstance(servers, dict):
                 for name in servers:
-                    label = (
-                        f"plugin-{name}"
-                        if not str(name).startswith("plugin-")
-                        else str(name)
-                    )
-                    if label not in seen:
-                        seen.add(label)
-                        names.append(label)
-    return names
+                    add(name, "plugin", pname, state)
+    return entries
+
+
+def _mcp_folder_candidates(entry: dict[str, Any], folders: list[str]) -> list[str]:
+    """Descriptor folder names that can belong to a configured server, best first."""
+    name = entry["name"]
+    sv = list(dict.fromkeys([name, _mcp_slug(name)]))
+    cands: list[str] = []
+    if entry["origin"] == "plugin":
+        pl = list(dict.fromkeys([entry["plugin"], _mcp_slug(entry["plugin"])]))
+        cands += [f"plugin-{p}-{v}" for p in pl for v in sv]
+        cands += [f"plugin-{v}" for v in sv]
+        cands += [name] if name.startswith("plugin-") else []
+    else:
+        cands += [name]
+        cands += [f"user-{v}" for v in sv]
+        cands += [f"project-{v}" for v in sv]
+        slug = _mcp_slug(name)
+        cands += [f for f in folders if f.startswith("project-") and f.endswith(f"-{slug}")]
+    return [c for c in dict.fromkeys(cands) if c in folders]
+
+
+def _mcp_server_key(folder: str) -> str:
+    return re.sub(r"^(?:user|plugin|project)-", "", folder)
 
 
 def _mcp_rows(roots: Roots) -> list[ReportRow]:
@@ -882,21 +1076,38 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
         )
     ]
     mcps_root, selection_note = _mcp_project_dir(roots)
-    names = _mcp_server_names(roots)
-    # Also discover descriptor folders even if not in mcp.json
-    folder_names: list[str] = []
+    folders: list[str] = []
     if mcps_root and mcps_root.is_dir():
-        folder_names = sorted(p.name for p in mcps_root.iterdir() if p.is_dir())
-    all_names = list(dict.fromkeys([*names, *folder_names]))
+        folders = sorted(p.name for p in mcps_root.iterdir() if p.is_dir())
+
+    # Match configured servers (mcp.json / plugin mcp.json) to synced descriptor
+    # folders (user-<name>, plugin-<plugin>-<server>) before calling any of them
+    # missing; a folder is claimed by at most one configured server.
+    claimed: dict[str, dict[str, Any]] = {}
+    unmatched: list[dict[str, Any]] = []
+    for entry in _mcp_configured(roots):
+        free = [c for c in _mcp_folder_candidates(entry, folders) if c not in claimed]
+        if free:
+            claimed[free[0]] = entry
+        else:
+            unmatched.append(entry)
+    # (display name, descriptor folder or None, server key, enabled)
+    servers: list[tuple[str, Optional[str], str, str]] = []
+    for entry in unmatched:
+        servers.append((entry["name"], None, entry["name"], entry["enabled"]))
+    for folder in folders:
+        ent = claimed.get(folder)
+        key = ent["name"] if ent else _mcp_server_key(folder)
+        servers.append((folder, folder, key, ent["enabled"] if ent else "yes"))
 
     total_tools = 0
-    name_counts: dict[str, int] = {}
-    for name in all_names:
-        name_counts[name] = name_counts.get(name, 0) + 1
+    for name, folder_name, _key, enabled in servers:
         # Pathlib treats "postgres://…" as absolute — never join unsafe names.
-        safe_seg = bool(name) and not any(c in name for c in (":", "/", "\\", "@"))
+        safe_seg = bool(folder_name) and not any(
+            c in folder_name for c in (":", "/", "\\", "@")
+        )
         tools_dir = (
-            (mcps_root / name / "tools") if (mcps_root and safe_seg) else None
+            (mcps_root / folder_name / "tools") if (mcps_root and safe_seg) else None
         )
         tool_files = (
             sorted(tools_dir.glob("*.json")) if tools_dir and tools_dir.is_dir() else []
@@ -923,13 +1134,6 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
             raw = (safe_read_text(tool_files[0]) or "").lower()
             if "mcp_auth" in raw or '"name": "mcp_auth"' in raw.replace(" ", ""):
                 flags.append("needs-auth")
-        if name_counts[name] > 1 or any(
-            n != name and n.rstrip("0123456789") == name.rstrip("0123456789")
-            for n in all_names
-            if n != name
-        ):
-            # duplicate-ish names (plugin-clickup vs clickup flagged in item text)
-            pass
         if tool_count > _MAX_MCP_TOOLS:
             flags.append(f"over-{_MAX_MCP_TOOLS}-tool-cap")
         item = f"{name} ({tool_count} tools)"
@@ -954,15 +1158,16 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
                     "folder": folder,
                     "mcp_selection": selection_note,
                 },
+                enabled=enabled,
             )
         )
 
-    # Overlap / duplicate server names (clickup vs plugin-clickup)
-    bases: dict[str, list[str]] = {}
-    for name in all_names:
-        base = re.sub(r"^plugin-", "", name)
-        bases.setdefault(base, []).append(name)
-    for base, group in bases.items():
+    # Duplicate servers: only when two distinct descriptor folders map to one server.
+    by_key: dict[str, list[str]] = {}
+    for _name, folder_name, key, _en in servers:
+        if folder_name:
+            by_key.setdefault(key, []).append(folder_name)
+    for key, group in by_key.items():
         if len(group) > 1:
             rows.append(
                 ReportRow(
@@ -994,9 +1199,17 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
     return rows
 
 
+_PER_PROMPT_GROUP = "Per prompt"
+_PER_PROMPT_EVENTS = frozenset({"userpromptsubmit", "beforesubmitprompt"})
+
+
 def _hooks_from_file(
-    hooks_path: Path, home: Path, *, label: str
+    hooks_path: Path, home: Path, *, label: str, enabled: str = "yes"
 ) -> list[ReportRow]:
+    """
+    Rows for one hooks.json. UserPromptSubmit-style events land in the
+    "Per prompt" group (they fire every prompt, not at startup).
+    """
     rows: list[ReportRow] = []
     data = load_json_safe(hooks_path)
     if not isinstance(data, dict):
@@ -1004,6 +1217,17 @@ def _hooks_from_file(
     hooks = data.get("hooks") or data
     if not isinstance(hooks, dict):
         return rows
+
+    def make(event: str, suffix: str, **kw: Any) -> ReportRow:
+        per_prompt = str(event).lower() in _PER_PROMPT_EVENTS
+        note = " (repeats per prompt)" if per_prompt else ""
+        return ReportRow(
+            group=_PER_PROMPT_GROUP if per_prompt else "Model/settings",
+            item=f"Hook: {label} {event}{note}{suffix}",
+            enabled=enabled,
+            **kw,
+        )
+
     for event, entries in hooks.items():
         if not isinstance(entries, list):
             continue
@@ -1013,9 +1237,9 @@ def _hooks_from_file(
             ctx = ent.get("additionalContext") or ent.get("additional_context")
             if isinstance(ctx, str) and ctx.strip():
                 rows.append(
-                    ReportRow(
-                        group="Model/settings",
-                        item=f"Hook: {label} {event}",
+                    make(
+                        event,
+                        "",
                         tokens=count_tokens(ctx),
                         description=_desc_snippet(ctx),
                         source=_short_source(hooks_path, home),
@@ -1030,30 +1254,17 @@ def _hooks_from_file(
                 hooks_path.parent / "inject-rule.txt",
                 hooks_path.parent / "hooks" / "rule.txt",
             ]
-            # When hooks.json lives in hooks/, rule.txt is sibling
             measured: Optional[Path] = None
             for cand in sibling_candidates:
                 if cand.is_file():
                     measured = cand
                     break
-            if measured is None and ("inject-rule" in cmd or "rule.txt" in cmd):
-                # ${CLAUDE_PLUGIN_ROOT}/hooks/inject-rule.sh → hooks/rule.txt
-                plugin_hooks = hooks_path.parent
-                if (plugin_hooks / "rule.txt").is_file():
-                    measured = plugin_hooks / "rule.txt"
-                elif hooks_path.parent.name == "hooks" and (
-                    hooks_path.parent / "rule.txt"
-                ).is_file():
-                    measured = hooks_path.parent / "rule.txt"
             if measured is not None:
                 text = safe_read_text(measured) or ""
-                note = ""
-                if event in {"UserPromptSubmit", "SessionStart", "sessionStart"}:
-                    note = " (repeats per prompt)" if event == "UserPromptSubmit" else ""
                 rows.append(
-                    ReportRow(
-                        group="Model/settings",
-                        item=f"Hook: {label} {event}{note}",
+                    make(
+                        event,
+                        "",
                         tokens=count_tokens(text),
                         description=_desc_snippet(text),
                         source=_short_source(measured, home),
@@ -1067,9 +1278,9 @@ def _hooks_from_file(
                 )
             else:
                 rows.append(
-                    ReportRow(
-                        group="Model/settings",
-                        item=f"Hook: {label} {event} [unmeasured: script hook]",
+                    make(
+                        event,
+                        " [unmeasured: script hook]",
                         tokens=0,
                         description="",
                         source=_short_source(hooks_path, home),
@@ -1092,36 +1303,42 @@ def _hooks_rows(roots: Roots) -> list[ReportRow]:
     Parse plugin + Claude-format hooks.
 
     Static additionalContext counted. Claude SessionStart/UserPromptSubmit
-    scripts that emit sibling rule.txt are measured from that file (note:
-    UserPromptSubmit repeats per prompt). Other scripts → unmeasured.
+    scripts that emit sibling rule.txt are measured from that file.
+    UserPromptSubmit rows go to the "Per prompt" group (not startup). Rows are
+    labelled by plugin name and each hooks.json is read once (realpath dedupe).
     """
     rows: list[ReportRow] = []
     home = roots.home
     cursor_home = roots.cursor_home or (home / ".cursor")
     enabled_map = _read_enabled_plugin_map(roots)
+    seen_files: set[str] = set()
 
-    for plugin_root in _active_plugin_roots(cursor_home, enabled_map=enabled_map):
-        hooks_paths = list(plugin_root.glob("hooks.json"))
-        hooks_paths += list(plugin_root.glob("hooks/hooks.json"))
-        for hooks_path in hooks_paths:
-            rows.extend(
-                _hooks_from_file(hooks_path, home, label=plugin_root.name)
-            )
+    def add_file(hooks_path: Path, label: str, state: str) -> None:
+        try:
+            key = str(hooks_path.resolve())
+        except OSError:
+            key = str(hooks_path)
+        if key in seen_files:
+            return
+        seen_files.add(key)
+        rows.extend(_hooks_from_file(hooks_path, home, label=label, enabled=state))
+
+    for plugin_root in _active_plugin_roots(cursor_home):
+        state = _plugin_state(plugin_root, cursor_home, enabled_map)
+        for hooks_path in (plugin_root / "hooks.json", plugin_root / "hooks" / "hooks.json"):
+            if hooks_path.is_file():
+                add_file(hooks_path, _plugin_name(plugin_root), state)
 
     # Claude plugin cache hooks (SessionStart / UserPromptSubmit + rule.txt)
-    claude_cache = home / ".claude" / "plugins" / "cache"
-    if claude_cache.is_dir():
-        for hooks_path in claude_cache.rglob("hooks.json"):
-            rows.extend(
-                _hooks_from_file(
-                    hooks_path, home, label=hooks_path.parent.parent.name
-                )
-            )
+    for root, state in _claude_plugin_roots(home):
+        for hooks_path in (root / "hooks.json", root / "hooks" / "hooks.json"):
+            if hooks_path.is_file():
+                add_file(hooks_path, _plugin_name(root), state)
 
     # User-level ~/.cursor/hooks.json (may be symlink)
     user_hooks = cursor_home / "hooks.json"
     if user_hooks.exists():
-        rows.extend(_hooks_from_file(user_hooks, home, label="user-hooks"))
+        add_file(user_hooks, "user-hooks", "yes")
 
     return rows
 
@@ -1161,13 +1378,22 @@ def sort_grouped_rows(
         return int(s.get("tokens_200k") or 0)
 
     groups_present = list(dict.fromkeys(r.get("group") for r in rows if r.get("group")))
-    groups_order = sorted(groups_present, key=lambda g: (-group_subtotal(str(g)), str(g)))
+    # "Per prompt" is not startup context: always listed after the startup groups.
+    groups_order = sorted(
+        groups_present,
+        key=lambda g: (str(g) == _PER_PROMPT_GROUP, -group_subtotal(str(g)), str(g)),
+    )
     sorted_rows: list[dict[str, Any]] = []
     for g in groups_order:
         grow = [r for r in rows if r.get("group") == g]
         grow.sort(key=lambda r: _row_sort_key(r, window=window))
         sorted_rows.extend(grow)
     return [str(g) for g in groups_order], sorted_rows
+
+
+def _merge_enabled(states: Any) -> str:
+    vals = set(states)
+    return next(iter(vals)) if len(vals) == 1 else "unknown"
 
 
 def build_cursor_startup_report(
@@ -1191,6 +1417,12 @@ def build_cursor_startup_report(
     by_name: dict[str, list[dict[str, Any]]] = {}
     for r in rows_200k:
         by_name.setdefault(r["name"], []).append(r)
+    # Skills the 200k budget omitted still load on a 1M model: list them with
+    # 0 tokens at 200k so the 1M column is fully itemised (not hidden in the wrapper).
+    listed_paths = {r["path"] for r in rows_200k}
+    omitted_200k = [r for r in rows_1m if r["path"] not in listed_paths]
+    for r in omitted_200k:
+        by_name.setdefault(r["name"], []).append({**r, "tokens": 0, "omitted_200k": True})
 
     for name, group in by_name.items():
         paths = [g["path"] for g in group]
@@ -1201,6 +1433,8 @@ def build_cursor_startup_report(
         label = name
         if dup:
             label = f"{name} ×{len(group)} (dup: {', '.join(sources)})"
+        if all(g.get("omitted_200k") for g in group):
+            label += " [omitted at 200k]"
         desc = _desc_snippet(group[0].get("description") or "")
         src = group[0].get("display_source") or _short_source(paths[0], home)
         skill_rows.append(
@@ -1218,9 +1452,19 @@ def build_cursor_startup_report(
                     "mode_1m": mode_1m,
                     "dup": dup,
                 },
+                enabled=_merge_enabled(g.get("enabled", "yes") for g in group),
             )
         )
     listed_200 = sum(r.tokens for r in skill_rows)
+    wrapper_note = (
+        "Fixed text around the skill list: the <agent_skills> open/close tags"
+        + (
+            " plus the 'Additional skills omitted' notice Cursor adds when the 200k budget drops skills"
+            if mode_200k == "path_only_omitted"
+            else ""
+        )
+        + f". Remainder of the {mode_200k} budget total after the rows above."
+    )
     listed_1m = sum((r.tokens_1m or r.tokens) for r in skill_rows)
     skill_rows.append(
         ReportRow(
@@ -1232,7 +1476,7 @@ def build_cursor_startup_report(
             ),
             tokens=max(0, total_200k - listed_200),
             tokens_1m=max(0, total_1m - listed_1m),
-            description="skills budget cascade",
+            description=wrapper_note,
             source="",
             meta={
                 "mode_200k": mode_200k,
@@ -1288,8 +1532,11 @@ def build_cursor_startup_report(
         row_dicts, subtotals, window=window
     )
 
-    total_200k_all = sum(s["tokens_200k"] for s in subtotals.values())
-    total_1m_all = sum(s["tokens_1m"] for s in subtotals.values())
+    # UserPromptSubmit-style hooks fire per prompt: reported, never in the startup total.
+    startup = {g: s for g, s in subtotals.items() if g != _PER_PROMPT_GROUP}
+    total_200k_all = sum(s["tokens_200k"] for s in startup.values())
+    total_1m_all = sum(s["tokens_1m"] for s in startup.values())
+    per_prompt = subtotals.get(_PER_PROMPT_GROUP) or {}
 
     from .quality_checks import run_quality_checks
 
@@ -1302,6 +1549,8 @@ def build_cursor_startup_report(
         "context_window": window,
         "total_tokens_200k": total_200k_all,
         "total_tokens_1m": total_1m_all,
+        "per_prompt_tokens": int(per_prompt.get("tokens_200k") or 0),
+        "state_vscdb_keys": state_vscdb_keys_read(roots),
         "subtotals": subtotals,
         "groups": groups_order,
         "rows": sorted_rows,

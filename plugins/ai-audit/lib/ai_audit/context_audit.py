@@ -1241,6 +1241,8 @@ def run_context_audit(
                 "context_window",
                 "total_tokens_200k",
                 "total_tokens_1m",
+                "per_prompt_tokens",
+                "state_vscdb_keys",
                 "subtotals",
                 "groups",
                 "rows",

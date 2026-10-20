@@ -156,6 +156,13 @@ def is_claude_cloud(env: Mapping[str, str] | None = None) -> tuple[bool, list[st
     return (len(hits) >= 2, hits)
 
 
+_GROK_BOX_ENV = ("SAND_BOX_TENANT_ID", "SAND_BOX_STORE_ID", "SAND_BOX_BOOT_ID")
+_GROK_BOX_AGENT_DATA = "/home/box/agent-data"
+# Explicit opt-in switches (never set by default). One of these plus /home/box
+# still counts; a bare /home/box (present on unrelated Linux boxes) never does.
+_GROK_OPT_IN_ENV = ("GROK_BOT", "GROK_AGENT", "XAI_GROK_BOT", "SAND_BOX_ID", "SAND_DATA")
+
+
 def is_grok_cloud(
     env: Mapping[str, str] | None = None,
     *,
@@ -163,28 +170,21 @@ def is_grok_cloud(
     path_exists: Optional[Any] = None,
 ) -> tuple[bool, list[str]]:
     """
-    Grok Bot cloud: require 2+ markers. sand-data alone (fixtures / local desktop)
-    is not enough. Box-only markers: SAND_BOX_ID / BOX_ID + /home/box (round-19 #4).
+    Grok Bot cloud: two of SAND_BOX_TENANT_ID, SAND_BOX_STORE_ID,
+    SAND_BOX_BOOT_ID, or the /home/box/agent-data directory. sand-data alone
+    (fixtures / local desktop) and a bare /home/box are not enough.
     """
     e = env if env is not None else os.environ
     exists = path_exists or (lambda p: Path(p).exists())
-    hits: list[str] = []
-    for key in ("GROK_BOT", "GROK_AGENT", "XAI_GROK_BOT"):
-        if _truthy(e.get(key)):
-            hits.append(key)
-    if _truthy(e.get("SAND_DATA")):
-        hits.append("SAND_DATA")
-    # Box-only cloud markers (Grok desktop sand-data is not enough).
-    for key in ("SAND_BOX_ID", "BOX_ID", "CURSOR_CLOUD_AGENT_ID"):
-        if _truthy(e.get(key)):
-            hits.append(key)
-    if exists("/home/box"):
-        hits.append("/home/box")
-    if exists("/home/box/sand-data") and _truthy(e.get("SAND_BOX_ID") or e.get("BOX_ID")):
-        # Reinforces box pairing; already counted via keys + /home/box.
-        pass
-    # sand_data path alone does NOT count toward cloud (fixture/local).
-    return (len(hits) >= 2, hits)
+    hits: list[str] = [k for k in _GROK_BOX_ENV if _truthy(e.get(k))]
+    if exists(_GROK_BOX_AGENT_DATA):
+        hits.append(_GROK_BOX_AGENT_DATA)
+    if len(hits) >= 2:
+        return (True, hits)
+    opt_in = [k for k in _GROK_OPT_IN_ENV if _truthy(e.get(k))]
+    if opt_in and exists("/home/box"):
+        return (True, [*opt_in, "/home/box"])
+    return (False, hits)
 
 
 def detect_environment(
