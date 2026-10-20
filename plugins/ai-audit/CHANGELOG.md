@@ -5,6 +5,8 @@
 - Stage 1 ships **context-audit** only: read-only inventory of what loads into agent context.
 - Shared `bin/ai-audit` core: `detect` + `context` (JSON + markdown). Hosts: Claude Code, Cursor, Grok Bot.
 - **Tokenizer:** vendored **tiktoken o200k_base** ranks (offline; `tiktoken` package required). Cursor report states the tokenizer name.
+- **Provider · environment** headings (e.g. `Cursor · Cloud`): auto-detect local OS vs cloud agent markers; `--env` override; JSON carries `provider` + `environment`.
+- **Sort:** groups by subtotal descending; rows by tokens descending (skill rows use `--context-window` 200k|1m).
 - **Cursor grouped report:** Always-apply rules, User Rules, Skill descriptions (200k + 1M budget cascade, realpath dedupe), MCP (startup lines + on-demand schema size / tool counts / caps / needs-auth), Model/settings (hooks). Purpose and AI suggestion columns left blank for the agent.
 - **User Rules:** exact-key read of `aicontext.personalContext` from a temp copy of `state.vscdb` only.
 - Shared assignment redaction (rounds 16–17): whole-value after secret-like name + separator; exceptions only when the entire value matches; wider names/separators; `changeme` is not a placeholder. Inventory filesystem paths are never rewritten.
