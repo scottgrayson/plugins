@@ -1006,10 +1006,19 @@ def _mcp_configured(roots: Roots) -> list[dict[str, Any]]:
                 {"name": str(name), "origin": origin, "plugin": plugin, "enabled": state}
             )
 
+    seen_cfg: set[str] = set()
     for cfg, origin in (
         (cursor_home / "mcp.json", "user"),
         (roots.project / ".cursor" / "mcp.json", "project"),
     ):
+        # Project folder == ~ (no-folder window): one file, user scope only.
+        try:
+            real = str(cfg.resolve())
+        except OSError:
+            real = str(cfg)
+        if real in seen_cfg:
+            continue
+        seen_cfg.add(real)
         data = load_json_safe(cfg)
         if not isinstance(data, dict):
             continue

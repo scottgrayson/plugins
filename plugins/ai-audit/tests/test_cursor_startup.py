@@ -187,7 +187,12 @@ def test_layout_fixture_shapes() -> None:
     roots = detect_host(host="cursor", root=layout)
     payload = run_context_audit(roots, env_override="Cursor · Mac")
     blob = str(payload)
-    assert "should-not-load" not in blob
+    skill = next(
+        r for r in payload["rows"]
+        if r["group"] == "Skill descriptions" and r["item"] == "vscdb-disabled-demo"
+    )
+    assert skill["enabled"] == "no"
+    assert skill["tokens"] > 0
     items = " ".join(r["item"] for r in payload["rows"])
     assert "linked-alpha" in items
     assert "global.mdc" in items

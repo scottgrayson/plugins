@@ -38,7 +38,7 @@ _MDC_KNOWN_KEYS = frozenset(
 
 _TRIGGER_RE = re.compile(
     r"(?i)\b(?:when|whenever|use when|use for|apply when|apply to|apply before|"
-    r"apply after|use this skill to|use this skill when|use to)\b"
+    r"apply after|apply during|use this skill to|use this skill when|use to)\b"
 )
 
 _FILE_EXTS = frozenset(
@@ -83,7 +83,7 @@ _PATH_REF_RE = re.compile(
 _NAME_REF_RE = re.compile(
     r"(?i)\b(?:skill|rule)\s+"
     r"(?:[`'\"]([A-Za-z][A-Za-z0-9_-]{1,64})[`'\"]|"
-    r"([A-Za-z][A-Za-z0-9]*-[A-Za-z0-9_-]{0,63}))"
+    r"([A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]+(?:-[A-Za-z0-9_-]+)+))"
 )
 
 

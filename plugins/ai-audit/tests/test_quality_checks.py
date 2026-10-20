@@ -165,10 +165,10 @@ def test_stale_names_pass_and_fail() -> None:
         check_stale_names, skill_files=skills, rule_files=[]
     )
     assert _has(
-        findings, check="stale_names", needle="agent-environment"
+        findings, check="stale_names", needle="old-repo-name"
     ), [f.finding for f in findings]
     assert _has(
-        findings, check="stale_names", needle="ai-plugins"
+        findings, check="stale_names", needle="legacy-plugins"
     ), [f.finding for f in findings]
     assert _none_for(
         findings, check="stale_names", path_substr="qc-pass-desc"
@@ -220,7 +220,10 @@ def test_run_quality_checks_sorted_and_in_report() -> None:
 
     payload = run_context_audit(roots, env_override="Cursor · Mac")
     assert "checks" in payload and payload["checks"]
-    assert "should-not-load" not in str(payload.get("checks"))
+    assert any(
+        "vscdb-disabled-demo" in c["item"] + c["source"] + c["finding"]
+        for c in payload["checks"]
+    ), "disabled-in-vscdb plugin skill must still be checked"
     md = context_markdown(payload)
     assert "### Checks" in md
     assert "| Item | Check | Finding | Source |" in md

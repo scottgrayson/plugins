@@ -919,10 +919,19 @@ def collect_cursor(roots: Roots) -> list[InventoryItem]:
             for path in sorted(agents_dir.glob("*.md")):
                 items.extend(_agent_items(host, scope, path))
 
+    seen_mcp_cfg: set[str] = set()
     for cfg_path, scope in (
         (home / "mcp.json", "user"),
         (project / ".cursor" / "mcp.json", "project"),
     ):
+        # Project folder == ~ (Cursor with no folder): same file, count once.
+        try:
+            real = str(cfg_path.resolve())
+        except OSError:
+            real = str(cfg_path)
+        if real in seen_mcp_cfg:
+            continue
+        seen_mcp_cfg.add(real)
         items.extend(_mcp_items(host, scope, cfg_path, defer_schemas=False))
 
     # CLI config is NOT context — report as config only.

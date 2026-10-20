@@ -63,6 +63,8 @@ _SECRET_NAME_EXACT = frozenset(
         "pwd",
         "pw",
         "pin",
+        "pin_code",
+        "pincode",
         "p@ssword",
         "pa$$word",
         "token",
@@ -227,8 +229,21 @@ _ASSIGN_DASH_ARROW_RE = re.compile(
 # "password; value" / "password, value": only for strong password-family words.
 # Weak words in prose ("auth, then", "token, is", "pass.") are not assignments.
 _ASSIGN_COMMA_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_@-])(password|passwd|passphrase|passcode|pwd|"
+    r"(?i)(?<![A-Za-z0-9_@-])(password|passwd|passphrase|passcode|pwd|secret|"
     r"kennwort|senha|パスワード|密码|пароль)\s*[;,]\s*"
+)
+# Prose that follows "password" in documentation ("password reset flow docs").
+_PASSWORD_WS_PROSE_RE = re.compile(
+    r"(?i)(?:reset|policy|policies|manager|managers|field|fields|hash|hashing|"
+    r"hashes|rotation|rules|rule|requirements|strength|length|recovery|change|"
+    r"input|prompt|form|file|files|store|storage|protected|protection|flow|"
+    r"login|expiry|expiration|complexity|and|or|for|to|in|on|of|the|with)\b"
+)
+# Commands whose -p flag is never a password.
+_P_FLAG_SAFE_CMD_RE = re.compile(
+    r"(?i)\b(?:grep|egrep|fgrep|rg|ls|mkdir|cp|mv|rm|tar|sort|ps|head|tail|"
+    r"find|sed|awk|git|pip|npm|docker|ssh|scp|patch|ping|nc|pytest|python3?|"
+    r"node|make|chmod|chown|install|rsync|diff|xargs|jq|curl)\s+(?:-\w+\s+)*$"
 )
 # Whitespace form only for password/passwd: "passwd dragon"
 _ASSIGN_PASSWORD_WS_RE = re.compile(
@@ -378,16 +393,6 @@ def _norm_name(name: str) -> str:
     return s.replace("-", "_").lower()
 
 
-_KEBAB_LEAD_WORDS = frozenset(
-    {"token", "secret", "auth", "session", "pass", "password", "passwd", "cookie",
-     "credential", "credentials", "pin", "pw", "pwd"}
-)
-_KEBAB_TAIL_WORDS = frozenset(
-    {"password", "passwd", "pass", "pwd", "token", "secret", "key", "credential",
-     "credentials", "passphrase", "passcode", "id"}
-)
-
-
 def is_secret_name(name: str) -> bool:
     """Classify assignment/header/flag name as secret-ish."""
     if not name:
@@ -429,12 +434,6 @@ def is_secret_name(name: str) -> bool:
     n = _norm_name(bare)
     if n in _SECRET_NAME_EXACT:
         return True
-    # Lowercase kebab names that merely start with a secret word are skill/rule
-    # names (token-budget, secret-scanning, auth-flow), not credential names.
-    if re.fullmatch(r"[a-z]+(?:-[a-z]+)+", bare):
-        words = bare.split("-")
-        if words[0] in _KEBAB_LEAD_WORDS and words[-1] not in _KEBAB_TAIL_WORDS:
-            return False
     # Compound names without underscore: DBPASS, mypwd, userpass (not compass/bypass)
     if n in {"dbpass", "mypwd", "userpass", "mysqlpwd", "passwort"} or (
         len(n) >= 5 and n.endswith("pwd")
@@ -836,6 +835,8 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         before = text[max(0, m.start() - 80) : m.start()]
         val_atom = _parse_value_at(text, vs, colon=False)
         val = val_atom[0] if val_atom else text[vs : _value_extent_end(text, vs)]
+        if _P_FLAG_SAFE_CMD_RE.search(before) and not _MYSQL_CTX_RE.search(before):
+            continue
         if not (_MYSQL_CTX_RE.search(before) or _p_flag_value_is_secret(val)):
             continue
         hit = _hit_from_name_sep(text, m.start(), "p", vs, "flag")
@@ -880,7 +881,7 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         name = m.group(1)
         # Avoid eating "password is X" / "password: X" / "password=X" (other forms).
         rest = text[m.end() :]
-        if re.match(r"(?i)is\b", rest):
+        if re.match(r"(?i)is\b", rest) or _PASSWORD_WS_PROSE_RE.match(rest):
             continue
         hit = _hit_from_name_sep(text, m.start(), name, m.end(), "ws")
         if hit:
