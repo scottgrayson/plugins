@@ -10,46 +10,24 @@ def to_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def wins_markdown(wins: list[dict[str, Any]], heading: str = "Biggest wins") -> list[str]:
-    lines = [f"## {heading}", ""]
-    if not wins:
-        lines.append("_No ranked wins — inventory was empty or below thresholds._")
-        lines.append("")
-        return lines
-    for i, w in enumerate(wins, 1):
-        title = w.get("title") or "win"
-        saving = int(w.get("saving_est_tokens") or 0)
-        ask = bool(w.get("ask")) or saving <= 0
-        measured = w.get("measured") or ""
-        rationale = w.get("rationale") or ""
-        suggestion = w.get("suggestion") or ""
-        path = w.get("path") or ""
-        method = w.get("method") or ""
-        overlaps = w.get("overlaps") or ""
-        if ask and saving <= 0:
-            lines.append(f"{i}. **{title}** — ask / check (saving unknown)")
-        else:
-            lines.append(f"{i}. **{title}** — ~{saving} est. tokens saved")
-        if measured:
-            lines.append(f"   - Measured: {measured}")
-        if method:
-            lines.append(f"   - Method: {method}")
-        if overlaps:
-            lines.append(f"   - Overlap: {overlaps}")
-        if path:
-            lines.append(f"   - Path: `{path}`")
-        if rationale:
-            lines.append(f"   - Why: {rationale}")
-        if suggestion:
-            lines.append(f"   - Suggestion (not applied): {suggestion}")
-        lines.append("")
-    return lines
+def _recon_lines(recon: dict[str, Any] | None) -> list[str]:
+    if not recon:
+        return []
+    ok = "yes" if recon.get("ok") else "NO"
+    return [
+        "## Reconciliation",
+        "",
+        f"- Source total: **{int(recon.get('source_total_tokens') or 0)}**",
+        f"- Sum by_model: **{int(recon.get('by_model_sum') or 0)}**",
+        f"- Sum by_kind: **{int(recon.get('by_kind_sum') or 0)}**",
+        f"- Matches: **{ok}**",
+        "",
+    ]
 
 
 def context_markdown(payload: dict[str, Any]) -> str:
     host = payload.get("host", "unknown")
     items = payload.get("inventory") or []
-    wins = payload.get("wins") or []
     always = [i for i in items if i.get("load") == "always"]
     always_tokens = sum(int(i.get("est_tokens") or 0) for i in always)
     total_tokens = sum(int(i.get("est_tokens") or 0) for i in items)
@@ -61,17 +39,26 @@ def context_markdown(payload: dict[str, Any]) -> str:
         f"~{total_tokens} est. tokens total · "
         f"~{always_tokens} always-loaded (~{len(always)} items).",
         "",
-        "Token figures are approximate (chars ÷ 4) and for ranking only.",
+        "Sizes are approximate (chars ÷ 4) for inventory only — not savings estimates.",
+        "",
+        "## Always-loaded",
         "",
     ]
-    lines.extend(wins_markdown(wins))
+    for i in sorted(always, key=lambda x: -int(x.get("est_tokens") or 0))[:25]:
+        path = i.get("path") or "?"
+        kind = i.get("kind") or ""
+        tok = int(i.get("est_tokens") or 0)
+        lines.append(f"- `{kind}` · ~{tok} tok · `{path}`")
+    if not always:
+        lines.append("_None detected._")
+    lines.append("")
     lines.extend(
         [
             "## Notes",
             "",
             "- Read-only: no files were changed.",
-            "- Proposed fixes are suggestions only — show as a diff; never apply without approval.",
             "- Secret-valued config keys were skipped or redacted.",
+            "- v0.1.0 does not rank savings estimates.",
             "",
         ]
     )
@@ -80,45 +67,60 @@ def context_markdown(payload: dict[str, Any]) -> str:
 
 def token_markdown(payload: dict[str, Any]) -> str:
     host = payload.get("host", "unknown")
-    wins = payload.get("wins") or []
     summary = payload.get("summary") or {}
     notes = payload.get("notes") or []
-    estimate = bool(payload.get("estimate"))
+    data = payload.get("data") or {}
     lines = [
         f"# Token audit ({host})",
         "",
     ]
-    if estimate:
-        lines.append(
-            "**Estimate:** this host does not expose per-bot/tool token logs locally. "
-            "Figures below are labeled estimates."
-        )
-        lines.append("")
     if summary:
         lines.append("## Summary")
         lines.append("")
         for k, v in summary.items():
+            if k == "reconciliation":
+                continue
             lines.append(f"- {k}: {v}")
         lines.append("")
-    lines.extend(wins_markdown(wins))
+    lines.extend(_recon_lines(summary.get("reconciliation") or data.get("reconciliation")))
+
+    by_model = data.get("by_model") or {}
+    if by_model:
+        lines.append("## By model")
+        lines.append("")
+        for model, stats in list(by_model.items())[:15]:
+            if isinstance(stats, dict):
+                tot = int(stats.get("total_tokens") or 0)
+            else:
+                tot = int(stats or 0)
+            lines.append(f"- `{model}`: {tot}")
+        lines.append("")
+
+    by_kind = data.get("by_kind") or {}
+    if by_kind:
+        lines.append("## By kind")
+        lines.append("")
+        for kind, stats in by_kind.items():
+            tot = int((stats or {}).get("total_tokens") or 0)
+            lines.append(f"- `{kind}`: {tot}")
+        lines.append("")
+
     lines.append("## Notes")
     lines.append("")
     if notes:
         for n in notes:
             lines.append(f"- {n}")
     else:
-        lines.append("- Priority: cloud/dashboard usage first, local transcripts second.")
-        lines.append(
-            "- Never scrape login tokens from app databases; use a downloaded CSV "
-            "or opt-in Admin API (`--cursor-admin-api`)."
-        )
+        lines.append("- Prefer official auto sources; otherwise a user-downloaded usage file.")
+        lines.append("- Never scrape login tokens or cookies.")
+    lines.append("")
+    lines.append("- Read-only: no files were changed. v0.1.0 does not estimate savings.")
     lines.append("")
     return "\n".join(lines)
 
 
 def facts_markdown(payload: dict[str, Any]) -> str:
     host = payload.get("host", "unknown")
-    wins = payload.get("wins") or []
     issues = payload.get("issues") or []
     facts = payload.get("facts") or []
     notes = payload.get("notes") or []
@@ -131,22 +133,23 @@ def facts_markdown(payload: dict[str, Any]) -> str:
     for n in notes:
         lines.append(f"> {n}")
         lines.append("")
-    lines.extend(wins_markdown(wins, heading="Biggest cleanup wins"))
     if issues:
         lines.append("## Issues")
         lines.append("")
-        for iss in issues[:20]:
+        for iss in issues[:40]:
             kind = iss.get("kind", "issue")
             path = iss.get("path", "")
             detail = iss.get("detail", "")
             when = iss.get("date") or ""
             extra = f" ({when})" if when else ""
-            # detail already truncated by collector; keep a hard cap
             if len(detail) > 200:
                 detail = detail[:199] + "…"
             lines.append(f"- `{kind}`{extra}: {detail}")
             if path:
                 lines.append(f"  - `{path}`")
+        lines.append("")
+    else:
+        lines.append("_No stale, duplicate, conflict, or orphan issues found._")
         lines.append("")
     lines.extend(
         [
@@ -154,6 +157,7 @@ def facts_markdown(payload: dict[str, Any]) -> str:
             "",
             "- Read-only: propose edits as a diff; do not edit memory without approval.",
             "- Fact quotes are capped (~80 chars) for public-repo safety.",
+            "- v0.1.0 does not rank savings estimates.",
             "",
         ]
     )

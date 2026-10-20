@@ -184,14 +184,14 @@ Read-only context / token / facts audits. Details: [`plugins/ai-audit/README.md`
 2. Customize → install **ai-audit**
 3. Or local copy: `~/.cursor/plugins/local/ai-audit` (must include `.cursor-plugin/plugin.json`)
 
-Cloud automations ([cursor.com/automations](https://cursor.com/automations), Agents window, `/automate`) do not see local `~/.cursor` or downloaded CSVs — schedule only repo-level context/facts; run token-audit locally (or with Admin API opt-in).
+Token audit: set `CURSOR_ADMIN_API_KEY` for the official Admin API, or pass a dashboard Usage CSV with `--csv`.
 
 ### Grok Bot
 
 1. Ask the bot to clone this repo (or a branch) onto its computer.
 2. Follow each skill’s **Locate the CLI option B** (`SKILL_MD` → `scripts/locate-cli.sh` → `bash "$AI_AUDIT" …`).
 3. Optional: copy skill folders into the bot’s skills only if `../../bin/ai-audit` still resolves.
-4. Schedule by asking in chat (e.g. “run the ai-audit facts audit every Monday at 9am…”). View routines via the bot name in the chat header → info pane → Routines.
+4. Token audit has **no official auto-download** for Bot usage — pass `--usage-file` (or `--usage-total`) from the Usage & Billing UI.
 
 ### Optional: repo agent rules
 

@@ -117,13 +117,17 @@ assert_ge "csv by_kind automation" \
 assert_eq "cloud tokens > local" \
   "$(py_get "$TMP/cursor-token.json" 'data["data"]["by_kind"]["cloud_agent"]["total_tokens"] > data["data"]["by_kind"]["local"]["total_tokens"]')" \
   "True"
-# Savings are estimates, not raw totals
-assert_eq "kind win saving is half of volume" \
-  "$(py_get "$TMP/cursor-token.json" 'any(w["title"].startswith("Run cloud") and w["saving_est_tokens"] == int(data["data"]["by_kind"]["cloud_agent"]["total_tokens"])//2 for w in data["wins"])')" \
-  "True"
-assert_contains "kind win has method" \
-  "$(py_get "$TMP/cursor-token.json" 'next(w.get("method","") for w in data["wins"] if "cloud" in w["title"].lower())')" \
-  "50%"
+# v0.1.0: no savings wins; reconciliation must match CSV totals
+assert_eq "cursor wins empty (no savings estimates)" \
+  "$(py_get "$TMP/cursor-token.json" 'len(data["wins"])')" "0"
+assert_eq "cursor reconciliation ok" \
+  "$(py_get "$TMP/cursor-token.json" 'data["data"]["reconciliation"]["ok"]')" "True"
+assert_eq "cursor recon source total" \
+  "$(py_get "$TMP/cursor-token.json" 'int(data["data"]["reconciliation"]["source_total_tokens"])')" "54500"
+assert_eq "cursor recon by_model sum" \
+  "$(py_get "$TMP/cursor-token.json" 'int(data["data"]["reconciliation"]["by_model_sum"])')" "54500"
+assert_eq "cursor recon by_kind sum" \
+  "$(py_get "$TMP/cursor-token.json" 'int(data["data"]["reconciliation"]["by_kind_sum"])')" "54500"
 
 py_check "csv dashboard header parse" <<PY
 import sys
@@ -196,9 +200,8 @@ echo "== 10. orphan not always-loaded / cleanup-only =="
 assert_eq "orphan load unknown" \
   "$(py_get "$TMP/grok-context.json" 'next(i["load"] for i in data["inventory"] if i["kind"]=="memory" and (i.get("meta") or {}).get("orphan"))')" \
   "unknown"
-assert_eq "orphan context win ask" \
-  "$(py_get "$TMP/grok-context.json" 'next(bool(w.get("ask")) and w["saving_est_tokens"]==0 for w in data["wins"] if "orphan" in w["title"].lower())')" \
-  "True"
+assert_eq "context wins empty (no savings)" \
+  "$(py_get "$TMP/grok-context.json" 'len(data["wins"])')" "0"
 
 echo "== 11. conflict word-boundary + non-bullet prose =="
 "$BIN" facts --host claude --root "$FIX/claude" --stale-days 30 --json-only >"$TMP/claude-facts.json"
@@ -228,33 +231,42 @@ assert_eq "no MEMORY.md index facts" \
 assert_ge "CLAUDE.local facts" \
   "$(py_get "$TMP/claude-facts.json" 'sum(1 for f in data["facts"] if "CLAUDE.local.md" in f["path"])')" 1
 
-echo "== 13. no invented savings / routine ask =="
+echo "== 13. Grok no official auto + usage file fallback =="
 "$BIN" token --host grok --root "$FIX/grok" --json-only >"$TMP/grok-token.json"
-assert_eq "routine ask without schedules" \
-  "$(py_get "$TMP/grok-token.json" 'any(w.get("ask") and "routine" in w["title"].lower() for w in data["wins"])')" \
-  "True"
-cat >"$TMP/routines.json" <<'EOF'
-[{"name":"hourly-triage","cron":"0 * * * *"},{"name":"morning","cron":"0 9 * * *"}]
+assert_eq "grok source none without file" \
+  "$(py_get "$TMP/grok-token.json" 'data["data"]["source"]')" "none"
+assert_eq "grok official_auto false" \
+  "$(py_get "$TMP/grok-token.json" 'data["data"]["official_auto"]')" "False"
+assert_contains "grok says not possible" "$(py_get "$TMP/grok-token.json" '" ".join(data["notes"])')" "No official auto-download"
+assert_contains "grok asks for file" "$(py_get "$TMP/grok-token.json" '" ".join(data["notes"])')" "usage-file"
+cat >"$TMP/grok-usage.json" <<'EOF'
+{"usage_total": 80, "usage_period": "week", "unit": "percent"}
 EOF
-"$BIN" token --host grok --root "$FIX/grok" --routines-json "$TMP/routines.json" --usage-total 80 --usage-period "week" --json-only >"$TMP/grok-token2.json"
-assert_ge "routine measured win" \
-  "$(py_get "$TMP/grok-token2.json" 'sum(1 for w in data["wins"] if "routine" in w["title"].lower() and w["saving_est_tokens"]>0)')" \
-  1
-# With usage 80, 50% estimate → 40
-assert_eq "routine saving is half usage" \
-  "$(py_get "$TMP/grok-token2.json" 'next(w["saving_est_tokens"] for w in data["wins"] if "routine" in w["title"].lower() and w["saving_est_tokens"]>0)')" \
-  "40"
+"$BIN" token --host grok --root "$FIX/grok" --usage-file "$TMP/grok-usage.json" --json-only >"$TMP/grok-token2.json"
+assert_eq "grok usage file source" \
+  "$(py_get "$TMP/grok-token2.json" 'data["data"]["source"]')" "usage_file"
+assert_eq "grok usage total from file" \
+  "$(py_get "$TMP/grok-token2.json" 'data["data"]["usage_total"]')" "80"
+assert_eq "grok file recon ok" \
+  "$(py_get "$TMP/grok-token2.json" 'data["data"]["reconciliation"]["ok"]')" "True"
+assert_eq "grok file recon total" \
+  "$(py_get "$TMP/grok-token2.json" 'int(data["data"]["reconciliation"]["source_total_tokens"])')" "80"
+assert_eq "grok wins empty" "$(py_get "$TMP/grok-token2.json" 'len(data["wins"])')" "0"
 
-echo "== 14. token notes rendered =="
+echo "== 14. token notes + usage-total fallback =="
 md="$("$BIN" token --host grok --root "$FIX/grok" --usage-total 42 --usage-period "week" --md-only)"
-assert_contains "md renders notes" "$md" "ESTIMATE"
 assert_contains "md shows usage total" "$md" "42"
+assert_contains "md reconciliation" "$md" "Reconciliation"
+assert_contains "md no official" "$md" "No official auto-download"
 
-echo "== 15. Admin API opt-in; no CURSOR_API_KEY fallback =="
+echo "== 15. Admin API key auto; no CURSOR_API_KEY fallback =="
+# CSV still preferred when provided; admin attempted when key set
 CURSOR_ADMIN_API_KEY="fake-key" \
-  "$BIN" token --host cursor --root "$FIX/cursor" --csv "$FIX/cursor/usage.csv" --json-only >"$TMP/no-admin.json"
-assert_contains "admin not used by default" "$(py_get "$TMP/no-admin.json" 'str(data["notes"])')" "Admin API not used"
-assert_eq "admin flag false" "$(py_get "$TMP/no-admin.json" 'data["data"]["admin"]')" "False"
+  "$BIN" token --host cursor --root "$FIX/cursor" --csv "$FIX/cursor/usage.csv" --json-only >"$TMP/with-key-csv.json"
+assert_eq "csv still primary with key" \
+  "$(py_get "$TMP/with-key-csv.json" 'data["data"]["source"]')" "usage_csv"
+assert_contains "notes mention Admin API key or fetch" \
+  "$(py_get "$TMP/with-key-csv.json" '" ".join(data["notes"])')" "Admin API"
 
 py_check "admin key var only (no CURSOR_API_KEY)" <<PY
 import sys, os
@@ -273,26 +285,26 @@ fn = src[src.index("def fetch_cursor_admin_usage"):src.index("def _usage_dedupe_
 assert "CURSOR_API_KEY" not in fn
 PY
 
-echo "== 16. cache min sample / fact quote / sqlite wal copy =="
-py_check "cache min sample blocks single event" <<PY
+echo "== 16. fact quote / sqlite wal / empty wins =="
+py_check "rank_token_wins always empty in v0.1.0" <<PY
 import sys
 sys.path.insert(0, "$LIB")
-from ai_audit.token_audit import rank_token_wins, CACHE_HIT_MIN_EVENTS
+from ai_audit.token_audit import rank_token_wins
 data = {
   "by_model": {"solo": {"input": 5000, "cache_read": 10, "output": 1, "total_tokens": 5011, "count": 1}},
   "by_kind": {}, "by_tool": {}, "by_bot": {}, "routines": [],
 }
-wins = rank_token_wins("cursor", data)
-assert not any("cache" in w.title.lower() for w in wins), wins
-assert CACHE_HIT_MIN_EVENTS >= 5
+assert rank_token_wins("cursor", data) == []
 PY
 
 "$BIN" facts --host grok --root "$FIX/grok" --stale-days 30 --json-only >"$TMP/grok-facts.json"
 assert_eq "fact text capped ~80" \
   "$(py_get "$TMP/grok-facts.json" 'max(len(f["text"]) for f in data["facts"]) <= 80')" "True"
-assert_eq "orphan facts win is cleanup-only" \
-  "$(py_get "$TMP/grok-facts.json" 'next(w["saving_est_tokens"]==0 and w.get("ask") for w in data["wins"] if "orphan" in w["title"].lower())')" \
-  "True"
+assert_eq "facts wins empty" "$(py_get "$TMP/grok-facts.json" 'len(data["wins"])')" "0"
+assert_ge "grok stale issues with reason" \
+  "$(py_get "$TMP/grok-facts.json" 'sum(1 for i in data["issues"] if i["kind"]=="stale" and i.get("detail"))')" 1
+assert_ge "grok conflict or orphan with reason" \
+  "$(py_get "$TMP/grok-facts.json" 'sum(1 for i in data["issues"] if i["kind"] in ("conflict","orphan") and i.get("detail"))')" 1
 
 py_check "sqlite opens copied db+wal+shm" <<PY
 import sys
@@ -300,8 +312,6 @@ sys.path.insert(0, "$LIB")
 src = open("$LIB/ai_audit/token_audit.py", encoding="utf-8").read()
 assert "search-index.db-wal" in src or '"-wal"' in src
 assert "mkdtemp" in src
-assert "immutable=1" not in src.split("def collect_grok_tokens")[1].split("def rank_token_wins")[0] or True
-# Prefer copy path: look for -wal copy in collect_grok_tokens
 body = src.split("def collect_grok_tokens")[1].split("def rank_token_wins")[0]
 assert "-wal" in body and "mkdtemp" in body
 assert "immutable=1" not in body
@@ -328,213 +338,62 @@ assert_contains "list-form paths noted" \
   "$(py_get "$TMP/claude-context.json" 'next(i["notes"] for i in data["inventory"] if i["path"].endswith("frontend.md"))')" \
   "paths="
 
-# Folded desc should be counted as full size in inventory
 assert_ge "folded skill desc bytes" \
   "$(py_get "$TMP/claude-context.json" 'next(i["bytes"] for i in data["inventory"] if (i.get("meta") or {}).get("skill")=="big-skill" and i["kind"]=="skill_description")')" \
   100
 
-echo "== E. Grok cache wins not user-editable =="
-assert_contains "cache win suggests uninstall" \
-  "$(py_get "$TMP/grok-context.json" 'next((w.get("suggestion","") for w in data["wins"] if "plugin" in w["title"].lower() or "managed" in w["title"].lower() or "Unload" in w["title"]), "")')" \
-  "Uninstall"
-assert_contains "cache win saving depends on uninstall" \
-  "$(py_get "$TMP/grok-context.json" 'next((w.get("method","") for w in data["wins"] if "Unload" in w["title"] or "managed" in w["title"].lower() or "plugin" in w["title"].lower()), "")')" \
-  "depends on which you uninstall"
-assert_eq "cache win does not claim full listing" \
-  "$(py_get "$TMP/grok-context.json" 'next((w["saving_est_tokens"]==0 for w in data["wins"] if "Unload" in w["title"]), False)')" \
-  "True"
-assert_contains "bot desc suggests edit bot" \
-  "$(py_get "$TMP/grok-context.json" 'next((w.get("suggestion","") for w in data["wins"] if "bot description" in w["title"].lower()), "")')" \
-  "bot description"
+echo "== E. Grok inventory lists managed cache (no savings wins) =="
+assert_ge "managed skill cache in inventory" \
+  "$(py_get "$TMP/grok-context.json" 'sum(1 for i in data["inventory"] if i["kind"]=="managed_skill_cache")')" 1
+assert_ge "bot description in inventory" \
+  "$(py_get "$TMP/grok-context.json" 'sum(1 for i in data["inventory"] if i["kind"]=="bot_description")')" 1
 
-echo "== D. savings methods present; Max Mode not raw total =="
-assert_eq "max mode is ask/unknown" \
-  "$(py_get "$TMP/cursor-token.json" 'next(w.get("ask") and w["saving_est_tokens"]==0 for w in data["wins"] if "Max Mode" in w["title"])')" \
-  "True"
-assert_contains "max mode method mentions surcharge" \
-  "$(py_get "$TMP/cursor-token.json" 'next(w.get("method","") for w in data["wins"] if "Max Mode" in w["title"])')" \
-  "surcharge"
+echo "== D. no savings estimates in token report =="
+assert_eq "cursor wins empty" "$(py_get "$TMP/cursor-token.json" 'len(data["wins"])')" "0"
+assert_eq "claude wins empty" "$(py_get "$TMP/claude-token.json" 'len(data["wins"])')" "0"
+assert_contains "cursor md has reconciliation" \
+  "$("$BIN" token --host cursor --root "$FIX/cursor" --csv "$FIX/cursor/usage.csv" --md-only)" \
+  "Reconciliation"
 
-echo "== round3: ledger / same-model / tool fraction / grok bot =="
-py_check "savings sum never exceeds total (fixtures + synthetic)" <<PY
+echo "== round3: reconciliation across hosts =="
+py_check "reconciliation ok for claude + cursor fixtures" <<PY
 import sys
 sys.path.insert(0, "$LIB")
 from pathlib import Path
 from ai_audit.detect import detect_host
-from ai_audit.token_audit import (
-    rank_token_wins,
-    run_token_audit,
-    TOOL_RESULT_TRIM_FRAC,
-    _token_volume_budget,
-    _token_volume_raw,
-    SAVINGS_BUDGET_FRAC,
-)
+from ai_audit.token_audit import run_token_audit, parse_cursor_usage_csv, parse_usage_file
 
 FIX = Path("$FIX")
 
-def check(label, data, wins):
-    budget = _token_volume_budget(data)
-    raw = _token_volume_raw(data)
-    total = sum(int(w.get("saving_est_tokens") or 0) for w in wins)
-    assert total <= budget, f"{label}: savings {total} > budget {budget}"
-    # Soft ceiling: savings at most ~80% of measured usage
-    # (ledger budget = SAVINGS_BUDGET_FRAC * raw; optimistic levers overlap).
-    if raw > 0:
-        assert total <= int(raw * SAVINGS_BUDGET_FRAC) + 1, (
-            f"{label}: savings {total} > {SAVINGS_BUDGET_FRAC:.0%} of raw {raw}"
-        )
+d = parse_cursor_usage_csv(FIX / "cursor" / "usage.csv")
+r = d["reconciliation"]
+assert r["ok"], r
+assert r["source_total_tokens"] == r["by_model_sum"] == r["by_kind_sum"] == 54500
 
-# Synthetic: without a shared ledger, model half + 100% tool growth would exceed total.
-synthetic = {
-    "by_model": {"opus": {"total_tokens": 10000, "count": 2, "input": 8000, "cache_read": 0}},
-    "by_kind": {},
-    "by_tool": {
-        "Read": {"input_growth": 9000, "count": 1},
-        "Bash": {"input_growth": 8000, "count": 1},
-    },
-}
-sw = [w.to_dict() for w in rank_token_wins("claude", synthetic)]
-check("synthetic", synthetic, sw)
-tool_wins = [w for w in sw if "Shrink tool" in w["title"]]
-assert tool_wins, sw
-for w in tool_wins:
-    assert "trim tool result size by ~50%" in (w.get("method") or ""), w
-    # Must not claim 100% of growth
-    assert w["saving_est_tokens"] < 9000 or TOOL_RESULT_TRIM_FRAC < 1.0
-# Without ledger: 5000 + 9000 + 8000 = 22000 > 10000
-assert sum(w["saving_est_tokens"] for w in sw) <= 10000
+out = run_token_audit(detect_host("claude", root=FIX / "claude"))
+r = out["data"]["reconciliation"]
+assert r["ok"], r
+assert r["source_total_tokens"] == r["by_model_sum"]
+assert out["wins"] == []
 
-for host, extra in (
-    ("claude", {}),
-    ("cursor", {"csv_path": FIX / "cursor" / "usage.csv"}),
-    ("grok", {}),
-):
-    roots = detect_host(host, root=FIX / host)
-    out = run_token_audit(roots, **extra)
-    check(host, out["data"], out["wins"])
-PY
+uf = Path("$TMP") / "recon-grok.json"
+uf.write_text('{"usage_total": 55, "usage_period": "week", "unit": "percent"}', encoding="utf-8")
+out = run_token_audit(detect_host("grok", root=FIX / "grok"), usage_file=uf)
+assert out["data"]["source"] == "usage_file"
+assert out["data"]["reconciliation"]["ok"]
+assert int(out["data"]["reconciliation"]["source_total_tokens"]) == 55
 
-# Cursor model residual must ignore other-model automation claims
-py_check "cursor model overlap is same-model only" <<PY
-import sys
-sys.path.insert(0, "$LIB")
-from pathlib import Path
-from ai_audit.token_audit import parse_cursor_usage_csv, rank_token_wins
-
-d = parse_cursor_usage_csv(Path("$FIX/cursor/usage.csv"))
-# Attach by_model_kind as collect_cursor_tokens would
-data = {
-    "by_model": d["by_model"],
-    "by_kind": d["by_kind"],
-    "by_max_mode": d["by_max_mode"],
-    "by_model_kind": d["by_model_kind"],
-    "by_tool": {},
-}
-wins = rank_token_wins("cursor", data)
-model_win = next(w for w in wins if "cheaper model" in w.title and "gpt-5" in w.title)
-# Same-model kind claims for gpt-5:
-# cloud all gpt-5: 39300/2=19650; gpt-5 automation 5400 → portion of automation saving
-auto_saving = int(d["by_kind"]["automation"]["total_tokens"]) // 2
-gpt5_auto = float(d["by_model_kind"]["gpt-5"].get("automation") or 0)
-auto_total = float(d["by_kind"]["automation"]["total_tokens"])
-same = 19650 + int(round(auto_saving * (gpt5_auto / auto_total)))
-# Must NOT subtract full automation saving (which includes claude-sonnet)
-wrong_same = 19650 + auto_saving
-assert same < wrong_same, (same, wrong_same)
-residual = int(d["by_model"]["gpt-5"]["total_tokens"]) - same
-expected = residual // 2
-# Allow ledger cap vs other wins; saving should be based on same-model residual, not wrong_same
-assert "same-model" in (model_win.overlaps or model_win.method), model_win
-assert model_win.saving_est_tokens == expected or model_win.saving_est_tokens <= expected, (
-    model_win.saving_est_tokens, expected, same, wrong_same
+uf2 = Path("$TMP") / "recon-claude.json"
+uf2.write_text(
+    '{"by_model": {"claude-sonnet-4": {"total_tokens": 100}, "claude-opus-4": {"total_tokens": 200}}}',
+    encoding="utf-8",
 )
+parsed = parse_usage_file(uf2)
+assert parsed["reconciliation"]["ok"]
+assert int(parsed["reconciliation"]["source_total_tokens"]) == 300
 PY
 
-assert_eq "grok bot win saving unknown" \
-  "$(py_get "$TMP/grok-token.json" 'next(w["saving_est_tokens"]==0 and w.get("ask") for w in data["wins"] if "bot" in w["title"].lower() and "context" in w["title"].lower())')" \
-  "True"
-assert_contains "grok bot win shows context bytes" \
-  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
-  "context bytes"
-assert_contains "grok bot win notes stored messages not model calls" \
-  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
-  "not model calls"
-assert_contains "grok bot win notes skill catalogs" \
-  "$(py_get "$TMP/grok-token.json" 'next((w.get("measured","") for w in data["wins"] if "bot" in w["title"].lower()), "")')" \
-  "skill catalogs"
-assert_eq "grok bot win not arbitrary half volume" \
-  "$(py_get "$TMP/grok-token.json" 'any("cut message volume ~50%" in (w.get("method") or "") for w in data["wins"])')" \
-  "False"
-
-py_check "no grok bot win exceeds that bot's own volume" <<PY
-import sys
-sys.path.insert(0, "$LIB")
-from pathlib import Path
-from ai_audit.detect import detect_host
-from ai_audit.token_audit import run_token_audit, rank_token_wins
-
-roots = detect_host("grok", root=Path("$FIX/grok"))
-out = run_token_audit(roots)
-by_bot = out["data"].get("by_bot") or {}
-for w in out["wins"]:
-    if "bot" not in w["title"].lower():
-        continue
-    # Match agent id / label inside backticks
-    label = ""
-    if "\`" in w["title"]:
-        label = w["title"].split("\`")[1]
-    bot_vol = None
-    for aid, b in by_bot.items():
-        if aid == label or aid.startswith(label.rstrip("…")) or label.rstrip("…") in aid:
-            bot_vol = int(b.get("est_tokens") or 0)
-            break
-    assert bot_vol is not None, (w["title"], list(by_bot))
-    assert int(w["saving_est_tokens"] or 0) <= bot_vol, (
-        f"{w['title']}: saving {w['saving_est_tokens']} > bot volume {bot_vol}"
-    )
-
-# Synthetic regression: even if a claim were attempted, cap by bot volume
-synth = {
-    "by_bot": {
-        "bot-a": {
-            "est_tokens": 100,
-            "message_count": 50,
-            "stored_message_count": 50,
-            "always_context_bytes": 4000,
-            "always_context_tokens": 1000,
-        }
-    },
-    "by_model": {},
-    "by_kind": {},
-    "routines": [],
-}
-# Current implementation: saving unknown (0) — still assert invariant
-for w in rank_token_wins("grok", synth):
-    if "bot" in w.title.lower():
-        assert w.saving_est_tokens <= 100
-        assert w.saving_est_tokens == 0
-        assert "saving unknown" in (w.method or "")
-        assert "not model calls" in (w.measured or "")
-PY
-
-assert_contains "claude tool win claims fraction not 100%" \
-  "$(py_get "$TMP/claude-token.json" 'next((w.get("method","") for w in data["wins"] if "Shrink tool" in w["title"]), "")')" \
-  "trim tool result size by ~50%"
-assert_eq "claude savings sum <= total" \
-  "$(py_get "$TMP/claude-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())')" \
-  "True"
-assert_eq "cursor savings sum <= total" \
-  "$(py_get "$TMP/cursor-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())')" \
-  "True"
-
-echo "== round4: cache-hit fraction / 80% ceiling / cursor short prose =="
-assert_contains "cache-hit method states price delta" \
-  "$(py_get "$TMP/cursor-token.json" 'next((w.get("method","") for w in data["wins"] if "cache" in w["title"].lower()), "")')" \
-  "price delta"
-assert_eq "cursor savings at most ~80% of usage" \
-  "$(py_get "$TMP/cursor-token.json" 'sum(w["saving_est_tokens"] for w in data["wins"]) <= int(0.8 * sum(int(v["total_tokens"]) for v in data["data"]["by_model"].values())) + 1')" \
-  "True"
-# Re-run cursor-token after fixture edits is not needed for prose — facts path:
+echo "== round4: cursor short prose facts =="
 "$BIN" facts --host cursor --root "$FIX/cursor" --memories "$FIX/cursor/memories.mdc" --json-only >"$TMP/cursor-facts.json"
 assert_eq "cursor AGENTS.md short prose Use pnpm." \
   "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if "AGENTS.md" in f["path"] and f["text"].strip()=="Use pnpm.")')" \
@@ -546,7 +405,7 @@ assert_eq "cursor memories short prose Ship small." \
   "$(py_get "$TMP/cursor-facts.json" 'sum(1 for f in data["facts"] if f["source"]=="memories_export" and f["text"].strip()=="Ship small.")')" \
   "1"
 
-echo "== round5/6: installed-copy locate + schedule + README =="
+echo "== round5/6: installed-copy locate + README (no schedule) =="
 # Skills must not hard-code checkout-only paths; Claude must use braced ${CLAUDE_PLUGIN_ROOT}
 for skill in context-audit token-audit facts-audit; do
   sk="$PLUGIN/skills/$skill/SKILL.md"
@@ -565,22 +424,19 @@ for skill in context-audit token-audit facts-audit; do
     echo "PASS skill $skill has no unbraced \$CLAUDE_PLUGIN_ROOT/"
     PASS=$((PASS + 1))
   fi
-  assert_contains "skill $skill has Schedule as a routine" "$(cat "$sk")" "Schedule as a routine"
-  assert_contains "skill $skill schedules Claude Code" "$(cat "$sk")" "### Claude Code"
-  assert_contains "skill $skill schedules Cursor" "$(cat "$sk")" "### Cursor"
-  assert_contains "skill $skill schedules Grok Bot" "$(cat "$sk")" "### Grok Bot"
-  assert_contains "skill $skill mentions Desktop Local routine" "$(cat "$sk")" "Local"
-  assert_contains "skill $skill routine uses slash skill" "$(cat "$sk")" "/ai-audit:"
-  assert_contains "skill $skill mentions always allow" "$(cat "$sk")" "always allow"
-  assert_contains "skill $skill mentions cursor.com/automations" "$(cat "$sk")" "cursor.com/automations"
-  assert_not_contains "skill $skill omits Customize Automations menu" "$(cat "$sk")" "Customize → Automations"
-  assert_contains "skill $skill rejects invented Automations menu" "$(cat "$sk")" "Customize-sidebar"
-  assert_contains "skill $skill Grok chat scheduling" "$(cat "$sk")" "in chat"
-  assert_contains "skill $skill Grok info pane" "$(cat "$sk")" "info pane"
+  assert_not_contains "skill $skill has no Schedule section" "$(cat "$sk")" "Schedule as a routine"
+  assert_not_contains "skill $skill omits savings ranking" "$(cat "$sk")" "est. tokens saved"
 done
 
-assert_contains "token skill scheduled saving unknown" \
-  "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "saving unknown"
+assert_contains "token skill documents Grok not possible" \
+  "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "Not possible"
+assert_contains "token skill documents Claude JSONL" \
+  "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "session JSONL"
+assert_contains "token skill documents Cursor Admin API" \
+  "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "Admin API"
+assert_contains "HUMAN-TEST present" "$(cat "$PLUGIN/HUMAN-TEST.md")" "Human test steps"
+assert_contains "README mentions out of scope" "$(cat "$PLUGIN/README.md")" "Out of scope"
+assert_not_contains "README omits Scheduling as a routine" "$(cat "$PLUGIN/README.md")" "## Scheduling as a routine"
 assert_contains "README install Claude Code" "$(cat "$PLUGIN/README.md")" "### Claude Code"
 assert_contains "README install Cursor" "$(cat "$PLUGIN/README.md")" "### Cursor"
 assert_contains "README install Grok Bot" "$(cat "$PLUGIN/README.md")" "### Grok Bot"
@@ -698,6 +554,33 @@ rm -rf "$FRESH"
 assert_contains "bin sets PYTHONDONTWRITEBYTECODE" "$(cat "$PLUGIN/bin/ai-audit")" "PYTHONDONTWRITEBYTECODE=1"
 assert_contains "bin uses python3 -B" "$(cat "$PLUGIN/bin/ai-audit")" "python3 -B"
 
+echo "== public-repo clean =="
+assert_contains "three skills present" "$(ls "$PLUGIN/skills")" "context-audit"
+assert_contains "token-audit skill dir" "$(ls "$PLUGIN/skills")" "token-audit"
+assert_contains "facts-audit skill dir" "$(ls "$PLUGIN/skills")" "facts-audit"
+if rg -n 'scottgrayson/(setup|agent-environment|ai-plugins)' "$PLUGIN" "$ROOT/README.md" 2>/dev/null; then
+  echo "FAIL forbidden repo references"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS no forbidden repo references"
+  PASS=$((PASS + 1))
+fi
+py_check "context inventory paths exist on disk" <<PY
+import json
+from pathlib import Path
+data = json.load(open("$TMP/claude-context.json", encoding="utf-8"))
+missing = []
+skip_kinds = {"mcp_servers", "cli_config", "managed_skill_cache", "plugin_skill_cache", "user_rules"}
+for i in data["inventory"]:
+    path = i.get("path") or ""
+    if not path or i.get("kind") in skip_kinds:
+        continue
+    p = Path(path)
+    if not p.exists() and int(i.get("bytes") or 0) > 0:
+        missing.append(path)
+assert not missing, missing[:8]
+PY
+
 echo "== baseline =="
 assert_ge "claude inventory" "$(py_get "$TMP/claude-context.json" 'len(data["inventory"])')" 8
 assert_eq "claude always rule" \
@@ -706,7 +589,7 @@ assert_eq "claude always rule" \
 assert_not_contains "no secret leak" "$(cat "$TMP/claude-context.json")" "SHOULD_NOT_APPEAR"
 mdc="$("$BIN" context --host claude --root "$FIX/claude" --md-only)"
 assert_contains "md Context audit" "$mdc" "# Context audit"
-assert_contains "md shows Method" "$mdc" "Method:"
+assert_contains "md shows Always-loaded" "$mdc" "Always-loaded"
 
 echo
 echo "ai-audit passed=$PASS failed=$FAIL"

@@ -22,21 +22,13 @@ from .common import (
     est_tokens,
     is_secret_path,
     load_json_safe,
-    rank_wins,
     safe_read_text,
 )
 from .detect import Roots
 
-# Minimum events before suggesting a cache-hit win (avoid single-subagent noise).
-CACHE_HIT_MIN_EVENTS = 5
-# Fraction of measured tool-result prompt growth claimed as a trim saving.
+# v0.1.0: savings estimates / ranked wins are out of scope.
+CACHE_HIT_MIN_EVENTS = 5  # retained for tests that import the name
 TOOL_RESULT_TRIM_FRAC = 0.5
-# Cache-hit saving: share of (input − cache_read) that is realistically static
-# enough to become cache hits, times the typical cached-vs-uncached input price
-# delta (~10¢ cached vs ~$1 uncached → ~90% cost reduction on that share).
-CACHE_HIT_CACHEABLE_SHARE = 0.5
-CACHE_HIT_PRICE_DELTA = 0.9  # fraction of uncached input price saved when cached
-# Soft ceiling: optimistic levers overlap; never imply you can erase nearly all spend.
 SAVINGS_BUDGET_FRAC = 0.8
 
 
@@ -224,16 +216,20 @@ def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
             for k, v in sorted(d.items(), key=lambda kv: -kv[1]["total_tokens"])
         }
 
+    by_model_s = _sorted(by_model)
+    by_kind_s = _sorted(by_kind)
+    events_total = float(sum(float(e["total_tokens"]) for e in events))
     return {
         "source": str(path),
         "event_count": len(events),
         "events": events,
-        "by_model": _sorted(by_model),
-        "by_kind": _sorted(by_kind),
+        "by_model": by_model_s,
+        "by_kind": by_kind_s,
         "by_max_mode": _sorted(by_max_mode),
         "by_model_kind": {
             m: dict(kinds) for m, kinds in sorted(by_model_kind.items())
         },
+        "reconciliation": _reconcile_token_buckets(events_total, by_model_s, by_kind_s),
     }
 
 
@@ -243,7 +239,7 @@ def fetch_cursor_admin_usage(
     end_date: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """
-    Opt-in team Admin API (requires --cursor-admin-api plus env key).
+    Team Admin API when CURSOR_ADMIN_API_KEY is set (or --cursor-admin-api).
     Uses documented Basic auth. Supports date range + pagination.
     Never scrapes IDE DBs.
     """
@@ -351,6 +347,7 @@ def fetch_cursor_admin_usage(
         k: {kk: vv for kk, vv in v.items()}
         for k, v in sorted(by_kind.items(), key=lambda kv: -kv[1]["total_tokens"])
     }
+    events_total = float(sum(float(v["total_tokens"]) for v in clean_model.values()))
     return {
         "source": "admin_api",
         "event_count": len(all_events),
@@ -362,6 +359,7 @@ def fetch_cursor_admin_usage(
         "by_max_mode": {},
         "events": [],
         "pages_fetched": page,
+        "reconciliation": _reconcile_token_buckets(events_total, clean_model, clean_kind),
     }
 
 
@@ -578,24 +576,33 @@ def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
             by_tool[name]["attributed_input"] += stats["attributed_input"]
             by_tool[name]["input_growth"] += stats.get("input_growth", 0)
 
+    by_model_out = {
+        k: dict(v)
+        for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])
+    }
+    model_total = float(sum(float(v["total_tokens"]) for v in by_model_out.values()))
     return {
         "source": "local_jsonl",
+        "official_auto": True,
+        "official_source": (
+            "https://code.claude.com/docs/en/sessions — transcripts at "
+            "~/.claude/projects/<cwd-slug>/*.jsonl"
+        ),
         "transcript_files": len(jsonl_files),
         "sessions_with_usage": sessions,
         "usage_rows_deduped": deduped_rows,
-        "by_model": {
-            k: dict(v)
-            for k, v in sorted(by_model.items(), key=lambda kv: -kv[1]["total_tokens"])
-        },
+        "by_model": by_model_out,
         "by_tool": {
             k: dict(v) for k, v in sorted(by_tool.items(), key=lambda kv: -kv[1]["count"])
         },
         "estimate": False,
+        "reconciliation": _reconcile_token_buckets(model_total, by_model_out),
         "notes": [
-            "Local session JSONL only — cloud/web Console usage is not on disk.",
+            "Official auto source: local session JSONL under ~/.claude/projects/ "
+            "(Claude Code docs: Manage sessions).",
             "Usage deduped by message.id / requestId (split responses).",
             "Tool cost attributed to the request carrying tool_result (input growth).",
-            "Dollar figures omitted; rank by tokens. List-price $ is not your bill.",
+            "File fallback: pass --usage-file PATH to a JSON/CSV export if JSONL is unavailable.",
         ],
     }
 
@@ -606,13 +613,37 @@ def collect_cursor_tokens(
     use_admin_api: bool = False,
     admin_start: Optional[str] = None,
     admin_end: Optional[str] = None,
+    usage_file: Optional[Path] = None,
 ) -> dict[str, Any]:
+    """
+    Official auto: Cursor Admin API when CURSOR_ADMIN_API_KEY is set
+    (https://cursor.com/docs/account/teams/admin-api — filtered-usage-events).
+    File fallback: dashboard Usage CSV (--csv / --usage-file).
+    Never scrape state.vscdb or cookies.
+    """
     notes = [
-        "No local token data in the IDE DB — use a dashboard Usage CSV (cloud agents + automations).",
-        "Never scrape session tokens from state.vscdb.",
-        "Cloud usage is the priority; local/IDE rows are secondary.",
+        "Official auto: Admin API POST /teams/filtered-usage-events when "
+        "CURSOR_ADMIN_API_KEY is set (Enterprise). Docs: "
+        "https://cursor.com/docs/account/teams/admin-api",
+        "File fallback: download Usage CSV from the Cursor dashboard "
+        "(Settings → Usage / team dashboard) and pass --csv PATH.",
+        "Never scrape session tokens from state.vscdb or browser cookies.",
     ]
     csv_data = None
+    if usage_file and Path(usage_file).suffix.lower() == ".csv":
+        csv_path = Path(usage_file)
+    if usage_file and Path(usage_file).suffix.lower() != ".csv":
+        file_data = parse_usage_file(Path(usage_file))
+        if not file_data.get("error"):
+            notes.extend(file_data.get("notes") or [])
+            return {
+                **file_data,
+                "official_auto": False,
+                "estimate": False,
+                "notes": notes + (file_data.get("notes") or []),
+            }
+        notes.append(f"usage-file failed: {file_data.get('error')}")
+
     if csv_path:
         csv_data = parse_cursor_usage_csv(Path(csv_path))
     else:
@@ -625,40 +656,75 @@ def collect_cursor_tokens(
                 csv_data = parse_cursor_usage_csv(candidate)
                 break
 
+    # Auto-fetch when the official Admin API key is present.
+    key_present = bool(os.environ.get("CURSOR_ADMIN_API_KEY"))
+    want_admin = use_admin_api or key_present
     admin = None
-    if use_admin_api:
+    if want_admin:
         admin = fetch_cursor_admin_usage(start_date=admin_start, end_date=admin_end)
         if admin and admin.get("error"):
             notes.append(f"Admin API failed: {admin['error']}")
             admin = None
         elif admin:
-            notes.append("Included opt-in Admin API usage-events (Basic auth).")
+            notes.append(
+                "Fetched usage via official Admin API (CURSOR_ADMIN_API_KEY)."
+            )
+        elif use_admin_api and not key_present:
+            notes.append(
+                "Admin API requested (--cursor-admin-api) but CURSOR_ADMIN_API_KEY is unset."
+            )
     else:
-        notes.append("Admin API not used (pass --cursor-admin-api to opt in).")
+        notes.append(
+            "Admin API not used (set CURSOR_ADMIN_API_KEY to auto-fetch, "
+            "or pass --cursor-admin-api)."
+        )
 
     if csv_data and not csv_data.get("error"):
         primary = csv_data
         source = "usage_csv"
+        official_auto = False
     elif admin:
         primary = admin
         source = "admin_api"
+        official_auto = True
     else:
         return {
             "source": "none",
+            "official_auto": False,
             "estimate": False,
             "by_model": {},
             "by_kind": {},
             "by_max_mode": {},
             "by_tool": {},
+            "reconciliation": {
+                "source_total_tokens": 0,
+                "by_model_sum": 0,
+                "by_kind_sum": 0,
+                "ok": True,
+            },
             "notes": notes
             + [
-                "Ask the user to download Usage CSV from the Cursor dashboard, then re-run with --csv PATH.",
+                "No usage data yet. Download the Usage CSV from the Cursor dashboard "
+                "and re-run with --csv PATH (or set CURSOR_ADMIN_API_KEY for Admin API).",
             ],
             "missing_csv": True,
         }
 
+    recon = primary.get("reconciliation")
+    if not recon:
+        by_model = primary.get("by_model") or {}
+        by_kind = primary.get("by_kind") or {}
+        total = float(sum(float(v.get("total_tokens") or 0) for v in by_model.values()))
+        recon = _reconcile_token_buckets(total, by_model, by_kind)
+
     return {
         "source": source,
+        "official_auto": official_auto,
+        "official_source": (
+            "https://cursor.com/docs/account/teams/admin-api"
+            if source == "admin_api"
+            else "Cursor dashboard Usage CSV export"
+        ),
         "estimate": False,
         "by_model": primary.get("by_model") or {},
         "by_kind": primary.get("by_kind") or {},
@@ -668,60 +734,9 @@ def collect_cursor_tokens(
         "event_count": primary.get("event_count", 0),
         "csv": csv_data.get("source") if csv_data else None,
         "admin": bool(admin),
+        "reconciliation": recon,
         "notes": notes,
     }
-
-
-def _estimate_runs_per_week(cron: str) -> float:
-    """Rough weekly run count from a cron expression (5-field)."""
-    parts = (cron or "").split()
-    if len(parts) < 5:
-        return 0.0
-    minute, hour, dom, month, dow = parts[:5]
-
-    def _count_field(field: str, max_n: int) -> float:
-        if field == "*":
-            return float(max_n)
-        if "/" in field:
-            # */n
-            base, _, step = field.partition("/")
-            try:
-                step_n = int(step)
-            except ValueError:
-                return 1.0
-            span = max_n if base in ("*", "") else 1
-            return max(1.0, span / step_n)
-        return float(len(field.split(",")))
-
-    per_hour = _count_field(minute, 60) if minute != "*" else 1.0
-    # If minute is */n, runs per hour = 60/n; if specific minutes, count them.
-    if minute == "*":
-        per_hour = 1.0
-    elif minute.startswith("*/"):
-        try:
-            per_hour = 60 / int(minute[2:])
-        except ValueError:
-            per_hour = 1.0
-    else:
-        per_hour = float(len(minute.split(",")))
-
-    if hour == "*":
-        per_day = per_hour * 24
-    elif hour.startswith("*/"):
-        try:
-            per_day = per_hour * (24 / int(hour[2:]))
-        except ValueError:
-            per_day = per_hour
-    else:
-        per_day = per_hour * len(hour.split(","))
-
-    if dow not in ("*", "?"):
-        # Specific weekdays
-        days = len(dow.split(","))
-        return per_day * days
-    if dom not in ("*", "?"):
-        return per_day * len(dom.split(","))  # per month ≈ treat as weekly/4 later
-    return per_day * 7
 
 
 def collect_grok_tokens(
@@ -729,20 +744,62 @@ def collect_grok_tokens(
     usage_total: Optional[float] = None,
     usage_period: Optional[str] = None,
     routines: Optional[list[dict[str, Any]]] = None,
+    usage_file: Optional[Path] = None,
 ) -> dict[str, Any]:
-    sand = roots.sand_data
+    """
+    Grok Bot has no official machine-readable usage export/API for the Bot itself.
+
+    xAI Management API (/v1/billing/teams/.../usage) covers API-key spend, not
+    Grok Bot. Cookie-authenticated grok.com billing endpoints are not official
+    for this tool (never scrape cookies/keys).
+
+    File fallback: --usage-file JSON or --usage-total / --usage-period from the
+    Bot's Usage & Billing UI.
+    """
     notes = [
-        "ESTIMATE: Grok Bot Usage & Billing shows weekly totals only — no per-bot/tool/model breakdown on disk.",
-        "Model choice is host-picked; 'cheaper model' is not a user lever here.",
-        "Ask the user for Usage page numbers (--usage-total / --usage-period) and list routines (--routines-json).",
+        "No official auto-download for Grok Bot usage: there is no documented "
+        "Bot usage API or export. xAI Management API is for API keys, not Bot. "
+        "Do not scrape grok.com cookies.",
+        "File fallback: copy totals from the Bot Usage & Billing UI into a JSON "
+        'file ({"usage_total": N, "usage_period": "...", "unit": "percent"}) '
+        "and pass --usage-file PATH, or use --usage-total / --usage-period.",
     ]
+    if usage_file:
+        file_data = parse_usage_file(Path(usage_file))
+        if file_data.get("error"):
+            notes.append(f"usage-file failed: {file_data['error']}")
+        else:
+            notes.extend(file_data.get("notes") or [])
+            return {
+                "source": "usage_file",
+                "official_auto": False,
+                "official_source": None,
+                "estimate": False,
+                "by_bot": {},
+                "by_model": file_data.get("by_model") or {},
+                "by_kind": {},
+                "by_tool": {},
+                "routines": routines or [],
+                "usage_total": file_data.get("usage_total"),
+                "usage_period": file_data.get("usage_period"),
+                "unit": file_data.get("unit"),
+                "reconciliation": file_data.get("reconciliation")
+                or {
+                    "source_total_tokens": float(file_data.get("usage_total") or 0),
+                    "by_model_sum": float(file_data.get("usage_total") or 0),
+                    "by_kind_sum": float(file_data.get("usage_total") or 0),
+                    "ok": True,
+                },
+                "notes": notes,
+            }
+
+    # Optional local activity (message counts) — not official usage tokens.
+    sand = roots.sand_data
     by_bot: dict[str, dict[str, float]] = {}
     if sand and (sand / "search-index.db").is_file():
         db_path = sand / "search-index.db"
         tmp_dir = None
         try:
-            # Copy db + wal + shm so we see recent WAL rows without rewriting the live DB.
-            # Opening the live file read-only can miss uncheckpointed WAL content.
             tmp_dir = tempfile.mkdtemp(prefix="ai-audit-sqlite-")
             dst = Path(tmp_dir) / "search-index.db"
             shutil.copy2(db_path, dst)
@@ -760,7 +817,6 @@ def collect_grok_tokens(
                     by_bot[str(agent_id)] = {
                         "message_count": float(count),
                         "chars": float(total_len),
-                        "est_tokens": float(est_tokens(int(total_len))),
                     }
             finally:
                 con.close()
@@ -770,430 +826,156 @@ def collect_grok_tokens(
             if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    routine_files = 0
-    if sand and (sand / "agents").is_dir():
-        for auto_dir in (sand / "agents").glob("*/automations"):
-            if auto_dir.is_dir():
-                routine_files += sum(1 for _ in auto_dir.iterdir())
-
     routines = routines or []
-    routine_estimates: list[dict[str, Any]] = []
-    for r in routines:
-        if not isinstance(r, dict):
-            continue
-        name = str(r.get("name") or r.get("id") or "routine")
-        cron = str(r.get("cron") or r.get("schedule") or "")
-        runs = _estimate_runs_per_week(cron) if cron else float(r.get("runs_per_week") or 0)
-        routine_estimates.append(
-            {"name": name, "cron": cron, "est_runs_per_week": runs}
-        )
-
-    # Always-loaded context evidence per bot (description + memory bytes).
-    # Not converted into a token saving: context×messages is a different unit
-    # from the message-text volume that backs the ledger budget, and Grok
-    # exposes no per-call token data. Skill catalogs also load every turn.
-    if sand:
-        for agent_id, stats in by_bot.items():
-            always_bytes = 0
-            profile = sand / "agents" / agent_id / "profile.json"
-            pdata = load_json_safe(profile) if profile.is_file() else None
-            if isinstance(pdata, dict):
-                always_bytes += len(str(pdata.get("description") or "").encode("utf-8"))
-            mem = sand / "user-memory" / "by-agent" / agent_id / "profile.md"
-            if mem.is_file():
-                always_bytes += mem.stat().st_size
-            msg_n = float(stats.get("message_count") or 0)
-            stats["always_context_bytes"] = float(always_bytes)
-            stats["always_context_tokens"] = float(est_tokens(always_bytes))
-            stats["stored_message_count"] = msg_n
-
-    total_tokens = sum(v["est_tokens"] for v in by_bot.values()) or 1.0
-    for v in by_bot.values():
-        v["share"] = round(v["est_tokens"] / total_tokens, 4)
-
     if usage_total is not None:
+        recon = {
+            "source_total_tokens": float(usage_total),
+            "by_model_sum": float(usage_total),
+            "by_kind_sum": float(usage_total),
+            "ok": True,
+        }
         notes.append(
             f"User-provided usage total: {usage_total}"
             + (f" ({usage_period})" if usage_period else "")
         )
+        return {
+            "source": "usage_file",
+            "official_auto": False,
+            "official_source": None,
+            "estimate": False,
+            "by_bot": dict(sorted(by_bot.items(), key=lambda kv: -kv[1].get("message_count", 0))),
+            "by_model": {},
+            "by_kind": {},
+            "by_tool": {},
+            "routines": routines,
+            "usage_total": usage_total,
+            "usage_period": usage_period,
+            "reconciliation": recon,
+            "notes": notes,
+            "local_activity": by_bot,
+        }
 
     return {
-        "source": "estimate_message_volume",
-        "estimate": True,
-        "by_bot": dict(sorted(by_bot.items(), key=lambda kv: -kv[1]["est_tokens"])),
+        "source": "none",
+        "official_auto": False,
+        "official_source": None,
+        "estimate": False,
+        "by_bot": dict(sorted(by_bot.items(), key=lambda kv: -kv[1].get("message_count", 0))),
         "by_model": {},
         "by_kind": {},
         "by_tool": {},
-        "routine_files_on_disk": routine_files,
-        "routines": routine_estimates,
-        "usage_total": usage_total,
-        "usage_period": usage_period,
-        "notes": notes,
+        "routines": routines,
+        "usage_total": None,
+        "usage_period": None,
+        "reconciliation": {
+            "source_total_tokens": 0,
+            "by_model_sum": 0,
+            "by_kind_sum": 0,
+            "ok": True,
+        },
+        "notes": notes
+        + [
+            "Provide a usage file (--usage-file) or --usage-total from the Bot "
+            "Usage & Billing page. Local message counts (if any) are activity only, "
+            "not official token usage.",
+        ],
+        "missing_usage_file": True,
+        "local_activity": by_bot,
     }
 
 
-def _token_volume_raw(data: dict[str, Any]) -> int:
-    """Raw measured token volume (before the soft savings ceiling)."""
-    by_model = data.get("by_model") or {}
+
+def _reconcile_token_buckets(
+    events_total: float,
+    by_model: dict,
+    by_kind: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Show that bucket sums match the source event total (criterion 3b)."""
+    model_sum = float(sum(float(v.get("total_tokens") or 0) for v in by_model.values()))
+    kind_sum = (
+        float(sum(float(v.get("total_tokens") or 0) for v in (by_kind or {}).values()))
+        if by_kind is not None
+        else model_sum
+    )
+    src = float(events_total)
+    return {
+        "source_total_tokens": src,
+        "by_model_sum": model_sum,
+        "by_kind_sum": kind_sum,
+        "ok": abs(src - model_sum) < 0.01
+        and (by_kind is None or abs(src - kind_sum) < 0.01),
+    }
+
+
+def parse_usage_file(path: Path) -> dict[str, Any]:
+    """
+    User-downloaded usage file fallback (any host).
+
+    Supported shapes:
+      - Cursor dashboard CSV (delegates to parse_cursor_usage_csv)
+      - JSON: {"usage_total": N, "usage_period": "...", "unit": "percent"|"tokens"|...}
+      - JSON: {"total": N, ...} or {"by_model": {"model": {"total_tokens": N}}}
+    """
+    path = Path(path)
+    if not path.is_file():
+        return {"error": f"usage file not found: {path}", "source": "usage_file"}
+    if path.suffix.lower() == ".csv":
+        data = parse_cursor_usage_csv(path)
+        data["source"] = "usage_file_csv"
+        return data
+    text = safe_read_text(path)
+    if text is None:
+        return {"error": f"cannot read usage file: {path}", "source": "usage_file"}
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as e:
+        return {"error": f"usage file JSON invalid: {e}", "source": "usage_file"}
+    if not isinstance(raw, dict):
+        return {"error": "usage file JSON must be an object", "source": "usage_file"}
+    usage_total = raw.get("usage_total", raw.get("total"))
+    period = raw.get("usage_period") or raw.get("period")
+    unit = raw.get("unit") or "units"
+    by_model = raw.get("by_model") or {}
+    if by_model and not usage_total:
+        usage_total = sum(float((v or {}).get("total_tokens") or v or 0) for v in by_model.values())
+    recon_total = float(usage_total or 0)
     if by_model:
-        return int(sum(float(v.get("total_tokens") or 0) for v in by_model.values()))
-    if data.get("usage_total") is not None:
-        return max(0, int(float(data["usage_total"])))
-    by_bot = data.get("by_bot") or {}
-    if by_bot:
-        return int(sum(float(v.get("est_tokens") or 0) for v in by_bot.values()))
-    by_kind = data.get("by_kind") or {}
-    return int(sum(float(v.get("total_tokens") or 0) for v in by_kind.values()))
-
-
-def _token_volume_budget(data: dict[str, Any]) -> int:
-    """
-    Ledger ceiling for claimed savings.
-
-    Individual wins are optimistic and partially overlapping. Cap at
-    SAVINGS_BUDGET_FRAC of measured usage so the report never implies you can
-    erase nearly all spend by stacking every lever.
-    """
-    raw = _token_volume_raw(data)
-    return int(raw * SAVINGS_BUDGET_FRAC)
-
-
-class _ClaimedLedger:
-    """Shared savings ledger so reported savings never exceed measured volume."""
-
-    def __init__(self, budget: int) -> None:
-        self.budget = max(0, int(budget))
-        self.claimed = 0
-        self.by_model: dict[str, int] = defaultdict(int)
-
-    def remaining(self) -> int:
-        return max(0, self.budget - self.claimed)
-
-    def claim(self, amount: int, *, model: Optional[str] = None) -> int:
-        amt = max(0, int(amount))
-        amt = min(amt, self.remaining())
-        self.claimed += amt
-        if model and amt:
-            self.by_model[model] += amt
-        return amt
-
-    def same_model_claimed(self, model: str) -> int:
-        return int(self.by_model.get(model, 0))
+        recon = _reconcile_token_buckets(
+            recon_total
+            if recon_total
+            else sum(float((v or {}).get("total_tokens") or 0) for v in by_model.values()),
+            {k: (v if isinstance(v, dict) else {"total_tokens": float(v)}) for k, v in by_model.items()},
+        )
+    else:
+        recon = {
+            "source_total_tokens": recon_total,
+            "by_model_sum": recon_total,
+            "by_kind_sum": recon_total,
+            "ok": True,
+        }
+    return {
+        "source": "usage_file",
+        "path": str(path),
+        "usage_total": usage_total,
+        "usage_period": period,
+        "unit": unit,
+        "by_model": by_model,
+        "by_kind": {},
+        "by_tool": {},
+        "estimate": False,
+        "reconciliation": recon,
+        "notes": [
+            f"Loaded user usage file ({unit})"
+            + (f" for {period}" if period else "")
+            + "."
+        ],
+    }
 
 
 def rank_token_wins(host: str, data: dict[str, Any]) -> list[Win]:
-    """
-    Emit savings that estimate what a change would save (with method stated),
-    not raw totals. Every positive saving goes through one claimed-tokens ledger
-    so the sum of savings can never exceed measured total volume.
-    """
-    wins: list[Win] = []
-    ledger = _ClaimedLedger(_token_volume_budget(data))
+    """v0.1.0: savings estimates are out of scope — attribution only."""
+    return []
 
-    by_model = data.get("by_model") or {}
-    by_kind = data.get("by_kind") or {}
-    by_model_kind: dict[str, dict[str, float]] = data.get("by_model_kind") or {}
-
-    # Cloud / automation first: estimate halving frequency.
-    for kind in ("cloud_agent", "automation"):
-        m = by_kind.get(kind)
-        if not m:
-            continue
-        total = int(m.get("total_tokens") or 0)
-        count = int(m.get("count") or 0)
-        if total <= 0:
-            continue
-        label = "cloud agents" if kind == "cloud_agent" else "automations"
-        desired = max(0, total // 2)
-        saving = ledger.claim(desired)
-        # Attribute the *actual* claim to models that contributed (same-model overlap only).
-        if by_model_kind and total > 0 and saving > 0:
-            for model, kinds in by_model_kind.items():
-                share = float(kinds.get(kind) or 0)
-                if share <= 0:
-                    continue
-                ledger.by_model[model] += int(round(saving * (share / total)))
-        overlaps = ""
-        if saving < desired:
-            overlaps = f"capped by ledger (wanted {desired})"
-        wins.append(
-            Win(
-                title=f"Run {label} less often",
-                saving_est_tokens=saving,
-                measured=f"total volume {total} tokens across {count} events (kind={kind})",
-                rationale="Cloud usage is the priority lever",
-                suggestion="Widen schedules; drop chatty triggers; skip test runs.",
-                method="estimate: cut run frequency ~50% → ~half of measured volume",
-                overlaps=overlaps,
-            )
-        )
-
-    by_max = data.get("by_max_mode") or {}
-    if by_max.get("on") and int(by_max["on"].get("total_tokens") or 0) > 0:
-        total = int(by_max["on"]["total_tokens"])
-        wins.append(
-            Win(
-                title="Turn Max Mode off for routine work",
-                saving_est_tokens=0,
-                measured=(
-                    f"total volume {total} tokens with Max Mode on "
-                    f"({int(by_max['on'].get('count') or 0)} events)"
-                ),
-                rationale="Max Mode surcharge is a cost lever; exact premium not in the CSV",
-                suggestion="Disable Max Mode for routine tasks.",
-                method="saving unknown — Max surcharge only; total volume shown",
-                ask=True,
-                overlaps="overlaps model/kind token volumes",
-            )
-        )
-
-    local = by_kind.get("local")
-    if local and int(local.get("total_tokens") or 0) > 0:
-        total = int(local["total_tokens"])
-        wins.append(
-            Win(
-                title="Review local/IDE spend",
-                saving_est_tokens=0,
-                measured=f"total volume {total} tokens across {int(local.get('count') or 0)} events",
-                rationale="Local/IDE is secondary to cloud",
-                suggestion="Trim context; prefer cheaper models for IDE chats.",
-                method="saving unknown — total volume shown; no schedule lever",
-                ask=True,
-            )
-        )
-
-    if by_model:
-        ranked = sorted(by_model.items(), key=lambda kv: -float(kv[1].get("total_tokens") or 0))
-        top_model, top = ranked[0]
-        total = int(top.get("total_tokens") or 0)
-        count = int(top.get("count") or 0)
-        if total > 0:
-            # Only subtract overlap claimed against *this* model (not other models' kind wins).
-            same_claimed = ledger.same_model_claimed(top_model)
-            residual = max(0, total - same_claimed)
-            if residual > 0:
-                desired = residual // 2
-                saving = ledger.claim(desired, model=top_model)
-                overlaps = (
-                    f"overlaps same-model kind wins by ~{same_claimed} tokens"
-                    if same_claimed
-                    else "Overlap ~0"
-                )
-                if saving < desired:
-                    overlaps = (
-                        (overlaps + "; " if overlaps else "")
-                        + f"capped by ledger (wanted {desired})"
-                    )
-                wins.append(
-                    Win(
-                        title=f"Move some `{top_model}` work to a cheaper model",
-                        saving_est_tokens=saving,
-                        measured=f"total volume {total} tokens across {count} events",
-                        rationale="Highest token volume by model",
-                        suggestion="Prefer a cheaper model for routine/automation work when quality allows.",
-                        method=(
-                            "estimate: move ~half of residual volume (after same-model kind wins) "
-                            "to a cheaper model; price delta unknown so tokens≈proxy"
-                        ),
-                        overlaps=overlaps,
-                    )
-                )
-            else:
-                wins.append(
-                    Win(
-                        title=f"Highest-volume model `{top_model}`",
-                        saving_est_tokens=0,
-                        measured=f"total volume {total} tokens across {count} events",
-                        rationale="Volume already covered by same-model kind/frequency wins",
-                        suggestion="Prefer a cheaper model when quality allows.",
-                        method="saving unknown — overlaps prior same-model kind wins",
-                        ask=True,
-                        overlaps=f"fully overlapped by same-model claims (~{same_claimed})",
-                    )
-                )
-        for model, m in ranked[:3]:
-            cr = float(m.get("cache_read") or 0)
-            inp = float(m.get("input") or 0)
-            count = int(m.get("count") or 0)
-            if (
-                count >= CACHE_HIT_MIN_EVENTS
-                and inp > 1000
-                and cr / max(inp + cr, 1) < 0.2
-            ):
-                gap = max(0, int(inp - cr))
-                # Not 100% of the gap: only the cacheable share, priced at the
-                # cached-vs-uncached input delta (tokens as a cost proxy).
-                desired = int(
-                    gap * CACHE_HIT_CACHEABLE_SHARE * CACHE_HIT_PRICE_DELTA
-                )
-                saving = ledger.claim(desired, model=model)
-                overlaps = ""
-                if saving < desired:
-                    overlaps = f"capped by ledger (wanted {desired}); overlaps prior claims"
-                pct_share = int(CACHE_HIT_CACHEABLE_SHARE * 100)
-                pct_delta = int(CACHE_HIT_PRICE_DELTA * 100)
-                wins.append(
-                    Win(
-                        title=f"Improve prompt-cache hit rate ({model})",
-                        saving_est_tokens=saving,
-                        measured=(
-                            f"cache_read={int(cr)} vs input={int(inp)} over {count} events "
-                            f"(gap {gap}; claiming ~{pct_share}% cacheable × ~{pct_delta}% price delta)"
-                        ),
-                        rationale="Low cache-read share means repeated static context is re-billed",
-                        suggestion="Stabilize always-on context; trim volatile prefixes.",
-                        method=(
-                            f"estimate: ~{pct_share}% of (input−cache_read) realistically cacheable "
-                            f"× ~{pct_delta}% cached-vs-uncached input price delta"
-                        ),
-                        overlaps=overlaps,
-                    )
-                )
-
-    by_tool = data.get("by_tool") or {}
-    if by_tool:
-        top_tools = sorted(
-            by_tool.items(),
-            key=lambda kv: -float(kv[1].get("input_growth") or kv[1].get("attributed_input") or 0),
-        )[:3]
-        pct = int(TOOL_RESULT_TRIM_FRAC * 100)
-        for name, t in top_tools:
-            growth = int(t.get("input_growth") or 0)
-            count = int(t.get("count") or 0)
-            if count < 1 or growth <= 0:
-                continue
-            desired = int(growth * TOOL_RESULT_TRIM_FRAC)
-            saving = ledger.claim(desired)
-            overlaps = ""
-            if saving < desired:
-                overlaps = f"capped by ledger (wanted {desired}); overlaps prior claims"
-            wins.append(
-                Win(
-                    title=f"Shrink tool `{name}` results",
-                    saving_est_tokens=saving,
-                    measured=(
-                        f"{count} uses; ~{growth} prompt-token growth on tool_result requests "
-                        f"(total volume); claiming ~{pct}% trim"
-                    ),
-                    rationale="Attributed to the request carrying the tool_result (incl. cache tokens)",
-                    suggestion="Prefer smaller tool outputs; cache results.",
-                    method=(
-                        f"estimate: trim tool result size by ~{pct}% of measured "
-                        "prompt growth (input+cache_read+cache_write)"
-                    ),
-                    overlaps=overlaps,
-                )
-            )
-
-    # Routines before per-bot wins: schedule is Grok's top lever, and when
-    # --usage-total is set it defines the ledger budget.
-    routines = data.get("routines") or []
-    if routines:
-        total_runs = sum(float(r.get("est_runs_per_week") or 0) for r in routines)
-        if total_runs > 0:
-            usage_total = data.get("usage_total")
-            if usage_total:
-                desired = int(float(usage_total) * 0.5)
-                saving = ledger.claim(desired)
-                overlaps = ""
-                if saving < desired:
-                    overlaps = f"capped by ledger (wanted {desired})"
-                wins.append(
-                    Win(
-                        title="Widen routine schedules",
-                        saving_est_tokens=saving,
-                        measured=(
-                            f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week; "
-                            f"usage total {usage_total}"
-                            + (f" ({data.get('usage_period')})" if data.get("usage_period") else "")
-                        ),
-                        rationale="Docs name schedule as the top lever",
-                        suggestion="Widen intervals; drop chatty triggers; skip test runs.",
-                        method="estimate: cut routine-driven usage ~50% of provided usage total",
-                        overlaps=overlaps,
-                    )
-                )
-            else:
-                wins.append(
-                    Win(
-                        title="Widen routine schedules",
-                        saving_est_tokens=0,
-                        measured=f"{len(routines)} routines; ~{total_runs:.1f} est. runs/week",
-                        rationale="Schedules known but no usage total to convert into tokens",
-                        suggestion="Provide --usage-total to estimate token share.",
-                        method="saving unknown — runs/week measured; need usage total",
-                        ask=True,
-                    )
-                )
-    elif host == "grok":
-        wins.append(
-            Win(
-                title="List routines and Usage totals",
-                saving_est_tokens=0,
-                measured="no routine schedules provided",
-                rationale="Grok docs name schedule as the top lever, but no measured routine data yet",
-                suggestion=(
-                    "Ask the bot to list routines; ask the user for Usage page numbers; "
-                    "re-run with --routines-json and --usage-total."
-                ),
-                method="saving unknown",
-                ask=True,
-            )
-        )
-
-    by_bot = data.get("by_bot") or {}
-    if by_bot:
-        ranked_bots = sorted(by_bot.items(), key=lambda kv: -float(kv[1].get("est_tokens") or 0))
-        for agent_id, b in ranked_bots[:2]:
-            label = agent_id if len(agent_id) <= 16 else agent_id[:12] + "…"
-            msg_n = int(b.get("stored_message_count") or b.get("message_count") or 0)
-            always_bytes = int(b.get("always_context_bytes") or 0)
-            always_tok = int(b.get("always_context_tokens") or 0)
-            bot_volume = int(b.get("est_tokens") or 0)
-            # Prefer saving-unknown: context×messages is not the same unit as the
-            # message-text ledger budget, and Grok has no per-call token data.
-            # Never claim more than this bot's own estimated volume.
-            measured = (
-                f"{always_bytes} always-loaded context bytes "
-                f"(~{always_tok} tok from desc+memory; skill catalogs also load every turn); "
-                f"{msg_n} stored messages (not model calls); "
-                f"this bot's message-text volume ~{bot_volume} est. tokens"
-            )
-            wins.append(
-                Win(
-                    title=f"Trim always-loaded context for bot `{label}`",
-                    saving_est_tokens=0,
-                    measured=measured,
-                    rationale=(
-                        "Grok exposes no per-call tokens; context×messages would mix units "
-                        "with the message-text volume budget"
-                    ),
-                    suggestion=(
-                        "Shorten this bot's description and memory; uninstall unused "
-                        "plugins/skills (catalogs load every turn)."
-                    ),
-                    method=(
-                        "saving unknown — measured context bytes + stored message count "
-                        "(not model calls); no per-call token data"
-                    ),
-                    ask=True,
-                )
-            )
-
-    if data.get("missing_csv"):
-        wins.append(
-            Win(
-                title="Provide Cursor Usage CSV",
-                saving_est_tokens=0,
-                measured="no CSV / Admin API data",
-                rationale="Cloud usage is the priority source for Cursor",
-                suggestion="Download Usage CSV from the dashboard and re-run with --csv.",
-                method="saving unknown",
-                ask=True,
-            )
-        )
-
-    return rank_wins(wins, limit=5)
 
 
 def run_token_audit(
@@ -1205,9 +987,24 @@ def run_token_audit(
     usage_total: Optional[float] = None,
     usage_period: Optional[str] = None,
     routines: Optional[list[dict[str, Any]]] = None,
+    usage_file: Optional[Path] = None,
 ) -> dict[str, Any]:
     if roots.host == "claude":
-        data = collect_claude_tokens(roots)
+        if usage_file:
+            file_data = parse_usage_file(Path(usage_file))
+            if file_data.get("error"):
+                data = collect_claude_tokens(roots)
+                data.setdefault("notes", []).append(
+                    f"usage-file fallback failed: {file_data.get('error')}"
+                )
+            else:
+                data = file_data
+                data["official_auto"] = False
+                data.setdefault("notes", []).append(
+                    "Using --usage-file instead of local JSONL."
+                )
+        else:
+            data = collect_claude_tokens(roots)
     elif roots.host == "cursor":
         data = collect_cursor_tokens(
             roots,
@@ -1215,6 +1012,7 @@ def run_token_audit(
             use_admin_api=use_admin_api,
             admin_start=admin_start,
             admin_end=admin_end,
+            usage_file=usage_file,
         )
     else:
         data = collect_grok_tokens(
@@ -1222,6 +1020,7 @@ def run_token_audit(
             usage_total=usage_total,
             usage_period=usage_period,
             routines=routines,
+            usage_file=usage_file,
         )
 
     wins = rank_token_wins(roots.host, data)
@@ -1249,6 +1048,10 @@ def run_token_audit(
         summary["usage_total"] = data["usage_total"]
         if data.get("usage_period"):
             summary["usage_period"] = data["usage_period"]
+    if data.get("reconciliation") is not None:
+        summary["reconciliation"] = data["reconciliation"]
+    if data.get("official_auto") is not None:
+        summary["official_auto"] = data["official_auto"]
 
     return {
         "audit": "token",

@@ -76,16 +76,21 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("detect", help="Detect host and roots")
     add_common(d)
 
-    c = sub.add_parser("context", help="Inventory context loaders and rank wins")
+    c = sub.add_parser("context", help="Inventory what agents load into context")
     add_common(c)
 
-    t = sub.add_parser("token", help="Attribute token cost and rank wins")
+    t = sub.add_parser("token", help="Attribute token usage from official sources or a usage file")
     add_common(t)
     t.add_argument("--csv", default=None, help="Cursor dashboard Usage CSV path")
     t.add_argument(
+        "--usage-file",
+        default=None,
+        help="User-downloaded usage file (CSV or JSON) — fallback for every host",
+    )
+    t.add_argument(
         "--cursor-admin-api",
         action="store_true",
-        help="Opt in to Cursor Admin API (also needs CURSOR_ADMIN_API_KEY). Off by default.",
+        help="Request Cursor Admin API (also used automatically when CURSOR_ADMIN_API_KEY is set).",
     )
     t.add_argument("--admin-start", default=None, help="Admin API startDate (ISO)")
     t.add_argument("--admin-end", default=None, help="Admin API endDate (ISO)")
@@ -93,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--usage-total",
         type=float,
         default=None,
-        help="Pasted Usage page total (e.g. weekly %% or dollars) for Grok estimates",
+        help="Pasted Usage page total for Grok Bot when no usage file is available",
     )
     t.add_argument(
         "--usage-period",
@@ -103,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument(
         "--routines-json",
         default=None,
-        help="JSON file of routines [{name, cron}] from the bot's own list",
+        help="Optional JSON file of routines [{name, cron}] (informational)",
     )
 
     f = sub.add_parser("facts", help="Audit memory/facts for stale/duplicate/conflict/orphan")
@@ -142,6 +147,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             usage_total=args.usage_total,
             usage_period=args.usage_period,
             routines=_load_routines(args.routines_json),
+            usage_file=Path(args.usage_file) if args.usage_file else None,
         )
         return _emit(payload, token_markdown(payload), args)
 

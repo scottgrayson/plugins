@@ -1,11 +1,12 @@
 ---
 name: context-audit
-description: Inventory everything that loads into an agent's context and rank the 3–5 biggest size wins. Read-only; never applies fixes.
+description: Inventory everything that loads into an agent's context. Read-only; never applies fixes.
+disable-model-invocation: true
 ---
 
 # context-audit
 
-Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, plugins, routines/automations, bot descriptions, and memory. Rank the 3–5 biggest wins by estimated tokens saved (chars ÷ 4).
+Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, plugins, bot descriptions, and memory. Lists what agents actually load and matches paths on disk.
 
 ## Locate the CLI
 
@@ -39,7 +40,7 @@ bash "$AI_AUDIT" context --host cursor --project .
 bash "$AI_AUDIT" context --host grok
 ```
 
-Show the markdown report to the user. Proposed fixes are **suggestions only** — present as a diff; never edit files.
+Show the markdown report to the user. Proposed fixes are **suggestions only** — present as a diff; never edit files. v0.1.0 does not estimate savings or schedule runs.
 
 ## When to ask the user
 
@@ -50,27 +51,3 @@ Show the markdown report to the user. Proposed fixes are **suggestions only** �
 | Claude live breakdown | Paste `/context` output to calibrate |
 
 Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases.
-
-## Schedule as a routine
-
-Keep the audit on a cadence so context bloat is caught early. The core stays read-only.
-
-### Claude Code
-
-- **`/loop` is session-scoped** and expires after ~7 days — not a durable schedule.
-- **Cloud Routines** (`/schedule`) run remotely and **cannot see local files** (no home `.claude`, no local plugin cache). Use them only for **repo-only** context audits on a connected repository.
-- **Preferred:** Claude Desktop → **Routines** page → **New routine** → **Local**. Local routines can see the installed plugin and project files.
-- Example local routine prompt: `Run /ai-audit:context-audit and reply with the top wins. Do not edit files.`
-  (`${CLAUDE_PLUGIN_ROOT}` is **not** substituted in routine prompts — use the slash-skill form.)
-- After creating the routine, click **Run now** once and choose **always allow** at the Bash permission prompt so scheduled runs do not stall in Manual permission mode.
-
-### Cursor
-
-- Entry points (documented): [cursor.com/automations](https://cursor.com/automations), the **Agents** window, or the `/automate` skill. Do **not** invent a Customize-sidebar Automations menu.
-- Automations run as **cloud agents**: they do **not** see local `~/.cursor`, a local plugin copy, or a downloaded Usage CSV.
-- Therefore scheduling suits **repo-level** context audits (project rules/skills in the attached repo). For anything that needs the local plugin install, run the skill in a local agent session instead.
-
-### Grok Bot
-
-- Create a routine by asking the bot **in chat** in plain words, e.g. `Run the ai-audit context audit every Monday at 9am and send me the top wins. Do not edit files.`
-- View routines by clicking the **bot’s name** in the chat header — that opens the info pane with a **Routines** list. Do not look under “bot settings” or an “automations list”.

@@ -1,11 +1,12 @@
 ---
 name: facts-audit
 description: Check saved memory/facts for staleness, duplicates, conflicts, and orphaned files. Read-only; propose diffs only.
+disable-model-invocation: true
 ---
 
 # facts-audit
 
-Scan saved memory/facts for stale dates, duplicates, conflicts, and orphans. Output ranked cleanup wins. **Never edit memory without explicit approval** — show a diff/suggestion only.
+Scan saved memory/facts for stale dates, duplicates, conflicts, and orphans. Each issue includes a reason. **Never edit memory without explicit approval** — show a diff/suggestion only.
 
 ## Locate the CLI
 
@@ -54,27 +55,4 @@ For Cursor: explain that memories are server-side; ask the user to run **Export 
 - Read-only by default.
 - Prefer newer dated facts when resolving conflicts.
 - Do not open secret files or print tokens.
-
-## Schedule as a routine
-
-Memory drifts slowly — monthly is usually enough. Never edit memory without approval.
-
-### Claude Code
-
-- **`/loop`** is session-scoped (~7 day expiry). **Cloud Routines** cannot see local auto-memory under `~/.claude`.
-- **Preferred:** Claude Desktop → **Routines** → **New routine** → **Local**.
-- Example local routine prompt: `Run /ai-audit:facts-audit and reply with the top wins. Do not edit files.`
-  (`${CLAUDE_PLUGIN_ROOT}` is **not** substituted in routine prompts — use the slash-skill form.)
-- After creating the routine, click **Run now** once and choose **always allow** at the Bash permission prompt so scheduled runs do not stall in Manual permission mode.
-- Cloud routines only fit **repo-only** facts (e.g. `AGENTS.md` / rules committed in the repo).
-
-### Cursor
-
-- Entry points: [cursor.com/automations](https://cursor.com/automations), the **Agents** window, or `/automate`. Do **not** invent a Customize-sidebar Automations menu.
-- Cloud automations see the **attached repo**, not local `~/.cursor` or a memories export on disk.
-- Schedule **repo-level** facts audits (rules / `AGENTS.md` in the repo). For exported memories `.mdc`, run facts-audit **locally** with `--memories`.
-
-### Grok Bot
-
-- Ask the bot **in chat**: e.g. `Run the ai-audit facts audit every Monday at 9am and send me the top wins. Do not edit profile.md.`
-- View routines via the bot name in the chat header → info pane → **Routines** list.
+- v0.1.0 does not estimate savings or schedule runs.

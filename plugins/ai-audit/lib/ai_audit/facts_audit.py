@@ -15,7 +15,6 @@ from .common import (
     fact_hash,
     parse_front_matter,
     parse_iso_date,
-    rank_wins,
     safe_read_text,
     similarity,
     today_utc,
@@ -435,36 +434,9 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
 
 
 def issues_to_wins(issues: list[FactIssue]) -> list[Win]:
-    wins: list[Win] = []
-    by_kind: dict[str, list[FactIssue]] = {}
-    for iss in issues:
-        by_kind.setdefault(iss.kind, []).append(iss)
+    """v0.1.0: savings-ranked wins out of scope — issues carry the reasons."""
+    return []
 
-    for kind, group in by_kind.items():
-        saving = sum(i.saving_est_tokens for i in group)
-        is_orphan = kind == "orphan"
-        wins.append(
-            Win(
-                title={
-                    "stale": "Drop or refresh stale facts",
-                    "duplicate": "Deduplicate repeated facts",
-                    "conflict": "Resolve conflicting facts",
-                    "orphan": "Remove orphaned memory files",
-                }.get(kind, f"Fix {kind} issues"),
-                saving_est_tokens=0 if is_orphan else (saving if saving > 0 else 0),
-                measured=(
-                    f"{len(group)} {kind} issue(s); cleanup only"
-                    if is_orphan
-                    else f"{len(group)} {kind} issue(s); ~{saving} est. tokens"
-                ),
-                rationale=_q(group[0].detail, 160),
-                suggestion=group[0].suggestion or "Show a diff; apply only after approval.",
-                path=group[0].path,
-                ask=is_orphan or saving <= 0,
-                method="cleanup only — no token saving" if is_orphan else "sum of issue sizes",
-            )
-        )
-    return rank_wins(wins, limit=5)
 
 
 def run_facts_audit(

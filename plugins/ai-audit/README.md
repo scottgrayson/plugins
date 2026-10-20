@@ -1,18 +1,20 @@
 # ai-audit
 
-Read-only audits of what loads into an agent's context, where token cost comes from, and whether saved facts are stale, duplicated, conflicting, or orphaned.
+Read-only audits of what loads into an agent's context, where token usage comes from, and whether saved facts are stale, duplicated, conflicting, or orphaned.
 
 Three on-demand skills share one deterministic core (`bin/ai-audit`):
 
 | Skill | What it answers |
 | --- | --- |
-| `context-audit` | What loads into context, how big it is, always vs on-demand, and the 3–5 biggest wins |
-| `token-audit` | Where token cost comes from (by bot/agent, routine/automation, model, tool) |
-| `facts-audit` | Stale, duplicate, conflicting, or orphaned memory/facts |
+| `context-audit` | What loads into context, how big it is, always vs on-demand |
+| `token-audit` | Where token usage comes from (official logs/API or a usage file) |
+| `facts-audit` | Stale, duplicate, conflicting, or orphaned memory/facts (with reasons) |
 
 **Hard rules:** the core never changes files, never applies fixes (suggestions and diffs only), never reads or prints secret values, and never lifts login tokens from app databases.
 
-Version: **0.1.0**. Full marketplace install guide: [root README](../../README.md).
+**Out of scope for v0.1.0:** scheduled runs and savings estimates.
+
+Version: **0.1.0**. Full marketplace install guide: [root README](../../README.md). Human smoke steps: [HUMAN-TEST.md](HUMAN-TEST.md).
 
 ---
 
@@ -80,13 +82,8 @@ From an **installed** plugin root (or after locate):
 bash bin/ai-audit detect
 bash bin/ai-audit context --host auto
 bash bin/ai-audit token --host cursor --csv path/to/usage.csv
+bash bin/ai-audit token --host grok --usage-file path/to/usage.json
 bash bin/ai-audit facts --host grok --stale-days 30
-```
-
-From a marketplace **checkout** (dev only):
-
-```bash
-bash "$PWD/plugins/ai-audit/bin/ai-audit" detect
 ```
 
 Useful flags:
@@ -97,6 +94,7 @@ Useful flags:
 | `--root PATH` | Override home / project / sand-data roots (tests and fixtures) |
 | `--project PATH` | Project directory for Claude/Cursor collectors |
 | `--csv PATH` | Cursor usage CSV from the dashboard |
+| `--usage-file PATH` | User-downloaded usage file (CSV or JSON) for any host |
 | `--memories PATH` | Cursor exported memories `.mdc` |
 | `--stale-days N` | Facts older than N days are stale (default 30) |
 | `--json-only` / `--md-only` | Emit only one format (default: both) |
@@ -104,22 +102,20 @@ Useful flags:
 
 ---
 
-## What each host can measure
+## Token usage sources (official)
 
-- **Claude Code:** file-based context inventory; local session JSONL for tokens; auto-memory topic `modified` dates for facts.
-- **Cursor:** file-based context inventory; usage CSV (and optional Admin API via env) for tokens; memories only if an exported `.mdc` is provided.
-- **Grok Bot:** workflows / agent profiles / `profile.md` memory on disk; token usage estimated from message volume (labeled as estimate); routines via `--routines-json`.
+| Host | Official auto-download | Link / note |
+| --- | --- | --- |
+| Claude Code | Yes — local session JSONL | [Manage sessions](https://code.claude.com/docs/en/sessions) (`~/.claude/projects/<cwd-slug>/*.jsonl`) |
+| Cursor | Yes — Admin API when `CURSOR_ADMIN_API_KEY` is set | [Admin API](https://cursor.com/docs/account/teams/admin-api) (`POST /teams/filtered-usage-events`). File fallback: dashboard Usage CSV |
+| Grok Bot | **Not possible** | No documented Bot usage API/export. xAI Management API covers API-key spend, not Bot. Ask for a Usage & Billing JSON file (`--usage-file`) |
+
+Never scraping. Never copied cookies/keys. Totals in the report include a **reconciliation** block (source total vs sum of buckets).
 
 ---
 
-## Scheduling as a routine
+## What each host can measure
 
-Each skill’s `SKILL.md` has accurate host-specific steps. Summary:
-
-| Host | What works |
-| --- | --- |
-| Claude Code | Prefer **Claude Desktop → Routines → New routine → Local** with prompt `Run /ai-audit:<skill> and reply with the top wins. Do not edit files.` (routine prompts do not expand `${CLAUDE_PLUGIN_ROOT}`). Click **Run now** once and choose **always allow** at the Bash prompt. `/loop` is session-scoped (~7 days). Cloud `/schedule` cannot see local files (repo-only only). |
-| Cursor | Use [cursor.com/automations](https://cursor.com/automations), the Agents window, or `/automate`. Cloud automations lack local `~/.cursor`, the local plugin, and downloaded CSVs — fine for **repo-level** context/facts; token audits need a **local** run or explicit Admin API opt-in. |
-| Grok Bot | Ask the bot **in chat** to schedule (plain words). View via bot name → info pane → **Routines**. Scheduled token audits must not ask for Usage numbers (report saving unknown + note). |
-
-The core stays read-only — routines summarize wins and never apply edits without approval.
+- **Claude Code:** file-based context inventory; local session JSONL for tokens; auto-memory topic `modified` dates for facts.
+- **Cursor:** file-based context inventory; Usage CSV or Admin API for tokens; memories only if an exported `.mdc` is provided.
+- **Grok Bot:** workflows / agent profiles / `profile.md` memory on disk; token usage only from a user-provided usage file or `--usage-total`.
