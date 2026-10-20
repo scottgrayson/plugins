@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -191,6 +192,13 @@ _REDIS_A_RE = re.compile(
 _HTPASSWD_B_RE = re.compile(
     rf"(?i)(?<![\w-])htpasswd\b(?:\s+-[A-Za-z]+)*\s+-[A-Za-z]*b[A-Za-z]*"
     rf"(?:\s+-[A-Za-z]+)*\s+\S+\s+\S+\s+({_VALUE_EQ})"
+)
+# net use \\host\share PASS /user:x ; echo PASS | sudo -S
+_NET_USE_RE = re.compile(
+    rf"(?i)(?<![\w-])net\s+use\s+(?:\S+\s+)?\\\\\S+\s+({_VALUE_EQ})(?=\s+/user:|\s*$)"
+)
+_SUDO_S_RE = re.compile(
+    rf"(?i)(?<![\w-])echo\s+(?:-[A-Za-z]+\s+)*({_VALUE_EQ})\s*\|\s*sudo\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*S"
 )
 # URL query ?name=value &name=value
 _ASSIGN_QUERY_RE = re.compile(
@@ -855,7 +863,7 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
                 )
             )
 
-    for rx, grp in ((_REDIS_A_RE, 3), (_HTPASSWD_B_RE, 1)):
+    for rx, grp in ((_REDIS_A_RE, 3), (_HTPASSWD_B_RE, 1), (_NET_USE_RE, 1), (_SUDO_S_RE, 1)):
         for m in rx.finditer(text):
             vs = m.start(grp)
             hit = _hit_from_name_sep(text, m.start(), "p", vs, "flag")
@@ -1007,22 +1015,91 @@ def redact_secrets(text: str) -> str:
     return out
 
 
-def redact_tree(obj: Any) -> Any:
-    """Deep-copy-ish walk: redact every string leaf except filesystem path fields."""
-    if isinstance(obj, str):
-        return redact_secrets(obj)
-    if isinstance(obj, list):
-        return [redact_tree(x) for x in obj]
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            if k in _PATH_FIELD_KEYS and isinstance(v, str):
-                out[k] = v
-            else:
-                out[k] = redact_tree(v)
+_STRONG_SECRET_RE = re.compile(
+    r"pass[\s_-]?word|passwd|passw0rd|(?<![a-z0-9])pwd(?![a-z0-9])|secret|"
+    r"private[\s_-]?key|api[\s_-]?key|credential|access[\s_-]?key|"
+    r"auth[\s_-]?token|bearer"
+)
+_BARE_NAME_RE = re.compile(
+    r"[A-Za-z0-9_-]+(?:\.(?:md|mdc|json|jsonc|toml|ya?ml|txt|sh|py|js|ts))?"
+)
+# Path-shaped (rendered as a path, not prose): rooted or ~-relative, no whitespace.
+_PATH_SHAPE_RE = re.compile(r"(?:~|\.{1,2})?/\S*|~\S*|[A-Za-z]:\\\S*|\\\\\S*")
+# Keys whose string values are rendered as paths (exempt from the backstop when
+# they contain no whitespace). "source" is the short path column in the tables.
+_BACKSTOP_PATH_KEYS = _PATH_FIELD_KEYS | {"source"}
+HIDDEN_MARKER = "…[hidden]"
+
+
+def _fold_with_map(text: str) -> tuple[str, list[int]]:
+    """NFKC + lowercase copy, dropping format chars; map each folded char to its source index."""
+    chars: list[str] = []
+    idx: list[int] = []
+    for i, ch in enumerate(text):
+        if unicodedata.category(ch) == "Cf":
+            continue
+        for c in unicodedata.normalize("NFKC", ch).lower():
+            chars.append(c)
+            idx.append(i)
+    return "".join(chars), idx
+
+
+def hide_after_strong_word(text: str) -> str:
+    """Field-level backstop: keep text through the first strong secret word, hide the rest."""
+    folded, idx = _fold_with_map(text)
+    m = _STRONG_SECRET_RE.search(folded)
+    if not m:
+        return text
+    end = m.end()
+    # take a plural "s" so "secrets" / "credentials" stay whole words
+    if folded[end : end + 1] == "s":
+        end += 1
+    cut = idx[end - 1] + 1
+    if not text[cut:].strip():
+        return text
+    # keep the signal that the primary redactor already fired in the hidden part
+    if "REDACTED" in text[cut:]:
+        return text[:cut] + "…REDACTED" + HIDDEN_MARKER
+    return text[:cut] + HIDDEN_MARKER
+
+
+def _redact_field(text: str, key: str | None) -> str:
+    if key in _BACKSTOP_PATH_KEYS and not re.search(r"\s", text):
+        return text if key in _PATH_FIELD_KEYS else redact_secrets(text)
+    out = redact_secrets(text)
+    if _BARE_NAME_RE.fullmatch(out) or _PATH_SHAPE_RE.fullmatch(out):
         return out
+    return hide_after_strong_word(out)
+
+
+def _walk(obj: Any, key: str | None) -> Any:
+    if isinstance(obj, str):
+        return _redact_field(obj, key)
+    if isinstance(obj, list):
+        return [_walk(x, key) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _walk(v, k if isinstance(k, str) else None) for k, v in obj.items()}
     return obj
 
+
+def redact_tree(obj: Any) -> Any:
+    """Redact every string leaf: existing redactor, then the field-level backstop.
+
+    Free-text fields the context report and checks can render (all pass through
+    here via cli._emit and report.to_json):
+      - rows[].item, rows[].description, rows[].source, rows[].enabled, rows[].group
+      - checks[].item, checks[].check, checks[].finding, checks[].source, checks[].meta
+      - inventory[].notes, inventory[].meta (values), inventory[].kind, inventory[].scope
+      - win / fact-issue text: title, measured, rationale, suggestion, detail
+      - MCP server fields: name, origin, plugin, enabled, folder/key, selection notes
+      - environment heading and override text, tokenizer, context_window
+      - top-level and per-section notes, state_vscdb_keys
+    Path fields (path, home, project, sand_data, claude_home, cursor_home,
+    installPath, projectPath) are never rewritten. A "source" field is a path and
+    skips the backstop when it has no whitespace. A bare kebab name
+    ([A-Za-z0-9_-]+) skips the backstop. Everything else gets the backstop.
+    """
+    return _walk(obj, None)
 
 
 @dataclass

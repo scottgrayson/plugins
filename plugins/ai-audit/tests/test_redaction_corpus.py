@@ -25,21 +25,32 @@ def _unescape(s: str) -> str:
 
 
 def load_corpus() -> list[tuple[str, str, str]]:
+    return [r[:3] for r in load_labeled()]
+
+
+def load_labeled() -> list[tuple[str, str, str, str]]:
     rows = []
     for n, line in enumerate(CORPUS.read_text(encoding="utf-8").split("\n"), 1):
         if not line or line.startswith("#"):
             continue
         parts = line.split("\t")
+        if len(parts) == 4:
+            label = parts[3]
+            assert label == "by-design", (n, line)
+            parts = parts[:3]
+        else:
+            label = ""
         assert len(parts) == 3 and parts[0] in ("redact", "keep", "overredact"), (n, line)
         expect, raw, value = parts[0], _unescape(parts[1]), _unescape(parts[2])
         assert expect != "redact" or value, f"line {n}: redact row needs a value"
         assert expect != "redact" or value in raw, f"line {n}: value not in input"
-        rows.append((expect, raw, value))
+        rows.append((expect, raw, value, label))
     return rows
 
 
 def check_line(expect: str, raw: str, value: str) -> None:
-    got = redact_tree(raw)
+    # Through a free-text field, as report rows do (multi-line inputs included).
+    got = redact_tree({"description": raw})["description"]
     if expect == "redact":
         assert value not in got, f"LEAK in={raw!r} out={got!r} value={value!r}"
     elif expect == "keep":
@@ -62,7 +73,11 @@ def main() -> int:
     test_redaction_corpus()
     rows = load_corpus()
     c = {k: sum(1 for r in rows if r[0] == k) for k in ("redact", "keep", "overredact")}
-    print(f"PASS redaction_corpus redact={c['redact']} keep={c['keep']} overredact={c['overredact']}")
+    by_design = sum(1 for r in load_labeled() if r[3] == "by-design")
+    print(
+        f"PASS redaction_corpus redact={c['redact']} keep={c['keep']} "
+        f"overredact={c['overredact']} by-design={by_design}"
+    )
     return 0
 
 

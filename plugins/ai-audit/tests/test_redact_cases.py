@@ -232,7 +232,7 @@ KEEP_CASES: list[str] = [
     "web-pin: x",
     "supabase-postgres-best-practices",
     "local-security-prompts.mdc",
-    "pwd=/Users/scott/Code",
+    "pwd=/Users/alice/Code",
     "PWD=/home/box",
     "pass=1 fail=0",
     "PASS=12 FAIL=0",

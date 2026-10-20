@@ -48,7 +48,7 @@ def test_cursor_cloud_markers() -> None:
     cloud, hits = is_cursor_cloud(
         {
             "HOSTNAME": "dev-macbook",
-            "CURSOR_AGENT_SOCKET": "/Users/scott/.cursor/agent.sock",
+            "CURSOR_AGENT_SOCKET": "/Users/alice/.cursor/agent.sock",
             "CURSOR_AGENT_WORKER_ID": "w-1",
         },
         path_exists=lambda p: False,

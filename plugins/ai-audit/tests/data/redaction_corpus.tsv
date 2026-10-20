@@ -1,6 +1,7 @@
 # Redaction regression corpus. Columns (tab-separated): expect, input, value.
 # expect: redact (value must not appear in output), keep (output == input),
 # overredact (redaction allowed, not required). value: only for redact rows.
+# Optional 4th column: label. 'by-design' marks known, accepted gaps or tradeoffs (rows are kept).
 # Escapes: \t \n \\ \uXXXX. All secrets are generic fakes.
 redact	password=hunter2	hunter2
 redact	db password=FakePw99	FakePw99
@@ -178,48 +179,48 @@ keep	docker -p 8080:80
 keep	web-pin: x	
 keep	supabase-postgres-best-practices	
 keep	local-security-prompts.mdc	
-keep	pwd=/Users/alice/Code	
-keep	PWD=/home/user	
+overredact	pwd=/Users/alice/Code	
+overredact	PWD=/home/user	
 keep	pass=1 fail=0	
 keep	PASS=12 FAIL=0	
 keep	DEFAULT_TOKEN=gpt-4o	
 keep	is_token=true	
-keep	has_secret=false	
+overredact	has_secret=false	
 keep	csrf_token=enabled	
 keep	NEXT_PAGE_TOKEN=null	
 keep	token=null	
-keep	secret=true	
-keep	password=<your password>	
+overredact	secret=true	
+overredact	password=<your password>	
 keep	Key: use pnpm not npm	
 keep	primary_key: user_id	
 keep	sort_key: created_at	
 keep	cache_key: v2-node20	
 keep	MAX_TOKEN=4096	
-keep	pwd: /Users/x	
+overredact	pwd: /Users/x	
 keep	MONKEY_KEY=banana	
 keep	REACT_APP_PUBLIC_KEY=pk_test_x	
 keep	Basic authentication is disabled	
-keep	Use Bearer authentication for the API	
-keep	Bearer of bad news	
+overredact	Use Bearer authentication for the API	
+overredact	Bearer of bad news	
 keep	Basic setup: install pnpm	
-keep	password=${DB_PASSWORD}	
-keep	password=$TOKEN	
+overredact	password=${DB_PASSWORD}		by-design
+overredact	password=$TOKEN	
 keep	token=<redacted>	
-keep	secret=***	
+overredact	secret=***	
 keep	/tmp/r10fp/abcdefghijklmnopqrstuv/CLAUDE.md	
 keep	/home/user/data/workflows/why/references/epistemics.md	
 keep	commit abcdef1	
 keep	id 550e8400-e29b-41d4-a716-446655440000	
 keep	token: optional	
-keep	password: changed	
+overredact	password: changed	
 keep	Authorization: required	
-keep	password: reset	
+overredact	password: reset	
 keep	token: expired	
-keep	secret: unknown	
+overredact	secret: unknown	
 keep	session: deprecated	
 keep	auth: revoked	
-keep	password: none	
-keep	PASSWORD=required	
+overredact	password: none	
+overredact	PASSWORD=required	
 keep	token=expired	
 keep	Tests: pass=196 failed=0	
 keep	Tests: pass=196	
@@ -332,7 +333,7 @@ redact	password: abcdefghijklm	abcdefghijklm
 redact	password: 'two words'	two words
 redact	password: dragon; rotate	dragon
 redact	password: a=Hunter2Fake	Hunter2Fake
-keep	pass=1234	
+keep	pass=1234		by-design
 redact	MAX_TOKEN=Hunter2Fake	Hunter2Fake
 redact	password: "q" Hunter2Fake	Hunter2Fake
 redact	password = dragon	dragon
@@ -539,3 +540,71 @@ redact	redis-cli -a hunter2	hunter2
 redact	redis-cli -h cache -a hunter2	hunter2
 redact	htpasswd -b file user hunter2	hunter2
 redact	htpasswd -cb file user hunter2	hunter2
+# Verifier probe inputs (round 23). Multi-line rows run through redact_tree on a description field.
+redact	password = “Zq7FakeVal9”	Zq7FakeVal9
+redact	password: ‘Zq7FakeVal9’	Zq7FakeVal9
+redact	password: «Zq7FakeVal9»	Zq7FakeVal9
+redact	password: „Zq7FakeVal9“	Zq7FakeVal9
+redact	password=`Zq7FakeVal9`	Zq7FakeVal9
+redact	password:\tZq7FakeVal9	Zq7FakeVal9
+redact	password\t=\tZq7FakeVal9	Zq7FakeVal9
+redact	password :: Zq7FakeVal9	Zq7FakeVal9
+redact	password => 'Zq7FakeVal9'	Zq7FakeVal9
+redact	password <- Zq7FakeVal9	Zq7FakeVal9
+redact	password|Zq7FakeVal9	Zq7FakeVal9
+redact	password/Zq7FakeVal9	Zq7FakeVal9
+redact	password : Zq7FakeVal9	Zq7FakeVal9
+redact	password　Zq7FakeVal9	Zq7FakeVal9
+redact	ｐａｓｓｗｏｒｄ: Zq7FakeVal9	Zq7FakeVal9
+redact	PASSWORD=Zq7FakeVal9  # prod	Zq7FakeVal9
+redact	{"password":"Zq7FakeVal9"}	Zq7FakeVal9
+redact	{"db": {"password": "Zq7FakeVal9"}}	Zq7FakeVal9
+redact	'password' => 'Zq7FakeVal9',	Zq7FakeVal9
+redact	[db]\npassword = "Zq7FakeVal9"	Zq7FakeVal9
+redact	password: |\n  Zq7FakeVal9	Zq7FakeVal9
+redact	password: >-\n  Zq7FakeVal9	Zq7FakeVal9
+redact	password:\n  Zq7FakeVal9	Zq7FakeVal9
+redact	- password: Zq7FakeVal9	Zq7FakeVal9
+redact	env:\n  - name: DB_PASSWORD\n    value: Zq7FakeVal9	Zq7FakeVal9
+redact	export DB_PASSWORD=Zq7FakeVal9	Zq7FakeVal9
+redact	set -x PGPASSWORD Zq7FakeVal9	Zq7FakeVal9
+redact	$env:DB_PASSWORD = 'Zq7FakeVal9'	Zq7FakeVal9
+redact	setx DB_PASSWORD Zq7FakeVal9	Zq7FakeVal9
+redact	DB_PASSWORD=Zq7FakeVal9 npm start	Zq7FakeVal9
+redact	--db-password=Zq7FakeVal9	Zq7FakeVal9
+redact	--db-password Zq7FakeVal9	Zq7FakeVal9
+redact	-e MYSQL_ROOT_PASSWORD=Zq7FakeVal9	Zq7FakeVal9
+redact	psql postgresql://user:Zq7FakeVal9@host/db	Zq7FakeVal9
+redact	https://user:Zq7FakeVal9@example.com	Zq7FakeVal9
+redact	curl -H 'Authorization: Basic Zq7FakeVal9'	Zq7FakeVal9
+redact	curl -H "X-Api-Key: Zq7FakeVal9"	Zq7FakeVal9
+redact	Cookie: session=Zq7FakeVal9	Zq7FakeVal9
+redact	?access_token=Zq7FakeVal9&x=1	Zq7FakeVal9
+redact	&apikey=Zq7FakeVal9	Zq7FakeVal9
+redact	client_secret: Zq7FakeVal9	Zq7FakeVal9
+redact	privateKey: Zq7FakeVal9	Zq7FakeVal9
+redact	AWS_SECRET_ACCESS_KEY=Zq7FakeVal9	Zq7FakeVal9
+redact	aws_secret_access_key = Zq7FakeVal9	Zq7FakeVal9
+redact	SECRET_KEY_BASE=Zq7FakeVal9	Zq7FakeVal9
+redact	mysql --password=Zq7FakeVal9	Zq7FakeVal9
+redact	mysql -u root --password Zq7FakeVal9	Zq7FakeVal9
+redact	sqlcmd -P Zq7FakeVal9	Zq7FakeVal9
+redact	net use \\\\h\\s Zq7FakeVal9 /user:x	Zq7FakeVal9
+redact	echo Zq7FakeVal9 | sudo -S ls	Zq7FakeVal9
+redact	passw0rd: Zq7FakeVal9	Zq7FakeVal9
+redact	pass_word=Zq7FakeVal9	Zq7FakeVal9
+redact	PassWord=Zq7FakeVal9	Zq7FakeVal9
+redact	user_pass=Zq7FakeVal9	Zq7FakeVal9
+redact	pwd: Zq7FakeVal9	Zq7FakeVal9
+redact	<password>Zq7FakeVal9</password>	Zq7FakeVal9
+redact	<add key="Password" value="Zq7FakeVal9"/>	Zq7FakeVal9
+redact	password="Zq7FakeVal9";	Zq7FakeVal9
+redact	{password: 'Zq7FakeVal9'}	Zq7FakeVal9
+redact	password\\u003dZq7FakeVal9	Zq7FakeVal9
+redact	Password :Zq7FakeVal9	Zq7FakeVal9
+redact	password=\\"Zq7FakeVal9\\"	Zq7FakeVal9
+redact	token: Zq7FakeVal9	Zq7FakeVal9
+redact	api_key: Zq7FakeVal9	Zq7FakeVal9
+redact	secret: Zq7FakeVal9	Zq7FakeVal9
+overredact	pwd=/tmp/Secret		by-design
+overredact	password=<Hunter2Fake>		by-design

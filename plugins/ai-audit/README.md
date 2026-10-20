@@ -75,4 +75,20 @@ bash bin/ai-audit context --host auto
 
 Secret-shaped values in notes and other string fields are redacted; inventory filesystem paths are never rewritten.
 
+### Redaction
+
+Every string in the report goes through `redact_tree`: the pattern redactor first, then a field-level backstop. If a field contains a strong secret word (password, passwd, passw0rd, pwd, secret, private key, api key, credential, access key, auth token, bearer; checked after NFKC folding and lowercasing), the text up to and including that word is kept and the rest of the field becomes `…[hidden]`. Bare names (`my-skill`, `rule.mdc`) and path-shaped values without whitespace are exempt, as are `path`-style fields and `source` when they contain no whitespace. Over-redaction is accepted; a leak is not.
+
+Free-text fields the context report and checks can render:
+
+- Table rows: Item, Description, Source, Enabled, group.
+- Checks: Item, Check, Finding, Source, and meta values.
+- Inventory: notes, kind, scope, and meta values.
+- Wins and fact issues: title, measured, rationale, suggestion, detail.
+- MCP server fields: name, origin, plugin, enabled state, folder or key, selection notes.
+- Environment: heading, override text, markers, tokenizer, context window.
+- Report notes and `state_vscdb_keys`.
+
+Known by-design gaps are kept as `by-design` rows in `tests/data/redaction_corpus.tsv`.
+
 Broken-reference check scope: an unquoted two-segment skill reference such as `skill my-skill` is not checked, to avoid prose false positives. Quoted names and names with three or more segments are checked.
