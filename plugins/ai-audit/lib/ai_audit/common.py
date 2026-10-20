@@ -48,40 +48,58 @@ SECRET_JSON_KEYS = frozenset(
     }
 )
 
-# Keys whose values are always treated as secrets when assigned (password family).
-_ALWAYS_REDACT_KV_NAMES = frozenset(
-    {"password", "passwd", "pwd"}
-)
-# Keys that only redact when the value looks secret-shaped (avoids "token: Composer").
+# Label/env names that redact only when the value looks secret-shaped.
 _CONDITIONAL_KV_NAMES = frozenset(
-    {"secret", "token", "api_key", "api-key"}
+    {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "api-key",
+        "pass",
+        "passphrase",
+        "credentials",
+        "x-api-key",
+        "x_api_key",
+    }
 )
 
-# Env-style names ending in PASSWORD/TOKEN/SECRET/API_KEY/_KEY (and bare KEY after _).
+# Env-style names: PASSWORD/PASSWD/TOKEN/SECRET, or *_API_KEY/*_SECRET_KEY/*_ACCESS_KEY/PRIVATE_KEY.
+# No bare KEY / *_KEY (avoids Key:/primary_key:/MAX_TOKEN= false positives). No pwd.
 _ENV_SECRET_NAME_RE = re.compile(
-    r"(?i)^(?:[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY)|"
-    r"[A-Za-z_][A-Za-z0-9_]*_KEY|KEY)$"
+    r"(?i)^(?:[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET)|"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:_API_KEY|_SECRET_KEY|_ACCESS_KEY)|"
+    r"PRIVATE_KEY|DB_PASS|MYSQL_PWD)$"
 )
-# key=value / key: value — capture name, sep, value (value may be quoted)
+# key=value / key: value — value may be single- or double-quoted (incl. spaces)
 _KV_ASSIGN_RE = re.compile(
-    r"(?i)\b([A-Za-z_][A-Za-z0-9_-]*)\s*([=:])\s*([^\s,;]+)"
+    r"(?i)\b([A-Za-z_][A-Za-z0-9_-]*)\s*([=:])\s*"
+    r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;]+)"
 )
-# JSON "password": "…" and the same key family (quoted keys)
+# JSON "password": "…" / 'password': '…' and the same key family
 _JSON_SECRET_RE = re.compile(
-    r'(?i)("(?:password|passwd|pwd|secret|token|api[_-]?key|'
-    r'[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY)|'
-    r'[A-Za-z_][A-Za-z0-9_]*_KEY)")\s*:\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')'
+    r"(?i)([\"'](?:password|passwd|secret|token|api[_-]?key|"
+    r"[A-Za-z_][A-Za-z0-9_]*?(?:PASSWORD|PASSWD|TOKEN|SECRET)|"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:_API_KEY|_SECRET_KEY|_ACCESS_KEY)|PRIVATE_KEY)[\"'])"
+    r"\s*:\s*(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')"
 )
-# URL user:password@host
+# URL user:password@host (user may be empty: redis://:pw@host)
 _URL_USERINFO_RE = re.compile(
     r"(?i)\b((?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|ftp)://)"
-    r"([^/\s:@]+):([^@/\s]+)@"
+    r"([^/\s:@]*):([^@/\s]+)@"
 )
-# PEM private key blocks
+# PEM / PGP private key blocks
 _PEM_PRIVATE_RE = re.compile(
     r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"
     r".*?"
     r"-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----",
+    re.DOTALL,
+)
+_PGP_PRIVATE_RE = re.compile(
+    r"-----BEGIN PGP PRIVATE KEY BLOCK-----"
+    r".*?"
+    r"-----END PGP PRIVATE KEY BLOCK-----",
     re.DOTALL,
 )
 
@@ -90,24 +108,36 @@ _SECRET_TOKEN_RES = (
     (re.compile(r"(?i)\bsk-ant-[A-Za-z0-9_\-]{8,}\b"), "sk-ant-…REDACTED"),
     (re.compile(r"(?i)\bsk-proj-[A-Za-z0-9_\-]{16,}\b"), "sk-proj-…REDACTED"),
     (re.compile(r"(?i)\bsk-or-[A-Za-z0-9_\-]{16,}\b"), "sk-or-…REDACTED"),
-    # Stripe live secret / restricted keys (underscore, not hyphen)
+    # Stripe live / test / restricted keys
     (re.compile(r"(?i)\bsk_live_[A-Za-z0-9]{8,}\b"), "sk_live_…REDACTED"),
     (re.compile(r"(?i)\brk_live_[A-Za-z0-9]{8,}\b"), "rk_live_…REDACTED"),
+    (re.compile(r"(?i)\bsk_test_[A-Za-z0-9]{8,}\b"), "sk_test_…REDACTED"),
     (re.compile(r"(?i)\bsk-[A-Za-z0-9_\-]{16,}\b"), "sk-…REDACTED"),
     (re.compile(r"(?i)\bxai-[A-Za-z0-9_\-]{16,}\b"), "xai-…REDACTED"),
-    (re.compile(r"(?i)\b(ghp_|gho_|github_pat_)[A-Za-z0-9_\-]{16,}\b"), "gh-…REDACTED"),
+    (re.compile(r"(?i)\b(ghp_|gho_|github_pat_|glpat-)[A-Za-z0-9_\-]{8,}\b"), "gh-…REDACTED"),
+    (re.compile(r"(?i)\bnpm_[A-Za-z0-9]{10,}\b"), "npm_…REDACTED"),
+    (re.compile(r"(?i)\bwhsec_[A-Za-z0-9_\-]{8,}\b"), "whsec_…REDACTED"),
     (re.compile(r"(?i)\bxox[baprs]-[A-Za-z0-9_\-]{10,}\b"), "xox-…REDACTED"),
     (re.compile(r"(?i)\bAIza[A-Za-z0-9_\-]{20,}\b"), "AIza-…REDACTED"),
     (re.compile(r"(?i)\bAKIA[A-Z0-9]{12,}\b"), "AKIA-…REDACTED"),
     # Cursor Admin API keys
     (re.compile(r"(?i)\bcrsr_[A-Za-z0-9_\-]{8,}\b"), "crsr_…REDACTED"),
-    # Bearer + JWT (header.payload.sig)
+    # Slack incoming webhook URLs
+    (
+        re.compile(
+            r"(?i)https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+"
+        ),
+        "https://hooks.slack.com/services/…REDACTED",
+    ),
+    # Bearer JWT (header.payload.sig) then opaque Bearer / Basic
     (
         re.compile(
             r"(?i)\bBearer\s+eyJ[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+){2,}"
         ),
         "Bearer …REDACTED",
     ),
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.=+/]{8,}"), "Bearer …REDACTED"),
+    (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}"), "Basic …REDACTED"),
     (
         re.compile(r"\beyJ[A-Za-z0-9_\-]+=*(?:\.[A-Za-z0-9_\-]+=*){2,}\b"),
         "eyJ…REDACTED",
@@ -149,39 +179,47 @@ def _strip_value_quotes(value: str) -> str:
     return v
 
 
+_KNOWN_SECRET_PREFIX_RE = re.compile(
+    r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|github_pat_|glpat-|npm_|whsec_|"
+    r"xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)"
+)
+# Model / kebab ids like claude-sonnet-4-5, gpt-4o-mini-2024 — not secrets.
+_KEBAB_MODEL_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9.]+)+$")
+
+
 def looks_like_secret_value(value: str) -> bool:
-    """True when a token:/secret: value looks like a credential, not ordinary prose."""
+    """True when a label value looks like a credential (not ordinary prose / model ids)."""
+    raw = (value or "").strip()
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"')
     v = _strip_value_quotes(value).strip()
     if not v:
         return False
-    # Known key prefixes
-    if re.match(
-        r"(?i)(?:sk[-_]|rk[-_]|ghp_|gho_|github_pat_|xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)",
-        v,
-    ):
+    # Quoted multi-word passwords (spaces inside quotes) still count
+    if " " in v or "\t" in v:
+        return quoted and len(v) >= 8
+    if _KNOWN_SECRET_PREFIX_RE.match(v):
         return True
-    # 16+ chars mixing letters and digits (typical opaque tokens)
-    if len(v) >= 16:
-        has_letter = bool(re.search(r"[A-Za-z]", v))
-        has_digit = bool(re.search(r"[0-9]", v))
-        if has_letter and has_digit:
-            return True
-    # Shorter but clearly opaque (has digit + letter, length >= 10, not a single word)
-    if len(v) >= 10 and re.search(r"[A-Za-z]", v) and re.search(r"[0-9]", v):
-        if re.search(r"[^A-Za-z0-9]", v) or re.search(r"[A-Z].*[a-z]|[a-z].*[A-Z]", v):
-            return True
+    # Opaque token: 16+ chars, letters+digits, no spaces; exclude kebab model names
+    if len(v) >= 16 and re.search(r"[A-Za-z]", v) and re.search(r"[0-9]", v):
+        if _KEBAB_MODEL_RE.match(v):
+            return False
+        return True
     return False
 
 
 def _kv_should_redact(name: str, value: str) -> bool:
     n = name.lower().replace("-", "_")
-    if n in _ALWAYS_REDACT_KV_NAMES or n.endswith("_password") or n.endswith("_passwd"):
-        return bool(_strip_value_quotes(value).strip())
-    if n in _CONDITIONAL_KV_NAMES:
+    if n in _CONDITIONAL_KV_NAMES or n.endswith("_password") or n.endswith("_passwd"):
         return looks_like_secret_value(value)
     if _ENV_SECRET_NAME_RE.match(name):
-        # Prefixed env names: redact any non-empty value
-        return bool(_strip_value_quotes(value).strip())
+        v = _strip_value_quotes(value).strip()
+        if not v:
+            return False
+        # Env KEY=value: treat long non-prose values as secrets (digits optional)
+        if " " not in v and "\t" not in v and len(v) >= 12 and re.search(r"[A-Za-z]", v):
+            if not _KEBAB_MODEL_RE.match(v):
+                return True
+        return looks_like_secret_value(value)
     return False
 
 
@@ -233,21 +271,25 @@ def redact_secrets(text: str) -> str:
         text = str(text)
     out = text
 
-    # PEM private keys first (multi-line)
+    # PEM / PGP private keys first (multi-line)
     out = _PEM_PRIVATE_RE.sub("-----BEGIN PRIVATE KEY-----…REDACTED-----END PRIVATE KEY-----", out)
+    out = _PGP_PRIVATE_RE.sub(
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----…REDACTED-----END PGP PRIVATE KEY BLOCK-----",
+        out,
+    )
 
-    # URL credentials: keep scheme+user, redact password
+    # URL credentials: keep scheme+user (user may be empty), redact password
     out = _URL_USERINFO_RE.sub(r"\1\2:…REDACTED@", out)
 
-    # JSON "key": "value"
+    # JSON "key": "value" / 'key': 'value'
     def _json_sub(m: re.Match[str]) -> str:
-        key, _val = m.group(1), m.group(2)
-        return f"{key}: \"…REDACTED\""
+        key = m.group(1)
+        q = '"' if key.startswith('"') else "'"
+        return f"{key}: {q}…REDACTED{q}"
 
     out = _JSON_SECRET_RE.sub(_json_sub, out)
 
-    # key=value / key: value — password always; token/secret only when value looks secret;
-    # env names ending in PASSWORD/TOKEN/SECRET/API_KEY/KEY always.
+    # key=value / key: value — only when the value looks secret-shaped
     def _kv_sub(m: re.Match[str]) -> str:
         name, sep, value = m.group(1), m.group(2), m.group(3)
         if _kv_should_redact(name, value):

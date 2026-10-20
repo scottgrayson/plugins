@@ -26,6 +26,14 @@ grep -q "PASS secrets json redacted" "$HT" || fail "missing visible PASS"
 grep -q "password=Hunter2FakePass" "$HT" || fail "missing password= plant"
 grep -q '/path/to/plugins/ai-audit' "$HT" \
   || fail "Cursor install must be path-independent (/path/to/plugins/ai-audit)"
+grep -q 'rm -rf ~/.cursor/plugins/local/ai-audit' "$HT" \
+  || fail "Cursor local copy must rm -rf before cp (idempotent)"
+grep -q '.cursor/plugins/cache' "$HT" \
+  || fail "HUMAN-TEST must mention Cursor marketplace/cache path"
+grep -q 'FAIL Claude install paths' "$HT" \
+  || fail "Claude install check must echo FAIL when missing"
+grep -q 'FAIL Cursor install paths' "$HT" \
+  || fail "Cursor install check must echo FAIL when missing"
 if grep -nE 'exit 1' "$HT" >/dev/null; then
   fail "HUMAN-TEST must not use exit 1 (closes interactive terminals)"
 fi

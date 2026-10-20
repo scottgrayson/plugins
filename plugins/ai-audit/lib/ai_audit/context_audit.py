@@ -520,9 +520,12 @@ def _mcp_items(
 
 
 def _enabled_plugin_ids(claude_home: Path, project: Path) -> list[str]:
-    """Plugin ids with enabledPlugins: true from user + project settings (order preserved)."""
-    seen: set[str] = set()
-    out: list[str] = []
+    """
+    Enabled plugin ids after Claude Code precedence: user < project < local.
+    A later settings file's true/false overrides earlier ones for the same key.
+    """
+    merged: dict[str, bool] = {}
+    order: list[str] = []
     for settings_path in (
         claude_home / "settings.json",
         project / ".claude" / "settings.json",
@@ -535,10 +538,13 @@ def _enabled_plugin_ids(claude_home: Path, project: Path) -> list[str]:
         if not isinstance(enabled, dict):
             continue
         for key, val in enabled.items():
-            if val is True and key not in seen:
-                seen.add(key)
-                out.append(str(key))
-    return out
+            if not isinstance(val, bool):
+                continue
+            k = str(key)
+            if k not in merged:
+                order.append(k)
+            merged[k] = val
+    return [k for k in order if merged.get(k) is True]
 
 
 def _read_installed_plugins(claude_home: Path) -> dict[str, Any]:

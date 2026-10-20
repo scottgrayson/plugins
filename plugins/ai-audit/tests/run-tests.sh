@@ -871,11 +871,11 @@ assert aws not in redact_secrets("aws secret " + aws)
 assert aws not in redact_secrets("key " + aws)
 assert "REDACTED" in redact_secrets("aws " + aws)
 
-# Prefixed env / JSON / URL / PEM / Stripe
+# Prefixed env / JSON / URL / PEM / Stripe (values ≥16 mixed alnum where needed)
 cases = [
-    ("DB_PASSWORD=EnvFakePw12345", "EnvFakePw12345"),
+    ("DB_PASSWORD=EnvFakePw1234567", "EnvFakePw1234567"),
     ("GITHUB_TOKEN=plainfaketokenABCDEF", "plainfaketokenABCDEF"),
-    ("client_secret=ClientFake98765", "ClientFake98765"),
+    ("client_secret=ClientFake9876543", "ClientFake9876543"),
     ("OPENAI_API_KEY=plainvalueABCDEF12", "plainvalueABCDEF12"),
     ("AWS_SECRET_ACCESS_KEY=" + aws, aws),
     ('{"password": "JsonFakePw77"}', "JsonFakePw77"),
@@ -1034,6 +1034,172 @@ PY
 assert_contains "HUMAN-TEST path-independent Cursor cp" "$(cat "$PLUGIN/HUMAN-TEST.md")" "/path/to/plugins/ai-audit"
 assert_not_contains "HUMAN-TEST no exit 1" "$(cat "$PLUGIN/HUMAN-TEST.md")" "exit 1"
 assert_contains "HUMAN-TEST echo FAIL" "$(cat "$PLUGIN/HUMAN-TEST.md")" "echo \"FAIL"
+
+echo "== round11 regressions =="
+# N1: install checks print FAIL when paths missing (empty HOME)
+py_check "HUMAN-TEST install checks FAIL on empty HOME" <<PY
+import pathlib, re, subprocess, tempfile, os, textwrap
+ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
+blocks = re.findall(r"\`\`\`(?:bash|sh|zsh)\n(.*?)\`\`\`", ht, flags=re.DOTALL)
+# Claude + Cursor path-check blocks contain "install paths"
+checks = [b for b in blocks if "install paths" in b and "PASS" in b and "FAIL" in b]
+assert len(checks) >= 2, f"expected Claude+Cursor install checks, got {len(checks)}"
+empty = tempfile.mkdtemp(prefix="ai-audit-empty-home.")
+try:
+    for bi, block in enumerate(checks):
+        # Simulate paste with empty HOME (no plugin installs)
+        script = "HOME=%r\nexport HOME\n%s\n" % (empty, block)
+        proc = subprocess.run(
+            ["bash", "--norc", "--noprofile", "-c", script],
+            capture_output=True,
+            text=True,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        assert "FAIL" in out and "install paths" in out, (bi, out, proc.returncode)
+        assert not re.search(r"^PASS .*install paths", out, re.M), (bi, out)
+finally:
+    import shutil
+    shutil.rmtree(empty)
+PY
+
+# N2: prose / key / pwd / model-name false positives stay intact
+py_check "redact false-positive prose stays intact" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.common import redact_secrets
+keep = [
+    "Key: use pnpm not npm",
+    "API key: stored in 1Password",
+    "primary_key: user_id",
+    "sort_key: created_at",
+    "cache_key: v2-node20",
+    "MAX_TOKEN=4096",
+    "pwd: /Users/x",
+    "password: none needed",
+    "token: claude-sonnet-4-5",
+    "token: gpt-4o-mini-2024",
+    "MONKEY_KEY=banana",
+    "REACT_APP_PUBLIC_KEY=pk_test_x",
+]
+for raw in keep:
+    got = redact_secrets(raw)
+    assert got == raw, (raw, got)
+    assert "REDACTED" not in got
+# Still redact real secrets
+assert "Hunter2FakePass" not in redact_secrets("password=Hunter2FakePass!99xx")
+assert "REDACTED" in redact_secrets("password=Hunter2FakePass!99xx")
+PY
+
+# N3: project enabledPlugins false overrides user true; local overrides project
+py_check "enabledPlugins precedence local > project > user" <<PY
+import json, sys, tempfile, shutil
+from pathlib import Path
+sys.path.insert(0, "$LIB")
+from ai_audit.context_audit import run_context_audit, _enabled_plugin_ids
+from ai_audit.detect import Roots
+
+td = Path(tempfile.mkdtemp())
+try:
+    home = td / "home"
+    claude = home / ".claude"
+    claude.mkdir(parents=True)
+    proj = td / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / "CLAUDE.md").write_text("# p\n")
+    plug = "ai-audit@scottgrayson-plugins"
+    inst = claude / "plugins" / "cache" / "scottgrayson-plugins" / "ai-audit" / "0.1.0"
+    for name in ("context-audit",):
+        d = inst / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("---\nname: %s\ndescription: d\n---\nb\n" % name)
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {plug: [{"scope": "user", "installPath": str(inst), "version": "0.1.0"}]},
+    }))
+    (claude / "settings.json").write_text(json.dumps({"enabledPlugins": {plug: True}}))
+    # Project disables → must not list
+    (proj / ".claude" / "settings.json").write_text(json.dumps({"enabledPlugins": {plug: False}}))
+    assert _enabled_plugin_ids(claude, proj) == []
+    roots = Roots("claude", home, proj, None, claude, home / ".cursor", False)
+    inv = run_context_audit(roots)["inventory"]
+    assert not any(i.get("scope") == "plugin" for i in inv), [i for i in inv if i.get("scope") == "plugin"]
+    # Local re-enables over project false
+    (proj / ".claude" / "settings.local.json").write_text(json.dumps({"enabledPlugins": {plug: True}}))
+    assert _enabled_plugin_ids(claude, proj) == [plug]
+    inv2 = run_context_audit(roots)["inventory"]
+    assert any(i.get("scope") == "plugin" for i in inv2)
+finally:
+    shutil.rmtree(td)
+PY
+
+# N4: additional common secret shapes
+py_check "redact N4 shapes Bearer Basic glpat npm sk_test whsec Slack PGP pass" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.common import redact_secrets
+cases = [
+    ("Authorization: Bearer opaqueTokenValue99XYZ", "opaqueTokenValue99XYZ"),
+    ("Authorization: Basic dXNlcjpwYXNzMTIzNDU2", "dXNlcjpwYXNzMTIzNDU2"),
+    ("glpat-abcdefghijklmnopqrstuv", "glpat-abcdefghijklmnopqrstuv"),
+    ("npm_abcdefghijklmnopqrstuvwx", "npm_abcdefghijklmnopqrstuvwx"),
+    ("sk_test_51FAKEabcdefghijklmnop", "sk_test_51FAKEabcdefghijklmnop"),
+    ("whsec_abcdefghijklmnopqrstuvwx", "whsec_abcdefghijklmnopqrstuvwx"),
+    ("x-api-key: SuperSecretApiKey99ab", "SuperSecretApiKey99ab"),
+    ("redis://:EmptyUserPass99ab@db.host/0", "EmptyUserPass99ab"),
+    ("pass=SuperSecretPass99abxx", "SuperSecretPass99abxx"),
+    ("passphrase: SuperSecretPhrase99", "SuperSecretPhrase99"),
+    ("DB_PASS=DbPassValue1234567", "DbPassValue1234567"),
+    ("MYSQL_PWD=MysqlPwdValue12345", "MysqlPwdValue12345"),
+    ("'password': 'singleQuotedSecret99'", "singleQuotedSecret99"),
+    ('password = "Fake Pass With Spaces99"', "Fake Pass With Spaces99"),
+]
+# Build Slack webhook at runtime so the commit has no scanner-shaped URL literal
+slack_tok = "FAKE" + ("x" * 20)
+slack_url = "https://hooks.slack.com/services/%s/%s/%s" % ("TFAKE0000", "BFAKE0000", slack_tok)
+cases.append((slack_url, slack_tok))
+for raw, leak in cases:
+    got = redact_secrets(raw)
+    assert leak not in got, (raw, got)
+    assert "REDACTED" in got, (raw, got)
+pgp = (
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----"
+    + chr(10)
+    + "lQHYFakePGPMaterial123"
+    + chr(10)
+    + "-----END PGP PRIVATE KEY BLOCK-----"
+)
+assert "lQHYFakePGPMaterial123" not in redact_secrets(pgp)
+assert "REDACTED" in redact_secrets(pgp)
+PY
+
+# N5: idempotent local copy + marketplace path mentioned
+assert_contains "HUMAN-TEST mentions Cursor cache marketplace path" \
+  "$(cat "$PLUGIN/HUMAN-TEST.md")" ".cursor/plugins/cache"
+assert_contains "HUMAN-TEST idempotent rm before cp" \
+  "$(cat "$PLUGIN/HUMAN-TEST.md")" "rm -rf ~/.cursor/plugins/local/ai-audit"
+py_check "Cursor local copy does not nest ai-audit/ai-audit" <<PY
+import pathlib, re, subprocess, tempfile, shutil, os
+ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
+blocks = re.findall(r"\`\`\`(?:bash|sh|zsh)\n(.*?)\`\`\`", ht, flags=re.DOTALL)
+cp_blocks = [b for b in blocks if "rm -rf" in b and "plugins/local/ai-audit" in b and "cp -R" in b]
+assert cp_blocks, "missing idempotent Cursor cp block"
+src = pathlib.Path("$PLUGIN")
+home = pathlib.Path(tempfile.mkdtemp(prefix="ai-audit-cursor-cp."))
+try:
+    # First install
+    script = cp_blocks[0].replace("/path/to/plugins/ai-audit", str(src))
+    script = "HOME=%r\nexport HOME\n%s\n" % (str(home), script)
+    subprocess.run(["bash", "--norc", "-c", script], check=True, capture_output=True, text=True)
+    dest = home / ".cursor" / "plugins" / "local" / "ai-audit"
+    assert (dest / "bin" / "ai-audit").is_file()
+    assert not (dest / "ai-audit").exists(), "nested on first copy"
+    # Second install must not nest
+    subprocess.run(["bash", "--norc", "-c", script], check=True, capture_output=True, text=True)
+    assert (dest / "bin" / "ai-audit").is_file()
+    assert not (dest / "ai-audit").exists(), "nested on re-run"
+finally:
+    shutil.rmtree(home)
+PY
 
 echo "== public-repo clean =="
 assert_contains "three skills present" "$(ls "$PLUGIN/skills")" "context-audit"

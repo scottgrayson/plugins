@@ -25,37 +25,50 @@ After merge to main, prefer: `claude plugin marketplace add scottgrayson/plugins
 Expect: `Skills (3)` listing `context-audit`, `facts-audit`, `token-audit`.
 
 ```bash
-PLUGIN="$(ls -d ~/.claude/plugins/cache/*/ai-audit/*/ 2>/dev/null | sort | tail -1)"
+PLUGIN="$(find "$HOME/.claude/plugins/cache" -mindepth 2 -maxdepth 4 -type d -name ai-audit 2>/dev/null | sort | tail -1)"
 PLUGIN="${PLUGIN%/}"
-test -f "$PLUGIN/bin/ai-audit"
-AI_AUDIT="$PLUGIN/bin/ai-audit"
-ls "$PLUGIN/skills/context-audit/SKILL.md" \
-   "$PLUGIN/skills/token-audit/SKILL.md" \
-   "$PLUGIN/skills/facts-audit/SKILL.md"
-echo "PASS Claude install paths ($PLUGIN)"
+if test -n "$PLUGIN" && test -f "$PLUGIN/bin/ai-audit" \
+  && ls "$PLUGIN/skills/context-audit/SKILL.md" \
+       "$PLUGIN/skills/token-audit/SKILL.md" \
+       "$PLUGIN/skills/facts-audit/SKILL.md" >/dev/null 2>&1; then
+  AI_AUDIT="$PLUGIN/bin/ai-audit"
+  echo "PASS Claude install paths ($PLUGIN)"
+else
+  echo "FAIL Claude install paths (${PLUGIN:-missing})"
+fi
 ```
 
 ### Option B — Cursor
 
 1. Dashboard → Plugins / Team Marketplaces → add `https://github.com/scottgrayson/plugins` (or the PR branch URL while open)
-2. Customize → Plugins → install **ai-audit**
-3. Or local copy from a clone (path-independent — replace the source path with your checkout):
+2. Customize → Plugins → install **ai-audit** (marketplace copies land under `~/.cursor/plugins/cache/…/ai-audit/`)
+3. Or local copy from a clone (path-independent — replace the source path with your checkout). Re-run safe: removes any prior local copy first so you do not nest `ai-audit/ai-audit`:
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
+rm -rf ~/.cursor/plugins/local/ai-audit
 cp -R /path/to/plugins/ai-audit ~/.cursor/plugins/local/ai-audit
 ```
 
 Reload Window, then confirm skills under the Plugins UI.
 
+Prefer the local copy when present; otherwise fall back to the newest marketplace/cache install under `~/.cursor/plugins/cache/`:
+
 ```bash
 PLUGIN="$HOME/.cursor/plugins/local/ai-audit"
-test -f "$PLUGIN/bin/ai-audit"
-AI_AUDIT="$PLUGIN/bin/ai-audit"
-ls "$PLUGIN/skills/context-audit/SKILL.md" \
-   "$PLUGIN/skills/token-audit/SKILL.md" \
-   "$PLUGIN/skills/facts-audit/SKILL.md"
-echo "PASS Cursor install paths ($PLUGIN)"
+if [ ! -f "$PLUGIN/bin/ai-audit" ]; then
+  PLUGIN="$(find "$HOME/.cursor/plugins/cache" -mindepth 1 -maxdepth 4 -type d -name ai-audit 2>/dev/null | sort | tail -1)"
+  PLUGIN="${PLUGIN%/}"
+fi
+if test -n "$PLUGIN" && test -f "$PLUGIN/bin/ai-audit" \
+  && ls "$PLUGIN/skills/context-audit/SKILL.md" \
+       "$PLUGIN/skills/token-audit/SKILL.md" \
+       "$PLUGIN/skills/facts-audit/SKILL.md" >/dev/null 2>&1; then
+  AI_AUDIT="$PLUGIN/bin/ai-audit"
+  echo "PASS Cursor install paths ($PLUGIN)"
+else
+  echo "FAIL Cursor install paths (${PLUGIN:-missing})"
+fi
 ```
 
 Slash-invoke `/ai-audit:context-audit` (or the other two) once in the host UI if you want a UI check.
