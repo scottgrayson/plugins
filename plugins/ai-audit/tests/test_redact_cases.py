@@ -157,6 +157,33 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("password → dragon", "dragon"),
     ("password -> dragon", "dragon"),
     ("passwd dragon", "dragon"),
+    # --- round-17 D1: exceptions only when ENTIRE value matches ---
+    ("pass: 1 dragon", "dragon"),
+    ("pass=196 Hunter2Fake", "Hunter2Fake"),
+    ("max_token=100 Hunter2Fake", "Hunter2Fake"),
+    ("token_limit=5 Hunter2Fake", "Hunter2Fake"),
+    ("pwd=/tmp Hunter2Secret", "Hunter2Secret"),
+    ("pwd: /tmp/x Hunter2Secret", "Hunter2Secret"),
+    # --- round-17 D2: colon skip only for secret name before = ---
+    ("password: x=Hunter2Fake", "Hunter2Fake"),
+    # --- round-17 D3: wider names / separators; changeme is a secret ---
+    ("password_prod=dragon", "dragon"),
+    ("passwordProd: dragon", "dragon"),
+    ("password[prod]=dragon", "dragon"),
+    ("api key: FakeApiSpace99", "FakeApiSpace99"),
+    ("secret key: FakeSecSpace99", "FakeSecSpace99"),
+    ("sessionid=FakeSess99xx", "FakeSess99xx"),
+    ("passcode: 4821", "4821"),
+    ("pin: 4821", "4821"),
+    ("p@ssword: dragon", "dragon"),
+    ("password := dragon", "dragon"),
+    ("password：dragon", "dragon"),
+    ("password is: dragon", "dragon"),
+    ("password; dragon", "dragon"),
+    ("password, dragon", "dragon"),
+    ("-p dragon", "dragon"),
+    ("password: changeme", "changeme"),
+    ("API_KEY=changeme", "changeme"),
 ]
 
 # Still kept under the simple rule (empty / placeholder / null / bool / status
@@ -175,7 +202,6 @@ KEEP_CASES: list[str] = [
     "secret=true",
     "password=<your password>",
     "Key: use pnpm not npm",
-    "API key: stored in 1Password",
     "primary_key: user_id",
     "sort_key: created_at",
     "cache_key: v2-node20",
@@ -191,7 +217,6 @@ KEEP_CASES: list[str] = [
     "password=$TOKEN",
     "token=<redacted>",
     "secret=***",
-    "API_KEY=changeme",
     "/tmp/r10fp/abcdefghijklmnopqrstuv/CLAUDE.md",
     "/home/box/sand-data/workflows/why/references/epistemics.md",
     "commit abcdef1",
@@ -222,6 +247,8 @@ EXPECTED_OVERREDACT: list[str] = [
     # restored round-10 originals (were reworded in later rounds to dodge FP)
     "Default token: Composer model",
     "Explain token: what counts",
+    # "api key" is a secret name (round-17 D3); instructional use over-redacts
+    "API key: stored in 1Password",
     # former KEEP / instructional prose now redacted
     "Max token: 8192",
     "Default token: 4096 limit",

@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # context-audit
 
-Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, plugins, bot descriptions, and memory. Lists what agents actually load and matches paths on disk.
+Read-only inventory of instructions, rules, skills, subagents, MCP/connectors, plugins, bot descriptions, and memory. On **Cursor**, the report is a grouped startup table with real **tiktoken o200k_base** token counts (offline, vendored ranks).
 
 ## Locate the CLI
 
@@ -31,6 +31,8 @@ AI_AUDIT="$(bash "${AI_AUDIT_PLUGIN_ROOT}/scripts/locate-cli.sh")"
 bash "$AI_AUDIT" context --help
 ```
 
+Requires Python package `tiktoken` (encoding ranks are vendored; no network at runtime).
+
 ## Run
 
 ```bash
@@ -40,14 +42,24 @@ bash "$AI_AUDIT" context --host cursor --project .
 bash "$AI_AUDIT" context --host grok
 ```
 
-Show the markdown report to the user. Proposed fixes are **suggestions only** — present as a diff; never edit files. v0.1.0 does not estimate savings or schedule runs.
+Show the markdown report to the user.
+
+### Fill Purpose and AI suggestion (Cursor grouped table)
+
+The script fills **Item**, **Tokens**, group subtotals, dup flags, and MCP/tool metadata. Columns **Purpose** and **AI suggestion** are left blank on purpose.
+
+For each row in the table, fill:
+
+- **Purpose** — one short phrase for what the item does in context
+- **AI suggestion** — keep / trim / remove / disable, with a brief reason
+
+Do not invent token numbers. Do not edit files; suggestions only.
 
 ## When to ask the user
 
 | Gap | Ask for |
 | --- | --- |
-| Cursor user / team rules | Paste from Customize → Rules (not on disk) |
 | Grok connectors (not on disk) | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
 | Claude live breakdown | Paste `/context` output to calibrate |
 
-Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases.
+Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases. User Rules: the CLI reads only `aicontext.personalContext` from a temp copy of `state.vscdb` — never other keys.

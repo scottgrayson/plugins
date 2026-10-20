@@ -59,8 +59,11 @@ _SECRET_NAME_EXACT = frozenset(
         "passwd",
         "pass",
         "passphrase",
+        "passcode",
         "pwd",
         "pw",
+        "pin",
+        "p@ssword",
         "token",
         "secret",
         "api_key",
@@ -77,8 +80,11 @@ _SECRET_NAME_EXACT = frozenset(
         "auth",
         "authorization",
         "session",
+        "sessionid",
+        "session_id",
         "cookie",
         "sid",  # Set-Cookie: sid=…
+        "p",  # short CLI -p
     }
 )
 _PASSWORD_FAMILY = frozenset(
@@ -87,20 +93,27 @@ _PASSWORD_FAMILY = frozenset(
         "passwd",
         "pass",
         "passphrase",
+        "passcode",
         "pwd",
         "pw",
+        "pin",
+        "p@ssword",
         "db_pass",
         "mysql_pwd",
+        "p",
     }
 )
+# password/token/secret as a word anywhere (password_prod, passwordProd → password_prod)
+_SECRET_NAME_WORD_RE = re.compile(
+    r"(?i)(?:^|_)(password|passwd|passcode|passphrase|pass|pwd|pw|token|secret|"
+    r"sessionid|session|pin)(?:_|$|\[)"
+)
 _SECRET_NAME_SUFFIX_RE = re.compile(
-    r"(?i)(?:PASSWORD|PASSWD|TOKEN|SECRET|_API_KEY|_SECRET_KEY|_ACCESS_KEY|"
-    r"_ACCESS_TOKEN|_PRIVATE_KEY|_PWD|_PASS)$"
+    r"(?i)(?:PASSWORD|PASSWD|PASSCODE|TOKEN|SECRET|_API_KEY|_SECRET_KEY|_ACCESS_KEY|"
+    r"_ACCESS_TOKEN|_PRIVATE_KEY|_PWD|_PASS|SESSIONID)$"
 )
-# Non-secret even if suffix matches TOKEN/SECRET (config knobs / UI counters).
-_NONSECRET_NAME_RE = re.compile(
-    r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT|COUNT)_(?:TOKEN|SECRET|PASSWORD|PASS|PWD)$"
-)
+# Knob-style names (MAX_TOKEN, token_limit, …): still secret-named, but bare
+# numeric values are kept via should_redact_assignment (round-17 D1).
 _KNOB_NAME_RE = re.compile(
     r"(?i)^(?:MAX|MIN|LIMIT|DEFAULT|COUNT)(?:_|$)|(?:^|_)(?:COUNT|LIMIT|MAX|MIN)$"
 )
@@ -111,22 +124,26 @@ _VALUE_EQ = (
 )
 _VALUE_COLON = (
     r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\$\{[^}]+\}|<[^>\n]+>|"
-    r"https?://\S+|[^\s,;&=:]+)"
+    r"https?://\S+|[^\s,;&=:：]+)"
 )
-# name= / name: starters (value parsed separately so nested assignments are found)
+# Identifier incl. password[prod] / p@ssword; multi-word api/secret key handled separately.
+_NAME_ATOM = r"(?:p@ssword|[A-Za-z_][A-Za-z0-9_-]*(?:\[[^\]]+\])?)"
+_NAME_SPACED = r"(?:api|secret)\s+key"
+_NAME_ANY = rf"(?:{_NAME_SPACED}|{_NAME_ATOM})"
+# name= / name: / name:= / name： starters
 _ASSIGN_EQ_START_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"
+    rf"(?i)(?<![A-Za-z0-9_@])({_NAME_ANY})\s*=\s*"
 )
 _ASSIGN_COLON_START_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])([\"']?)([A-Za-z_][A-Za-z0-9_-]*)\1\s*:\s*"
+    rf"(?i)(?<![A-Za-z0-9_@])([\"']?)({_NAME_ANY})\1\s*(?::=|：|:)\s*"
 )
-# --name value  /  --name=value
+# --name value / --name=value / -p value (short password flag)
 _ASSIGN_FLAG_RE = re.compile(
-    rf"(?i)(--([A-Za-z][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))"
+    rf"(?i)(?:(--([A-Za-z][A-Za-z0-9_-]*))|(-p))(?:(=|\s+)({_VALUE_EQ}))"
 )
 # URL query ?name=value &name=value
 _ASSIGN_QUERY_RE = re.compile(
-    rf"(?i)([?&])([A-Za-z_][A-Za-z0-9_-]*)=({_VALUE_EQ})"
+    rf"(?i)([?&])({_NAME_ATOM})=({_VALUE_EQ})"
 )
 _VALUE_PARSE_EQ_RE = re.compile(_VALUE_EQ)
 _VALUE_PARSE_COLON_RE = re.compile(_VALUE_COLON)
@@ -154,22 +171,20 @@ _BEARER_BASIC_RE = re.compile(
 _AUTHZ_TOKEN_RE = re.compile(
     r"(?i)\b(Authorization\s*:\s*token)\s+([A-Za-z0-9_\-\.=+/]{4,})"
 )
-# "password is <value…>" / "token is <value…>" — value extent applied after match
+# "password is <value…>" / "password is: <value…>"
 _NAME_IS_VALUE_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|pwd|pw|pass|token|secret|api[_-]?key|"
-    r"auth|authorization|cookie|session|credential|credentials|bearer)\s+is\s+"
+    rf"(?i)\b({_NAME_ANY}|auth|authorization|cookie|session|credential|credentials|"
+    r"bearer|passphrase|token|secret)\s+is\s*:?\s+"
 )
-# "password - value" / "token → value" / "secret -> value"
+# "password - value" / "token → value" / "secret -> value" / "password; value" / "password, value"
 _ASSIGN_DASH_ARROW_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])"
-    r"(password|passwd|passphrase|pwd|pw|pass|token|secret|api[_-]?key|"
-    r"access[_-]?key|private[_-]?key|secret[_-]?key|auth|authorization|"
-    r"cookie|session|credential|credentials|bearer)"
-    r"\s*(?:-|→|->)\s*"
+    rf"(?i)(?<![A-Za-z0-9_@])({_NAME_ANY}|auth|authorization|cookie|session|"
+    r"credential|credentials|bearer|passphrase|token|secret)"
+    r"\s*(?:-|→|->|;|,)\s*"
 )
 # Whitespace form only for password/passwd: "passwd dragon"
 _ASSIGN_PASSWORD_WS_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(password|passwd)\s+(?![-=:→])"
+    r"(?i)(?<![A-Za-z0-9_@])(password|passwd)\s+(?![-=:：→])"
 )
 
 _SECRET_TOKEN_RES = (
@@ -241,12 +256,15 @@ _PLACEHOLDER_VALUE_RE = re.compile(
     r"<[^>]+>|"
     r"\*{3,}|"
     r"x{3,}|"
-    r"changeme|"
     r"your[\w-]*password[\w-]*|"
     r"your[\w-]+here|"
     r"redacted|"
     r"placeholder"
     r")$"
+)
+# pass=N alone or pass=N fail(ed|ures)?=M — entire value must match
+_PASS_COUNT_VALUE_RE = re.compile(
+    r"(?i)^\d+(?:\s+fail(?:ed|ures)?\s*[=:]\s*\d+)?$"
 )
 # Exact model ids only (no bare o1/o3 prefix — password=o1secretXyz must redact).
 _MODEL_NAME_RE = re.compile(
@@ -316,12 +334,23 @@ def is_secret_name(name: str) -> bool:
     """Classify assignment/header/flag name as secret-ish."""
     if not name:
         return False
-    if _NONSECRET_NAME_RE.match(name):
-        return False
-    n = _norm_name(name)
+    raw = name.strip()
+    # Spaced forms: "api key", "secret key"
+    low = re.sub(r"\s+", " ", raw.lower())
+    if low in {"api key", "secret key"}:
+        return True
+    if raw.lower() == "p@ssword" or low == "p@ssword":
+        return True
+    # Strip password[prod] → password for classification
+    bare = re.sub(r"\[.*?\]", "", raw)
+    n = _norm_name(bare)
     if n in _SECRET_NAME_EXACT:
         return True
-    if _SECRET_NAME_SUFFIX_RE.search(name) or _SECRET_NAME_SUFFIX_RE.search(n):
+    if _SECRET_NAME_WORD_RE.search(n) or _SECRET_NAME_WORD_RE.search(
+        _norm_name(raw.replace("[", "_").replace("]", ""))
+    ):
+        return True
+    if _SECRET_NAME_SUFFIX_RE.search(raw) or _SECRET_NAME_SUFFIX_RE.search(n):
         # Reject bare *_key (primary_key, sort_key, cache_key, public_key, …)
         if re.search(r"(?i)_key$", n) and not re.search(
             r"(?i)(?:api_key|secret_key|access_key|private_key)$", n
@@ -339,8 +368,6 @@ def _is_password_family(name: str) -> bool:
 
 
 def _is_knob_name(name: str) -> bool:
-    if _NONSECRET_NAME_RE.match(name or ""):
-        return True
     return bool(_KNOB_NAME_RE.search(name or ""))
 
 
@@ -458,22 +485,22 @@ def should_redact_assignment(
     if kind in _ALWAYS_SAFE_KINDS:
         return False
 
-    n = _norm_name(name)
+    n = _norm_name(re.sub(r"\[.*?\]", "", name))
     v_plain = _strip_value_quotes(value).strip()
-    first_atom = (v_plain.split() or [""])[0]
 
-    # pass=N / Tests: pass=196 / pass=1 fail=0 — numeric test counts only.
-    # Value extent may include "fail=0"; classify on the leading atom.
-    if n == "pass" and _NUMBER_VALUE_RE.match(first_atom):
+    # Exceptions apply only when the ENTIRE value matches (round-17 D1).
+    # pass=N or pass=N fail=M — bare number, optional fail clause, nothing else.
+    if n == "pass" and _PASS_COUNT_VALUE_RE.match(v_plain):
         return False
 
-    if _is_knob_name(name) and kind in {"number", "version", "model"}:
-        return False
-    if _is_knob_name(name) and _NUMBER_VALUE_RE.match(first_atom):
+    # Knob names: entire value must be a bare number or exact model id.
+    if _is_knob_name(name) and (
+        _NUMBER_VALUE_RE.match(v_plain) or kind == "model"
+    ):
         return False
 
-    # pwd=/Users/... filesystem paths (not password=/Secret123)
-    if n == "pwd" and kind == "path":
+    # pwd=/path — single path token with no whitespace.
+    if n == "pwd" and kind == "path" and not re.search(r"\s", v_plain):
         return False
 
     return True
@@ -624,21 +651,30 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
         # points at the value start; session= is a separate eq hit.
         parsed_atom = _parse_value_at(text, vs, colon=True)
         if parsed_atom:
-            _atom, _avs, ave = parsed_atom
-            if ave < len(text) and text[ave] == "=":
+            atom, _avs, ave = parsed_atom
+            # D2: skip only when the word before '=' is itself a secret name
+            # (Cookie: session=…). password: x=Hunter2Fake must still redact.
+            if ave < len(text) and text[ave] == "=" and is_secret_name(atom.strip()):
                 continue
         hit = _hit_from_name_sep(text, m.start(), name, vs, "colon")
         if hit:
             hits.append(hit)
 
     for m in _ASSIGN_FLAG_RE.finditer(text):
-        flag, name, sep = m.group(1), m.group(2), m.group(3)
-        if m.group(4) is None:
+        # Groups: (--long, name) | (-p) then sep then value
+        long_flag, long_name, short_p = m.group(1), m.group(2), m.group(3)
+        sep = m.group(4)
+        if m.group(5) is None:
             continue
-        vs = m.start(4)
+        if short_p:
+            name = "p"
+            flag = short_p
+        else:
+            name = long_name
+            flag = long_flag
+        vs = m.start(5)
         hit = _hit_from_name_sep(text, m.start(), name, vs, "flag")
         if hit:
-            # Keep flag spelling in prefix (--password= / --password )
             hits.append(
                 _AssignHit(
                     hit.start,

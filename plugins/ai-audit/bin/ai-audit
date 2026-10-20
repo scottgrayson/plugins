@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ai-audit — read-only context / token / facts audits.
+# ai-audit — read-only startup context audit (stage 1).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${ROOT}/lib${PYTHONPATH:+:$PYTHONPATH}"

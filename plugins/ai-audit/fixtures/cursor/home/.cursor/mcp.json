@@ -1,7 +1,31 @@
 {
   "mcpServers": {
-    "browser": { "command": "npx", "args": ["@browser/mcp"] },
-    "db": { "command": "npx", "args": ["db-mcp"], "env": { "DB_PASSWORD": "SHOULD_NOT_APPEAR" } },
-    "slack": { "command": "npx", "args": ["slack-mcp"] }
+    "browser": {
+      "command": "npx",
+      "args": [
+        "@browser/mcp"
+      ]
+    },
+    "db": {
+      "command": "npx",
+      "args": [
+        "db-mcp"
+      ],
+      "env": {
+        "DB_PASSWORD": "SHOULD_NOT_APPEAR"
+      }
+    },
+    "slack": {
+      "command": "npx",
+      "args": [
+        "slack-mcp"
+      ]
+    },
+    "demo-server": {
+      "command": "true"
+    },
+    "needs-auth": {
+      "command": "true"
+    }
   }
 }

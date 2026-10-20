@@ -75,24 +75,36 @@ Slash-invoke `/ai-audit:context-audit` once in the host UI if you want a UI chec
 
 ---
 
-## 1. Context audit
+## 1. Context audit (grouped table)
 
-Required — do not run from `~`; use your real project path:
+Required — do not run from `~`; use your real project path. Cursor hosts should see the grouped startup table (Always-apply rules, User Rules, Skill descriptions, MCP, Model/settings):
 
 ```bash
 cd /path/to/your/project
 if [ -z "${AI_AUDIT:-}" ] || [ ! -f "$AI_AUDIT" ]; then
   echo "FAIL AI_AUDIT unset or missing"
 else
-  if bash "$AI_AUDIT" context --host auto --md-only | head -40 | grep -q "Context audit"; then
+  OUT="$(bash "$AI_AUDIT" context --host auto --md-only | head -60)"
+  printf '%s\n' "$OUT"
+  if printf '%s\n' "$OUT" | grep -qE 'Context audit|Startup context report'; then
     echo "PASS context audit ran"
   else
     echo "FAIL context audit output missing"
   fi
+  if printf '%s\n' "$OUT" | grep -qE 'tiktoken o200k|Tokenizer:'; then
+    echo "PASS tokenizer labeled"
+  else
+    echo "FAIL tokenizer label missing"
+  fi
+  if printf '%s\n' "$OUT" | grep -qE 'Always-apply rules|Always-loaded|Skill descriptions'; then
+    echo "PASS grouped or inventory section present"
+  else
+    echo "FAIL missing report sections"
+  fi
 fi
 ```
 
-Expect: always-loaded list with real project paths. If more than 25 always-loaded items, a `+N more` line appears.
+On Cursor, expect columns `Item | Tokens | Purpose | AI suggestion` with Purpose/suggestion blank for the agent to fill.
 
 ---
 

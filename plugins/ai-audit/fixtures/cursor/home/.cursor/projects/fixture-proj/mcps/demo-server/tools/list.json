@@ -1,0 +1,1 @@
+{"name":"list","description":"list things","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}}}

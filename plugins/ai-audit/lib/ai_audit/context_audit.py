@@ -1188,7 +1188,7 @@ def run_context_audit(roots: Roots) -> dict[str, Any]:
     collector = COLLECTORS[roots.host]
     items = _dedupe_items(collector(roots))
     wins = rank_context_wins(items)
-    return {
+    payload: dict[str, Any] = {
         "audit": "context",
         "host": roots.host,
         "roots": roots.to_dict(),
@@ -1203,3 +1203,13 @@ def run_context_audit(roots: Roots) -> dict[str, Any]:
             "total_est_tokens": sum(i.est_tokens for i in items),
         },
     }
+    # Cursor: attach measured grouped startup report (o200k, skills budget, MCP, User Rules).
+    if roots.host == "cursor":
+        from .cursor_startup import build_cursor_startup_report
+
+        grouped = build_cursor_startup_report(roots)
+        # Keep inventory for tests; prefer grouped fields for markdown/JSON consumers.
+        payload.update({k: v for k, v in grouped.items() if k not in ("audit", "host")})
+        payload["audit"] = "context"
+        payload["host"] = "cursor"
+    return payload

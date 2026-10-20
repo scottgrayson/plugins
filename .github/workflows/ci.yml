@@ -33,11 +33,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ripgrep curl zsh >/dev/null
+          sudo apt-get install -y -qq ripgrep curl zsh python3-pip >/dev/null
           # mikefarah yq (workflow YAML assertions in run-tests.sh)
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Offline o200k tokenizer (ranks vendored under plugins/ai-audit/vendor/)
+          python3 -m pip install --user -q 'tiktoken>=0.7'
       - name: Run unit tests (preview + ai-audit)
         run: bash dev/run-tests.sh
 

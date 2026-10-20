@@ -469,6 +469,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== cursor startup (o200k / User Rules / MCP) =="
+CUR_OUT="$(python3 -B "$PLUGIN/tests/test_cursor_startup.py" 2>&1)" && CUR_RC=0 || CUR_RC=$?
+if [[ $CUR_RC -eq 0 ]]; then
+  echo "PASS $CUR_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL cursor_startup (rc=$CUR_RC)"
+  echo "  $CUR_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 py_check "HUMAN-TEST secret check FAIL when AI_AUDIT unset" <<PY
 import pathlib, re, subprocess
 ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")

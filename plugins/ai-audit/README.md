@@ -4,7 +4,9 @@ Read-only inventory of what loads into an agent's context at startup: instructio
 
 | Skill | What it answers |
 | --- | --- |
-| `context-audit` | What loads into context, how big it is, always vs on-demand |
+| `context-audit` | What loads into context; on Cursor, grouped startup table with real o200k tokens |
+
+**Tokenizer:** tiktoken `o200k_base` (ranks vendored under `vendor/`; install `tiktoken` once — no network at runtime).
 
 **Later stages (not in this PR):** token usage attribution, facts/memory hygiene.
 
