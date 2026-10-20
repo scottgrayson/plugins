@@ -695,3 +695,10 @@ redact	1password {hunter2}	hunter2
 redact	bitwarden (pw: x9)	x9
 keep	1Password (password manager)	
 keep	user-1password (1 tool)	
+keep	password manager	
+keep	Use a password manager for this	
+redact	password manager: x9	x9
+redact	password manager hunter2	hunter2
+redact	1password (password is dragonfly)	dragonfly
+redact	1password (secret dragonfly)	dragonfly
+redact	Use 1Password, password is dragonfly	dragonfly

@@ -568,6 +568,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-31 (product token only, password manager phrase) =="
+R31_OUT="$(python3 -B "$PLUGIN/tests/test_round31.py" 2>&1)" && R31_RC=0 || R31_RC=$?
+if [[ $R31_RC -eq 0 ]]; then
+  echo "PASS $R31_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round31 (rc=$R31_RC)"
+  echo "  $R31_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then
