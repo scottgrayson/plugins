@@ -1,0 +1,2 @@
+Injected session rule text for token measurement.
+Second line of hook context.

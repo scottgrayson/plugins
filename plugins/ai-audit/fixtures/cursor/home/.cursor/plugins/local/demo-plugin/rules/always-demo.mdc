@@ -1,0 +1,6 @@
+---
+description: demo
+alwaysApply: true
+---
+# Demo plugin rule
+Always say hello from the plugin.

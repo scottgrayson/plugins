@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ai-audit — read-only startup context audit (stage 1).
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${ROOT}/lib${PYTHONPATH:+:$PYTHONPATH}"
+# Never write __pycache__ into the installed plugin folder.
+export PYTHONDONTWRITEBYTECODE=1
+exec python3 -B -m ai_audit "$@"

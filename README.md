@@ -1,8 +1,11 @@
 # plugins
 
-MIT-licensed plugins by Scott Grayson. This marketplace currently ships **preview**: temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`).
+MIT-licensed plugins by Scott Grayson. This marketplace ships:
 
-Two modes share the same scripts:
+- **preview** — temporary public previews of a repo app on any branch or PR via a free Cloudflare quick tunnel (`*.trycloudflare.com`). Package: [`plugins/preview/`](plugins/preview/).
+- **ai-audit** — read-only startup context audit (stage 1). Package: [`plugins/ai-audit/`](plugins/ai-audit/). Skill: `context-audit`. Installs on **Claude Code**, **Cursor**, and **Grok Bot** (see [ai-audit install](#install--ai-audit) below). Later stages will add token usage and facts.
+
+Two modes share the same scripts for **preview**:
 
 1. **Actions mode** — humans tick a PR checkbox; GitHub Actions runs the tunnel (no AI).
 2. **Agent mode** — install the plugin in Cursor or Claude Code; the agent runs `preview up --agent` on its own VM (localhost by default; never ticks the Actions checkbox).
@@ -107,6 +110,7 @@ In a Claude Code session:
 ```text
 /plugin marketplace add scottgrayson/plugins
 /plugin install preview@scottgrayson-plugins
+/plugin install ai-audit@scottgrayson-plugins
 ```
 
 Or from your shell:
@@ -114,12 +118,14 @@ Or from your shell:
 ```bash
 claude plugin marketplace add scottgrayson/plugins
 claude plugin install preview@scottgrayson-plugins
+claude plugin install ai-audit@scottgrayson-plugins
 ```
 
 One-shot (adds the marketplace if needed):
 
 ```text
 /plugin install preview --marketplace scottgrayson/plugins
+/plugin install ai-audit --marketplace scottgrayson/plugins
 ```
 
 ### Install — Cursor
@@ -128,9 +134,9 @@ This repo is a Cursor team marketplace catalog ([`.cursor-plugin/marketplace.jso
 
 1. **Dashboard → Plugins & MCPs → Team Marketplaces → Add Marketplace → Import from Repo**
 2. Paste `https://github.com/scottgrayson/plugins` (requires Teams/Enterprise for team marketplaces)
-3. Open **Customize** in the sidebar → find **preview** → **Install** (user or project scope)
+3. Open **Customize** in the sidebar → find **preview** or **ai-audit** → **Install** (user or project scope)
 
-For local smoke-testing without a team marketplace, copy the plugin into `~/.cursor/plugins/local/preview` (must contain `.cursor-plugin/plugin.json`) and reload the window. Official Marketplace `/add-plugin` only works for plugins listed on [cursor.com/marketplace](https://cursor.com/marketplace).
+For local smoke-testing without a team marketplace, copy the plugin into `~/.cursor/plugins/local/<name>` (must contain `.cursor-plugin/plugin.json`) and reload the window. Official Marketplace `/add-plugin` only works for plugins listed on [cursor.com/marketplace](https://cursor.com/marketplace).
 
 ### Run in a consumer repo
 
@@ -156,6 +162,33 @@ preview up --agent --share --config .preview/config.json --workdir .
 ```
 
 See [`plugins/preview/skills/preview/SKILL.md`](plugins/preview/skills/preview/SKILL.md).
+
+---
+
+## Install — ai-audit
+
+Stage 1: read-only **startup context** audit (`context-audit`). Details: [`plugins/ai-audit/README.md`](plugins/ai-audit/README.md).
+
+### Claude Code
+
+```text
+/plugin marketplace add scottgrayson/plugins
+/plugin install ai-audit@scottgrayson-plugins
+```
+
+`${CLAUDE_PLUGIN_ROOT}` is substituted in skill **text only** (not exported to the Bash tool). Skills must use the braced form. Cache layout: `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.
+
+### Cursor
+
+1. Dashboard → Plugins & MCPs → Team Marketplaces → add `https://github.com/scottgrayson/plugins`
+2. Customize → install **ai-audit**
+3. Or local copy: `~/.cursor/plugins/local/ai-audit` (must include `.cursor-plugin/plugin.json`)
+
+### Grok Bot
+
+1. Ask the bot to clone this repo (or a branch) onto its computer.
+2. Follow the skill’s **Locate the CLI option B** (`SKILL_MD` → `scripts/locate-cli.sh` → `bash "$AI_AUDIT" …`).
+3. Optional: copy the `context-audit` skill folder into the bot’s skills only if `../../bin/ai-audit` still resolves.
 
 ### Optional: repo agent rules
 

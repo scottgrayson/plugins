@@ -1,0 +1,45 @@
+<mcp_file_system>
+You can use MCP (Model Context Protocol) tools via the file system. Each enabled
+MCP server has a folder under the project mcps directory. Tool descriptors are
+JSON files; read a descriptor only when you need that tool. Schemas are not
+loaded into the system prompt at startup (dynamic discovery / file-system mode).
+
+How to use MCP tools from files:
+1. List server folders under the mcps root to see which servers are available.
+2. Open tools/<name>.json for the tool you need; follow its inputSchema.
+3. Do not load every schema up front — that can exceed 100k tokens.
+4. If a server folder is empty or only exposes mcp_auth, the server needs auth
+   or failed to start; do not invent tools.
+5. Prefer the official plugin server when a duplicate user server overlaps.
+
+Server status hints: needs-auth, failed-to-start, over the 100-tool cap, and
+duplicate servers (e.g. clickup vs plugin-clickup) should be called out.
+
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Additional guidance: keep MCP file-system mode on; schemas stay on demand.
+ Keep descriptors on demand. Keep descriptors on demand.</mcp_file_system>

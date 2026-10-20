@@ -1,0 +1,5 @@
+{
+  "skills": [
+    {"pluginName": "preview", "name": "preview", "description": "Preview plugin skill"}
+  ]
+}

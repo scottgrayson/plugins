@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN="$ROOT/plugins/preview"
 LIB="$PLUGIN/lib"
+AI_AUDIT_TESTS="$ROOT/plugins/ai-audit/tests/run-tests.sh"
 PASS=0
 FAIL=0
 
@@ -651,6 +652,28 @@ if [[ "$WITH_E2E" -eq 1 ]]; then
     echo "FAIL agent-mode e2e suite (pass=$E2E_PASS fail=$E2E_FAIL)"
     FAIL=$((FAIL + 1))
   fi
+fi
+
+# ai-audit fixture suite (stage 1: detect + context)
+echo
+echo "== ai-audit =="
+AI_RC=0
+AI_OUT="$(bash "$AI_AUDIT_TESTS" 2>&1)" || AI_RC=$?
+printf '%s\n' "$AI_OUT"
+AI_PASS="$(printf '%s\n' "$AI_OUT" | grep -cE '^PASS ' || true)"
+AI_FAIL="$(printf '%s\n' "$AI_OUT" | grep -cE '^FAIL ' || true)"
+PASS=$((PASS + AI_PASS))
+FAIL=$((FAIL + AI_FAIL))
+# Fail on non-zero exit even when no "FAIL " lines were printed (e.g. crash mid-suite).
+if [[ "$AI_RC" -ne 0 ]]; then
+  echo "FAIL ai-audit suite exited non-zero (rc=$AI_RC pass=$AI_PASS fail=$AI_FAIL)"
+  FAIL=$((FAIL + 1))
+elif [[ "$AI_FAIL" -eq 0 && "$AI_PASS" -gt 0 ]]; then
+  echo "PASS ai-audit suite ($AI_PASS checks)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL ai-audit suite (pass=$AI_PASS fail=$AI_FAIL)"
+  FAIL=$((FAIL + 1))
 fi
 
 echo

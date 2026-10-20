@@ -1,0 +1,7 @@
+---
+description: Contradictory alwaysApply plus globs
+alwaysApply: true
+globs:
+  - "**/*.py"
+---
+Contradictory.

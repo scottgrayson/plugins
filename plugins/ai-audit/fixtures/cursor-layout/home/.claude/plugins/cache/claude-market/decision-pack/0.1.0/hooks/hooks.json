@@ -1,0 +1,1 @@
+{"hooks": {"SessionStart": [{"command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-rule.sh"}], "UserPromptSubmit": [{"command": "${CLAUDE_PLUGIN_ROOT}/hooks/inject-rule.sh"}]}}

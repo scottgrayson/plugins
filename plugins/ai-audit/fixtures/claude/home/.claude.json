@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": ["docs-mcp"],
+      "tools": [
+        {"name": "search_docs", "description": "Search documentation", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}}
+      ]
+    },
+    "search": {
+      "command": "npx",
+      "args": ["search-mcp"],
+      "env": {"API_KEY": "SHOULD_NOT_APPEAR"},
+      "tools": [
+        {"name": "web_search", "description": "Search the web", "inputSchema": {"type": "object"}}
+      ]
+    },
+    "unused": {
+      "command": "npx",
+      "args": ["unused-mcp"]
+    }
+  }
+}

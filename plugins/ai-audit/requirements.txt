@@ -1,0 +1,2 @@
+# Offline o200k tokenizer (ranks are vendored under vendor/; package loads them).
+tiktoken==0.14.0

@@ -22,6 +22,20 @@
         "cloudflare",
         "tunnel"
       ]
+    },
+    {
+      "name": "ai-audit",
+      "source": "ai-audit",
+      "description": "Read-only startup context audit (stage 1); later stages add token usage and facts",
+      "version": "0.1.0",
+      "author": {
+        "name": "Scott Grayson"
+      },
+      "license": "MIT",
+      "keywords": [
+        "audit",
+        "context"
+      ]
     }
   ]
 }

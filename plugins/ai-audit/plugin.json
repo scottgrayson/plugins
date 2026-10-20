@@ -1,0 +1,13 @@
+{
+  "name": "ai-audit",
+  "version": "0.1.0",
+  "description": "Read-only startup context audit across Claude Code, Cursor, and Grok Bot (stage 1).",
+  "author": {
+    "name": "Scott Grayson"
+  },
+  "license": "MIT",
+  "keywords": [
+    "audit",
+    "context"
+  ]
+}
