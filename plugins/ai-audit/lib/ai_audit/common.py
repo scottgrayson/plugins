@@ -1095,11 +1095,29 @@ _PM_TAIL_RE = re.compile(r"(?i)managers?")
 _COMMA_CONNECTIVE_RE = re.compile(r",[^\S\t]+(?:and|or|but|then|etc)(?=[\s.,]|$)")
 
 
+# Path/source field: the segment right after a product folder. Anything with a digit
+# must match one of these whole-segment shapes; digit-free segments are plain words.
+_DIR_VERSION_RE = re.compile(r"[vV]?\d+(?:\.\d+)+(?:-[A-Za-z][A-Za-z0-9.]*)?")
+_DIR_WORD_VERSION_RE = re.compile(r"[A-Za-z]+(?:[_-][A-Za-z]+)*[_-][vV]?\d+(?:\.\d+)+")
+_DIR_COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+
+def _dir_segment_ok(seg: str) -> bool:
+    if not any(c.isdigit() for c in seg):
+        return True
+    return any(
+        rx.fullmatch(seg)
+        for rx in (_DIR_VERSION_RE, _DIR_WORD_VERSION_RE, _DIR_COMMIT_RE)
+    )
+
+
 def _safe_follow(rest: str, path: bool = False) -> bool:
     if not rest:
         return True
     if path and rest[0] == "/":
-        return True  # path field: the product name is just a directory name
+        # path field: the product name is just a directory name, and the next
+        # segment must be a version, a plain word or a full commit hash.
+        return _dir_segment_ok(re.split(r"[/\\]", rest[1:], maxsplit=1)[0])
     c = _COMMA_CONNECTIVE_RE.match(rest)
     if c:
         # The connective is fine; whatever follows it must be safe too.

@@ -601,6 +601,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== round-35 (segment after product folder in path fields) =="
+R35_OUT="$(python3 -B "$PLUGIN/tests/test_round35.py" 2>&1)" && R35_RC=0 || R35_RC=$?
+if [[ $R35_RC -eq 0 ]]; then
+  echo "PASS $R35_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL round35 (rc=$R35_RC)"
+  echo "  $R35_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== redaction corpus =="
 CORPUS_OUT="$(python3 -B "$PLUGIN/tests/test_redaction_corpus.py" 2>&1)" && CORPUS_RC=0 || CORPUS_RC=$?
 if [[ $CORPUS_RC -eq 0 ]]; then

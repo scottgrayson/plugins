@@ -717,3 +717,22 @@ redact	m/1password:x9	x9		path
 redact	1password/hunter2	hunter2
 redact	Bitwarden, etc, x9y8z7	x9y8z7
 redact	1Password, and x9y8z7	x9y8z7
+# Round 35
+keep	~/.cursor/plugins/cache/m/1password/v2.0.0/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/lastpass/2.0.0-beta/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/bitwarden/release_v0.1.4/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/1password/latest/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/bitwarden/0123456789abcdef0123456789abcdef01234567/skills/x/SKILL.md			source
+keep	~/.cursor/plugins/cache/m/1password/v2.0.0/skills/x/SKILL.md			path
+keep	~/.cursor/plugins/cache/m/lastpass/2.0.0-beta/skills/x/SKILL.md			path
+keep	~/.cursor/plugins/cache/m/bitwarden/release_v0.1.4/skills/x/SKILL.md			path
+keep	~/.cursor/plugins/cache/m/1password/latest/skills/x/SKILL.md			path
+keep	~/.cursor/plugins/cache/m/bitwarden/0123456789abcdef0123456789abcdef01234567/skills/x/SKILL.md			path
+redact	x/1password/hunter2	hunter2		source
+redact	x/1password/hunter2	hunter2		path
+redact	x/lastpass/x9y8z7	x9y8z7		source
+redact	x/lastpass/x9y8z7	x9y8z7		path
+redact	x/bitwarden/deadbeef12	deadbeef12		source
+redact	x/bitwarden/deadbeef12	deadbeef12		path
+redact	x/1password/Hunter2Fake/skills	Hunter2Fake		source
+redact	x/1password/Hunter2Fake/skills	Hunter2Fake		path
