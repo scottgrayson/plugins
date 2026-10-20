@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Table-driven redact / keep cases for ai_audit.common.redact_secrets.
+Table-driven redact / keep / expected-overredact cases for ai_audit.common.redact_secrets.
 
 Also plants secrets into a tiny project and asserts context CLI output
 redacts them (stage 1 — no token/facts commands).
@@ -130,15 +130,38 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("token: Hunter", "Hunter"),
     ("secret: Banana", "Banana"),
     ("password: correct horse", "correct horse"),
+    # --- round-16 D1: secret + trailing words (whole value redacts) ---
+    ("password: Hunter2FakePass99 for prod", "Hunter2FakePass99"),
+    ("token: ghfakeTok123 for CI", "ghfakeTok123"),
+    ("api_key: abc123def456 is prod", "abc123def456"),
+    ("DB_PASSWORD: Welcome1 on staging", "Welcome1"),
+    ("password: FakeQuoted123 in vault", "FakeQuoted123"),
+    ("db password: Hunter2FakePass!99 for prod", "Hunter2FakePass!99"),
+    ("password: correct horse battery staple", "correct horse"),
+    ("password: blue sky 7", "blue sky"),
+    ("password: Dragon Monkey Tiger", "Dragon Monkey"),
+    ("pwd: qwerty asdf zxcv", "qwerty"),
+    ("password: dragon for wifi", "dragon"),
+    ("password: dragon, rotate monthly", "dragon"),
+    # --- round-16 D2: status word must not shield a secret ---
+    ("password: set to dragon", "dragon"),
+    ("password: changed to Hunter2x", "Hunter2x"),
+    ("password: reset to welcome123", "welcome123"),
+    ("password: none, use dragon", "dragon"),
+    ("token: rotated abc123XYZ", "abc123XYZ"),
+    ("password: required dragon", "dragon"),
+    ("password: n/a dragon", "dragon"),
+    ("secret: unset banana", "banana"),
+    # --- round-16 D4: dash / arrow / password whitespace separators ---
+    ("password - dragon", "dragon"),
+    ("password → dragon", "dragon"),
+    ("password -> dragon", "dragon"),
+    ("passwd dragon", "dragon"),
 ]
 
+# Still kept under the simple rule (empty / placeholder / null / bool / status
+# alone / knob numbers / pass=N counts / pwd paths / non-secret names).
 KEEP_CASES: list[str] = [
-    "Max token: 8192",
-    "Default token: 4096 limit",
-    "Secret: 3 rules to follow",
-    "token: 2 per request",
-    "Password: 8+ chars required",
-    "token: v2",
     "pwd=/Users/scott/Code",
     "PWD=/home/box",
     "pass=1 fail=0",
@@ -158,15 +181,6 @@ KEEP_CASES: list[str] = [
     "cache_key: v2-node20",
     "MAX_TOKEN=4096",
     "pwd: /Users/x",
-    "password: none needed",
-    "token: claude-sonnet-4-5",
-    "token: gpt-4o-mini-2024",
-    "token: grok-2",
-    "token: gemini-1.5-pro",
-    "token: o1-preview",
-    "Default token: Composer is the default model",
-    "Explain token: what actually counts",
-    "secret: the deploy key",
     "MONKEY_KEY=banana",
     "REACT_APP_PUBLIC_KEY=pk_test_x",
     "Basic authentication is disabled",
@@ -182,6 +196,7 @@ KEEP_CASES: list[str] = [
     "/home/box/sand-data/workflows/why/references/epistemics.md",
     "commit abcdef1",
     "id 550e8400-e29b-41d4-a716-446655440000",
+    # status-word allowlist alone (nothing else)
     "token: optional",
     "password: changed",
     "Authorization: required",
@@ -190,9 +205,69 @@ KEEP_CASES: list[str] = [
     "secret: unknown",
     "session: deprecated",
     "auth: revoked",
+    "password: none",
+    "PASSWORD=required",
+    "token=expired",
+    # pass=N counts (including alone)
     "Tests: pass=196 failed=0",
+    "Tests: pass=196",
     "PASS: 12 FAIL: 0",
     "pass=3 failures=1",
+]
+
+# Intentional over-redaction under the simple whole-value rule.
+# Do not delete or reword these to make tests pass — document the tradeoff.
+# Includes restored round-10 strings that prose carve-outs previously "kept".
+EXPECTED_OVERREDACT: list[str] = [
+    # restored round-10 originals (were reworded in later rounds to dodge FP)
+    "Default token: Composer model",
+    "Explain token: what counts",
+    # former KEEP / instructional prose now redacted
+    "Max token: 8192",
+    "Default token: 4096 limit",
+    "Secret: 3 rules to follow",
+    "token: 2 per request",
+    "Password: 8+ chars required",
+    "token: v2",
+    "password: none needed",
+    "token: claude-sonnet-4-5",
+    "token: gpt-4o-mini-2024",
+    "token: grok-2",
+    "token: gemini-1.5-pro",
+    "token: o1-preview",
+    "secret: the deploy key",
+    "auth: github",
+    "session: weekly",
+    "cookie: consent banner",
+    # round-16 over-redaction survey
+    "token: sonnet",
+    "token: budget",
+    "token: 1h",
+    "token: Composer-1",
+    "Token: see docs",
+    "auth: sso",
+    "Auth: OAuth",
+    "session: daily",
+    "Session: Monday standup",
+    "cookie: chocolate",
+    "cookie: blocked",
+    "secret: shared",
+    "secret: 2fa",
+    "The secret: practice daily",
+    "password: policy",
+    "password: weak",
+    "Password: Strong",
+    "password: 2FA enabled",
+    "x-api-key: header name",
+    "access_key: from IAM",
+    "apikey: in vault",
+    "credentials: in vault",
+    "passphrase: ask Scott",
+    "private_key: in ~/.ssh",
+    "token=sonnet-4",
+    "AUTH=sso",
+    "auth=oauth",
+    "session=abc",
 ]
 
 
@@ -205,6 +280,13 @@ def _assert_redact(raw: str, leak: str) -> None:
 def _assert_keep(raw: str) -> None:
     got = redact_secrets(raw)
     assert got == raw, f"KEEP changed:\n  in:  {raw!r}\n  out: {got!r}"
+
+
+def _assert_overredact(raw: str) -> None:
+    got = redact_secrets(raw)
+    assert "REDACTED" in got, (
+        f"EXPECTED_OVERREDACT did not redact:\n  in:  {raw!r}\n  out: {got!r}"
+    )
 
 
 def _run_cli(args: list[str]) -> str:
@@ -230,12 +312,30 @@ def run_context_secret_e2e() -> None:
         grok = td / "grok"
         shutil.copytree(fix, grok)
         profile = grok / "sand-data" / "agents" / "agent-active" / "profile.json"
-        # Inventory emits bot name as a string leaf; redact_tree must scrub it.
-        plants = [
+        # Prefer D1/D2/D4 + distinctive eq forms so CLI covers round-16 defects.
+        prefer = [
             raw
             for raw, _ in REDACT_CASES
-            if "\n" not in raw and len(raw) < 80 and "=" in raw
-        ][:12]
+            if any(
+                raw.startswith(p)
+                for p in (
+                    "password: Hunter2",
+                    "password: set to",
+                    "token: rotated",
+                    "password - ",
+                    "password →",
+                    "passwd ",
+                    "password: dragon, rotate",
+                    "db password:",
+                )
+            )
+            or (
+                "\n" not in raw
+                and len(raw) < 80
+                and ("=" in raw or ":" in raw)
+            )
+        ]
+        plants = prefer[:16]
         profile.write_text(
             json.dumps({"name": " | ".join(plants), "description": "test"}, indent=2),
             encoding="utf-8",
@@ -254,6 +354,34 @@ def run_context_secret_e2e() -> None:
             assert raw not in blob, f"context still has raw {raw!r}"
             if len(leak) >= 8 and not any(leak in k for k in KEEP_CASES):
                 assert leak not in blob, f"context leak {leak!r} from {raw!r}"
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def run_cli_redact_cases() -> None:
+    """Plant every REDACT_CASES string into Grok bot name (meta string leaf) via CLI."""
+    fix = PLUGIN / "fixtures" / "grok"
+    td = Path(tempfile.mkdtemp(prefix="ai-audit-cli-redact."))
+    try:
+        grok = td / "grok"
+        shutil.copytree(fix, grok)
+        profile = grok / "sand-data" / "agents" / "agent-active" / "profile.json"
+        # Inventory stores bot name text (not description body). One plant per CLI
+        # run so D1/D2/D4 phrases are checked individually through the real binary.
+        for raw, leak in REDACT_CASES:
+            if "\n" in raw:
+                continue
+            profile.write_text(
+                json.dumps({"name": raw, "description": "test bot"}, indent=2),
+                encoding="utf-8",
+            )
+            blob = _run_cli(
+                ["context", "--host", "grok", "--root", str(grok), "--json-only"]
+            )
+            assert "REDACTED" in blob, f"CLI missing REDACTED for {raw!r}: {blob[:300]}"
+            assert raw not in blob, f"CLI still has raw {raw!r}"
+            if len(leak) >= 6 and not any(leak in k for k in KEEP_CASES):
+                assert leak not in blob, f"CLI leak {leak!r} from {raw!r}"
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -280,7 +408,7 @@ def run_project_eq_home_context_dedupe() -> None:
         shutil.rmtree(td, ignore_errors=True)
 
 
-def run_all() -> tuple[int, int]:
+def run_all() -> tuple[int, int, int]:
     for raw, leak in REDACT_CASES:
         _assert_redact(raw, leak)
     pem = (
@@ -315,15 +443,22 @@ def run_all() -> tuple[int, int]:
     for raw in KEEP_CASES:
         _assert_keep(raw)
 
+    for raw in EXPECTED_OVERREDACT:
+        _assert_overredact(raw)
+
     run_context_secret_e2e()
+    run_cli_redact_cases()
     run_project_eq_home_context_dedupe()
 
-    return len(REDACT_CASES) + 3, len(KEEP_CASES)
+    return len(REDACT_CASES) + 3, len(KEEP_CASES), len(EXPECTED_OVERREDACT)
 
 
 def main() -> int:
-    redact_n, keep_n = run_all()
-    print(f"PASS redact_cases redact={redact_n} keep={keep_n} total={redact_n + keep_n}")
+    redact_n, keep_n, over_n = run_all()
+    print(
+        f"PASS redact_cases redact={redact_n} keep={keep_n} "
+        f"overredact={over_n} total={redact_n + keep_n + over_n}"
+    )
     return 0
 
 

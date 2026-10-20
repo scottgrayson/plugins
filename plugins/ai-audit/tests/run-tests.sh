@@ -258,7 +258,13 @@ aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 assert aws not in redact_secrets("aws secret " + aws)
 assert "dragon" not in redact_secrets("password: dragon")
 assert "REDACTED" not in redact_secrets("token: optional")
-assert "Composer" in redact_secrets("Default token: Composer is the default model")
+# Round-10 original string restored; simple rule intentionally over-redacts it.
+assert "REDACTED" in redact_secrets("Default token: Composer model")
+assert "Hunter2FakePass99" not in redact_secrets("password: Hunter2FakePass99 for prod")
+assert "dragon" not in redact_secrets("password: set to dragon")
+assert "dragon" not in redact_secrets("password - dragon")
+assert "dragon" not in redact_secrets("passwd dragon")
+assert redact_secrets("Tests: pass=196") == "Tests: pass=196"
 assert looks_like_secret_value("tok_live_abc123XYZ999")
 PY
 

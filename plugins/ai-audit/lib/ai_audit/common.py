@@ -154,10 +154,22 @@ _BEARER_BASIC_RE = re.compile(
 _AUTHZ_TOKEN_RE = re.compile(
     r"(?i)\b(Authorization\s*:\s*token)\s+([A-Za-z0-9_\-\.=+/]{4,})"
 )
-# "password is <value>" / "token is <value>"
+# "password is <value…>" / "token is <value…>" — value extent applied after match
 _NAME_IS_VALUE_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|token|secret|api[_-]?key)\s+is\s+"
-    r"([^\s,;]+)"
+    r"(?i)\b(password|passwd|passphrase|pwd|pw|pass|token|secret|api[_-]?key|"
+    r"auth|authorization|cookie|session|credential|credentials|bearer)\s+is\s+"
+)
+# "password - value" / "token → value" / "secret -> value"
+_ASSIGN_DASH_ARROW_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"(password|passwd|passphrase|pwd|pw|pass|token|secret|api[_-]?key|"
+    r"access[_-]?key|private[_-]?key|secret[_-]?key|auth|authorization|"
+    r"cookie|session|credential|credentials|bearer)"
+    r"\s*(?:-|→|->)\s*"
+)
+# Whitespace form only for password/passwd: "passwd dragon"
+_ASSIGN_PASSWORD_WS_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(password|passwd)\s+(?![-=:→])"
 )
 
 _SECRET_TOKEN_RES = (
@@ -252,8 +264,6 @@ _BOOLEAN_VALUE_RE = re.compile(
 _NULL_VALUE_RE = re.compile(r"(?i)^(?:null|none|nil|undefined)$")
 _NUMBER_VALUE_RE = re.compile(r"^\d+$")
 _VERSION_VALUE_RE = re.compile(r"^v?\d+(?:\.\d+)*$")
-# Requirement-style atoms ("8+", "12+") — instructional, not secrets.
-_REQUIREMENT_VALUE_RE = re.compile(r"^\d+\+$")
 _PATH_VALUE_RE = re.compile(r"^(?:~|/|file://|[A-Za-z]:\\)")
 _UUID_RE = re.compile(
     r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -263,7 +273,7 @@ _KNOWN_SECRET_PREFIX_RE = re.compile(
     r"(?i)^(?:sk[-_]|rk[-_]|ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|glpat-|npm_|whsec_|hf_|"
     r"xox[baprs]-|AIza|AKIA|crsr_|xai-|eyJ)"
 )
-# Colon-form status words only (case-insensitive). Other single words redact.
+# Status words kept only when the entire value is exactly one of these.
 _STATUS_WORDS = frozenset(
     {
         "required",
@@ -287,10 +297,6 @@ _STATUS_WORDS = frozenset(
     }
 )
 _DICT_WORD_RE = re.compile(r"^[a-z]+(?:-[a-z]+)?$")
-# pass=N fail(ed|ures)?=M  or  PASS: N FAIL: M
-_PASS_FAIL_FOLLOW_RE = re.compile(
-    r"(?i)\s+fail(?:ed|ures)?\s*(?:=|:)\s*\d+"
-)
 
 
 def _strip_value_quotes(value: str) -> str:
@@ -340,9 +346,9 @@ def _is_knob_name(name: str) -> bool:
 
 def classify_value(value: str) -> str:
     """
-    Classify a raw value atom.
+    Classify a raw value atom (or whole assignment value).
     Returns one of: empty, placeholder, boolean, null, number, version, path,
-    uuid, gitsha, model, prose, dictword, secretlike.
+    uuid, gitsha, model, status, secretlike.
     """
     raw = (value or "").strip()
     if not raw:
@@ -357,12 +363,13 @@ def classify_value(value: str) -> str:
         return "boolean"
     if _NULL_VALUE_RE.match(v):
         return "null"
+    # Exact single status word (no trailing prose) — keep under assignment rule.
+    if v.lower() in _STATUS_WORDS and " " not in v and "\t" not in v:
+        return "status"
     if _NUMBER_VALUE_RE.match(v):
         return "number"
     if _VERSION_VALUE_RE.match(v):
         return "version"
-    if _REQUIREMENT_VALUE_RE.match(v):
-        return "prose"
     if _PATH_VALUE_RE.match(v) or (v.startswith("/") and "/" in v[1:]):
         return "path"
     if _UUID_RE.match(v):
@@ -373,39 +380,61 @@ def classify_value(value: str) -> str:
         return "model"
     if _KNOWN_SECRET_PREFIX_RE.match(v):
         return "secretlike"
-    # Unquoted multi-word → instructional prose (word count checked at decide time)
-    if (" " in v or "\t" in v) and not quoted:
-        return "prose"
     if quoted:
-        # Quoted non-placeholder content is treated as a secret payload
         return "secretlike"
-    # Short lowercase word — may be status allowlist or a weak password
     if _DICT_WORD_RE.match(v) and len(v) <= 12:
         return "dictword"
-    # Titlecase English without digits (Composer / Hunter / Dragon)
     if re.fullmatch(r"[A-Z][a-z]+", v):
         return "titleword"
     return "secretlike"
 
 
 # Always-safe kinds for any secret-ish name (leaked secret > redacted word).
-_ALWAYS_SAFE_KINDS = frozenset({"empty", "placeholder", "boolean", "null"})
+_ALWAYS_SAFE_KINDS = frozenset({"empty", "placeholder", "boolean", "null", "status"})
 
 
-def _colon_phrase_words(value: str, following: str) -> list[str]:
-    """Value atom(s) plus trailing prose words (stop before nested name=/name:)."""
-    v = _strip_value_quotes(value).strip()
-    words: list[str] = v.split() if v else []
-    for tok in re.findall(r"[^\s,;&]+", following or ""):
-        # Nested assignment or another labeled field
-        if "=" in tok:
+def _next_kv_comma_offset(text: str) -> int | None:
+    """Offset of ', key=' / ', key:' that starts another assignment, else None."""
+    m = re.match(r",\s+[A-Za-z_][A-Za-z0-9_-]*\s*[=:]", text)
+    return m.start() if m else None
+
+
+def _value_extent_end(text: str, start: int) -> int:
+    """
+    End index of an assignment value starting at start.
+
+    Consumes through end of line, closing quote, or the next ', key=value' pair.
+    """
+    n = len(text)
+    if start >= n:
+        return start
+    # Quoted value: consume through matching closer (allow escapes).
+    q = text[start]
+    if q in ("'", '"'):
+        i = start + 1
+        while i < n:
+            ch = text[i]
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == q:
+                return i + 1
+            if ch in "\r\n":
+                return i
+            i += 1
+        return n
+
+    i = start
+    while i < n:
+        ch = text[i]
+        if ch in "\r\n":
             break
-        if re.match(r"(?i)^[A-Za-z_][A-Za-z0-9_-]*:", tok):
-            break
-        words.append(tok)
-        if len(words) >= 12:
-            break
-    return words
+        if ch == ",":
+            off = _next_kv_comma_offset(text[i:])
+            if off == 0:
+                break
+        i += 1
+    return i
 
 
 def should_redact_assignment(
@@ -418,11 +447,10 @@ def should_redact_assignment(
     """
     Decide whether to redact one assignment.
 
-    Policy (owner): a leaked secret is worse than a redacted word.
-    Safe for secret-ish names: empty / placeholder / null / boolean.
-    Numbers only for knob names and pass=N fail(ed|ures)?=M test counts.
-    Colon form: explicit status-word allowlist, or 3+ word instructional prose.
-    Paths only for pwd=. Model ids never safe for password-family names.
+    Simple rule (round 16): after a secret-like name + separator, redact the
+    whole value. Exceptions only: empty, placeholder, null/none, true/false,
+    exactly one status-word allowlist entry, knob-name numbers, and pass=N
+    test counts (optionally followed by fail=M).
     """
     if not is_secret_name(name):
         return False
@@ -431,53 +459,38 @@ def should_redact_assignment(
         return False
 
     n = _norm_name(name)
-    pw_family = _is_password_family(name)
     v_plain = _strip_value_quotes(value).strip()
+    first_atom = (v_plain.split() or [""])[0]
 
-    # pass=N fail=M / failed= / failures= / PASS: 12 FAIL: 0
-    if n == "pass" and kind == "number" and _PASS_FAIL_FOLLOW_RE.match(
-        following or ""
-    ):
+    # pass=N / Tests: pass=196 / pass=1 fail=0 — numeric test counts only.
+    # Value extent may include "fail=0"; classify on the leading atom.
+    if n == "pass" and _NUMBER_VALUE_RE.match(first_atom):
         return False
 
-    if _is_knob_name(name) and kind in {"number", "version", "model", "prose"}:
+    if _is_knob_name(name) and kind in {"number", "version", "model"}:
+        return False
+    if _is_knob_name(name) and _NUMBER_VALUE_RE.match(first_atom):
         return False
 
     # pwd=/Users/... filesystem paths (not password=/Secret123)
     if n == "pwd" and kind == "path":
         return False
 
-    # Exact model ids on non-password names (token: claude-sonnet-4-5)
-    if kind == "model" and not pw_family:
-        return False
-
-    if form == "colon":
-        phrase = _colon_phrase_words(value, following)
-        first = phrase[0] if phrase else v_plain
-        # Explicit status allowlist on the first atom (password: changed / none needed)
-        if first.lower() in _STATUS_WORDS:
-            return False
-        if classify_value(first) in _ALWAYS_SAFE_KINDS:
-            return False
-        # 3+ word instructional prose ("8+ chars required"); 2-word passphrases redact
-        if len(phrase) >= 3:
-            return False
-        # Count/limit style after token:/secret: ("8192", "v2") — not password family
-        if not pw_family and kind in {"number", "version"}:
-            return False
-        # Also when value was expanded, kind may be prose — check first atom alone
-        if not pw_family and classify_value(first) in {"number", "version"}:
-            return False
-        # password: dragon / token: hunter / secret: Banana → redact
-        return True
-
-    # eq / flag / query: anything else after a secret name is a secret
     return True
 
 
 def looks_like_secret_value(value: str) -> bool:
     """Public helper: value would be redacted if paired with a secret-ish name."""
-    return classify_value(value) == "secretlike"
+    return classify_value(value) not in _ALWAYS_SAFE_KINDS | {
+        "number",
+        "version",
+        "model",
+        "path",
+        "uuid",
+        "gitsha",
+        "dictword",
+        "titleword",
+    }
 
 
 def _auth_token_looks_credential(tok: str) -> bool:
@@ -573,65 +586,117 @@ def _parse_value_at(
     return m.group(0), m.start(), m.end()
 
 
+def _hit_from_name_sep(
+    text: str, name_start: int, name: str, value_start: int, form: str
+) -> _AssignHit | None:
+    """Build an assignment hit: value runs through extent end from value_start."""
+    if value_start >= len(text):
+        return None
+    # Skip if next char starts another separator with no value.
+    ve = _value_extent_end(text, value_start)
+    if ve <= value_start:
+        return None
+    val = text[value_start:ve]
+    prefix = text[name_start:value_start]
+    return _AssignHit(name_start, ve, name, value_start, ve, val, prefix, form)
+
+
 def _collect_assignments(text: str) -> list[_AssignHit]:
-    """Find every name=value / name: value / --name value / ?name=value span."""
+    """Find every secret-name assignment span (eq/colon/flag/query/dash/ws/is)."""
     hits: list[_AssignHit] = []
 
     # Every name= occurrence (including nested password= inside staging=password=x)
     for m in _ASSIGN_EQ_START_RE.finditer(text):
         name = m.group(1)
-        parsed = _parse_value_at(text, m.end(), colon=False)
-        if not parsed:
-            continue
-        val, vs, ve = parsed
-        prefix = text[m.start() : vs]
-        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "eq"))
+        hit = _hit_from_name_sep(text, m.start(), name, m.end(), "eq")
+        if hit:
+            hits.append(hit)
 
     # Every name: occurrence (including nested password: inside A: password: x).
     # Skip when the atom is really the name of a nested name=value (Cookie: session=…).
-    # Expand the value through trailing prose words so "correct horse" redacts as a
-    # unit and "8+ chars required" is counted as 3-word instructional prose.
     for m in _ASSIGN_COLON_START_RE.finditer(text):
         name = m.group(2)
-        parsed = _parse_value_at(text, m.end(), colon=True)
-        if not parsed:
+        vs = m.end()
+        if vs < len(text) and text[vs] == "=":
             continue
-        val, vs, ve = parsed
-        if ve < len(text) and text[ve] == "=":
-            continue
-        words = _colon_phrase_words(val, text[ve:])
-        if len(words) > 1:
-            # Extend ve to the end of the last included trailing word
-            pos = ve
-            for w in words[1:]:
-                wm = re.match(r"\s*" + re.escape(w), text[pos:])
-                if not wm:
-                    break
-                pos = pos + wm.end()
-            val = text[vs:pos]
-            ve = pos
-        prefix = text[m.start() : vs]
-        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "colon"))
+        # Peek: if first atom is immediately followed by '=', leave for eq scanner
+        # (Cookie: session=tok) — already handled by the == check above when vs
+        # points at the value start; session= is a separate eq hit.
+        parsed_atom = _parse_value_at(text, vs, colon=True)
+        if parsed_atom:
+            _atom, _avs, ave = parsed_atom
+            if ave < len(text) and text[ave] == "=":
+                continue
+        hit = _hit_from_name_sep(text, m.start(), name, vs, "colon")
+        if hit:
+            hits.append(hit)
 
     for m in _ASSIGN_FLAG_RE.finditer(text):
-        flag, name, sep, val = m.group(1), m.group(2), m.group(3), m.group(4)
-        if val is None:
+        flag, name, sep = m.group(1), m.group(2), m.group(3)
+        if m.group(4) is None:
             continue
-        prefix = f"{flag}{sep}"
-        hits.append(
-            _AssignHit(
-                m.start(), m.end(), name, m.start(4), m.end(), val, prefix, "flag"
+        vs = m.start(4)
+        hit = _hit_from_name_sep(text, m.start(), name, vs, "flag")
+        if hit:
+            # Keep flag spelling in prefix (--password= / --password )
+            hits.append(
+                _AssignHit(
+                    hit.start,
+                    hit.end,
+                    name,
+                    hit.value_start,
+                    hit.value_end,
+                    hit.value,
+                    f"{flag}{sep}",
+                    "flag",
+                )
             )
-        )
 
     for m in _ASSIGN_QUERY_RE.finditer(text):
-        amp, name, val = m.group(1), m.group(2), m.group(3)
+        amp, name = m.group(1), m.group(2)
+        vs = m.start(3)
+        ve = _value_extent_end(text, vs)
+        # Query values stay atomic (no spaces in URLs); clamp to atom end.
+        atom = _parse_value_at(text, vs, colon=False)
+        if atom:
+            ve = min(ve, atom[2])
+        val = text[vs:ve]
         prefix = f"{amp}{name}="
-        hits.append(
-            _AssignHit(
-                m.start(), m.end(), name, m.start(3), m.end(), val, prefix, "query"
+        hits.append(_AssignHit(m.start(), ve, name, vs, ve, val, prefix, "query"))
+
+    for m in _ASSIGN_DASH_ARROW_RE.finditer(text):
+        name = m.group(1)
+        hit = _hit_from_name_sep(text, m.start(), name, m.end(), "dash")
+        if hit:
+            hits.append(hit)
+
+    for m in _ASSIGN_PASSWORD_WS_RE.finditer(text):
+        name = m.group(1)
+        # Avoid eating "password is X" / "password: X" / "password=X" (other forms).
+        rest = text[m.end() :]
+        if re.match(r"(?i)is\b", rest):
+            continue
+        hit = _hit_from_name_sep(text, m.start(), name, m.end(), "ws")
+        if hit:
+            hits.append(hit)
+
+    for m in _NAME_IS_VALUE_RE.finditer(text):
+        name = m.group(1)
+        hit = _hit_from_name_sep(text, m.start(), name, m.end(), "is")
+        if hit:
+            # Preserve "name is " spelling in prefix.
+            hits.append(
+                _AssignHit(
+                    hit.start,
+                    hit.end,
+                    name,
+                    hit.value_start,
+                    hit.value_end,
+                    hit.value,
+                    text[m.start() : m.end()],
+                    "is",
+                )
             )
-        )
 
     return hits
 
@@ -646,17 +711,13 @@ def _apply_assignment_redactions(text: str) -> str:
             secret_hits.append(h)
     if not secret_hits:
         return text
-    # Prefer innermost: later-starting / shorter spans first, then drop outer wrappers
-    # and any remaining overlaps so nested name=value wins over a label prefix.
-    secret_hits.sort(key=lambda h: (-h.start, h.end - h.start))
+    # Prefer outermost (leftmost, then longest): whole-value extent can nest
+    # "password=a | password: b" as one span — redacting the outer removes all leaks.
+    secret_hits.sort(key=lambda h: (h.start, -(h.end - h.start)))
     chosen: list[_AssignHit] = []
     for h in secret_hits:
-        if any(h.start <= c.start and c.end <= h.end for c in chosen):
-            continue  # outer wrapper around an already-chosen inner secret
-        if any(c.start <= h.start and h.end <= c.end for c in chosen):
-            continue  # fully inside an already-chosen span
         if any(not (h.end <= c.start or h.start >= c.end) for c in chosen):
-            continue  # partial overlap with a chosen hit
+            continue  # overlaps an already-chosen (outer) span
         chosen.append(h)
     chosen.sort(key=lambda h: h.start, reverse=True)
     out = text
@@ -689,14 +750,6 @@ def redact_secrets(text: str) -> str:
     out = _URL_USERINFO_RE.sub(r"\1\2:…REDACTED@", out)
 
     out = _apply_assignment_redactions(out)
-
-    def _name_is_sub(m: re.Match[str]) -> str:
-        val = m.group(2)
-        if classify_value(val) in _ALWAYS_SAFE_KINDS:
-            return m.group(0)
-        return f"{m.group(1)} is …REDACTED"
-
-    out = _NAME_IS_VALUE_RE.sub(_name_is_sub, out)
 
     def _authz_token_sub(m: re.Match[str]) -> str:
         tok = m.group(2)
