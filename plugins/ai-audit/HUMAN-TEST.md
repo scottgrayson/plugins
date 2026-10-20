@@ -10,6 +10,15 @@ Run the **context** audit once on a real setup. The CLI uses zero AI tokens.
 
 ## 0. Install and confirm the context skill
 
+**Tokenizer (once per machine):** Cursor context counts need the `tiktoken` package (ranks are vendored; install is offline after pip fetch):
+
+```bash
+python3 -m pip install --user 'tiktoken==0.14.0'
+python3 -c "import tiktoken; print('PASS tiktoken', tiktoken.__version__)"
+```
+
+If Cursor context exits with a one-line `ai-audit: install the offline tokenizer…` message, re-run the pip line above (no traceback should appear).
+
 ### Option A — Claude Code
 
 While this PR is open / unmerged, add the branch marketplace (after merge, use plain `scottgrayson/plugins`):

@@ -48,9 +48,12 @@ def get_encoding():
     try:
         from tiktoken.core import Encoding
     except ImportError as exc:  # pragma: no cover
+        # Pure-Python BPE on the vendored ranks was not shipped: o200k's
+        # pre-tokenizer needs fancy-regex/\p{} possessive patterns that
+        # stdlib `re` cannot compile, so exact parity still needs tiktoken.
         raise RuntimeError(
             "ai-audit requires the tiktoken package for offline o200k token counts. "
-            "Install with: pip install tiktoken"
+            "Install with: python3 -m pip install --user 'tiktoken==0.14.0'"
         ) from exc
 
     path = _vendor_path()
@@ -76,7 +79,8 @@ def get_encoding():
 def count_tokens(text: str) -> int:
     if not text:
         return 0
-    return len(get_encoding().encode(text))
+    # D6: allow literal special tokens in user text without crashing.
+    return len(get_encoding().encode(text, disallowed_special=()))
 
 
 def tokenizer_label() -> str:

@@ -184,6 +184,20 @@ REDACT_CASES: list[tuple[str, str]] = [
     ("-p dragon", "dragon"),
     ("password: changeme", "changeme"),
     ("API_KEY=changeme", "changeme"),
+    # --- round-18 D8: more names / separators / glued -p ---
+    ("access key: FakeAccessKey99", "FakeAccessKey99"),
+    ("private key: FakePrivateKey99", "FakePrivateKey99"),
+    ("DBPASS=DbPassValue99", "DbPassValue99"),
+    ("mypwd: MyPwdValue99xx", "MyPwdValue99xx"),
+    ("userpass=UserPass99xx", "UserPass99xx"),
+    ("password[]=dragon", "dragon"),
+    ("password[a][b]=dragon", "dragon"),
+    ("password.prod=dragon", "dragon"),
+    ("password(prod)=dragon", "dragon"),
+    ("pa$$word: dragon", "dragon"),
+    ("pin code: 4821", "4821"),
+    ("-pdragon", "dragon"),
+    ("mysql -uroot -pSecretPw99", "SecretPw99"),
 ]
 
 # Still kept under the simple rule (empty / placeholder / null / bool / status
@@ -385,30 +399,71 @@ def run_context_secret_e2e() -> None:
         shutil.rmtree(td, ignore_errors=True)
 
 
+def _assert_cli_blob(host: str, surface: str, blob: str, raw: str, leak: str) -> None:
+    # Leak substring must never appear (JSON or MD).
+    if len(leak) >= 6 and not any(leak in k for k in KEEP_CASES):
+        assert leak not in blob, f"CLI {host}/{surface} leak {leak!r} from {raw!r}"
+    assert raw not in blob, f"CLI {host}/{surface} still has raw {raw!r}"
+    # JSON always redacts the planted leaf. Cursor grouped MD prints skill names
+    # (Item column), so REDACTED must appear there too. Legacy Claude/Grok MD
+    # only lists paths, so REDACTED may be absent when the plant is not MD-visible.
+    if surface == "json" or host == "cursor":
+        assert "REDACTED" in blob, (
+            f"CLI {host}/{surface} missing REDACTED for {raw!r}: {blob[:300]}"
+        )
+
+
 def run_cli_redact_cases() -> None:
-    """Plant every REDACT_CASES string into Grok bot name (meta string leaf) via CLI."""
-    fix = PLUGIN / "fixtures" / "grok"
+    """
+    Plant every REDACT_CASES string via CLI on all hosts; assert JSON and MD (D1).
+    """
     td = Path(tempfile.mkdtemp(prefix="ai-audit-cli-redact."))
     try:
+        # --- Grok: bot profile name ---
         grok = td / "grok"
-        shutil.copytree(fix, grok)
+        shutil.copytree(PLUGIN / "fixtures" / "grok", grok)
         profile = grok / "sand-data" / "agents" / "agent-active" / "profile.json"
-        # Inventory stores bot name text (not description body). One plant per CLI
-        # run so D1/D2/D4 phrases are checked individually through the real binary.
+
+        # --- Cursor: MCP server name (surfaces in grouped MD Item column) ---
+        cursor = td / "cursor"
+        shutil.copytree(PLUGIN / "fixtures" / "cursor", cursor)
+        cursor_mcp = cursor / "home" / ".cursor" / "mcp.json"
+
+        # --- Claude: MCP server name in ~/.claude.json (servers[] in inventory) ---
+        claude = td / "claude"
+        shutil.copytree(PLUGIN / "fixtures" / "claude", claude)
+        claude_json = claude / "home" / ".claude.json"
+        claude_base = json.loads(claude_json.read_text(encoding="utf-8"))
+
         for raw, leak in REDACT_CASES:
             if "\n" in raw:
                 continue
+
             profile.write_text(
                 json.dumps({"name": raw, "description": "test bot"}, indent=2),
                 encoding="utf-8",
             )
-            blob = _run_cli(
-                ["context", "--host", "grok", "--root", str(grok), "--json-only"]
+            # MCP server names are JSON keys — preserves the raw string exactly.
+            cursor_mcp.write_text(
+                json.dumps({"mcpServers": {raw: {"command": "true"}}}, indent=2),
+                encoding="utf-8",
             )
-            assert "REDACTED" in blob, f"CLI missing REDACTED for {raw!r}: {blob[:300]}"
-            assert raw not in blob, f"CLI still has raw {raw!r}"
-            if len(leak) >= 6 and not any(leak in k for k in KEEP_CASES):
-                assert leak not in blob, f"CLI leak {leak!r} from {raw!r}"
+            claude_cfg = json.loads(json.dumps(claude_base))  # deep copy
+            servers = claude_cfg.setdefault("mcpServers", {})
+            servers.clear()
+            servers[raw] = {"command": "true"}
+            claude_json.write_text(json.dumps(claude_cfg, indent=2), encoding="utf-8")
+
+            for host, root in (
+                ("grok", grok),
+                ("cursor", cursor),
+                ("claude", claude),
+            ):
+                for flag, surface in (("--json-only", "json"), ("--md-only", "md")):
+                    blob = _run_cli(
+                        ["context", "--host", host, "--root", str(root), flag]
+                    )
+                    _assert_cli_blob(host, surface, blob, raw, leak)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

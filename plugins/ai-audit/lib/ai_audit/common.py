@@ -64,6 +64,7 @@ _SECRET_NAME_EXACT = frozenset(
         "pw",
         "pin",
         "p@ssword",
+        "pa$$word",
         "token",
         "secret",
         "api_key",
@@ -76,7 +77,10 @@ _SECRET_NAME_EXACT = frozenset(
         "credential",
         "x_api_key",
         "db_pass",
+        "dbpass",
         "mysql_pwd",
+        "mypwd",
+        "userpass",
         "auth",
         "authorization",
         "session",
@@ -98,19 +102,23 @@ _PASSWORD_FAMILY = frozenset(
         "pw",
         "pin",
         "p@ssword",
+        "pa$$word",
         "db_pass",
+        "dbpass",
         "mysql_pwd",
+        "mypwd",
+        "userpass",
         "p",
     }
 )
 # password/token/secret as a word anywhere (password_prod, passwordProd → password_prod)
 _SECRET_NAME_WORD_RE = re.compile(
     r"(?i)(?:^|_)(password|passwd|passcode|passphrase|pass|pwd|pw|token|secret|"
-    r"sessionid|session|pin)(?:_|$|\[)"
+    r"sessionid|session|pin)(?:_|$|\[|\.)"
 )
 _SECRET_NAME_SUFFIX_RE = re.compile(
     r"(?i)(?:PASSWORD|PASSWD|PASSCODE|TOKEN|SECRET|_API_KEY|_SECRET_KEY|_ACCESS_KEY|"
-    r"_ACCESS_TOKEN|_PRIVATE_KEY|_PWD|_PASS|SESSIONID)$"
+    r"_ACCESS_TOKEN|_PRIVATE_KEY|_PWD|_PASS|DBPASS|SESSIONID)$"
 )
 # Knob-style names (MAX_TOKEN, token_limit, …): still secret-named, but bare
 # numeric values are kept via should_redact_assignment (round-17 D1).
@@ -126,20 +134,36 @@ _VALUE_COLON = (
     r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\$\{[^}]+\}|<[^>\n]+>|"
     r"https?://\S+|[^\s,;&=:：]+)"
 )
-# Identifier incl. password[prod] / p@ssword; multi-word api/secret key handled separately.
-_NAME_ATOM = r"(?:p@ssword|[A-Za-z_][A-Za-z0-9_-]*(?:\[[^\]]+\])?)"
-_NAME_SPACED = r"(?:api|secret)\s+key"
+# Identifier incl. password[prod] / password[] / password.prod / p@ssword / pa$$word.
+# Multi-word api/secret/access/private key and pin code handled separately.
+_NAME_ATOM = (
+    r"(?:p@ssword|pa\$\$word|"
+    r"[A-Za-z_][A-Za-z0-9_-]*"
+    r"(?:\[[^\]]*\])*"  # password[] / password[a][b]
+    r"(?:\.[A-Za-z0-9_-]+)*"  # password.prod
+    r"(?:\([^)]*\))?"  # password(prod)
+    r")"
+)
+_NAME_SPACED = r"(?:api|secret|access|private)\s+key|pin\s+code"
 _NAME_ANY = rf"(?:{_NAME_SPACED}|{_NAME_ATOM})"
+# Unicode colon lookalikes used as separators (∶ U+2236, ꞉ U+A789, ﹕ U+FE55)
+_COLON_SEPS = r"(?::=|：|:|\u2236|\ua789|\ufe55)"
 # name= / name: / name:= / name： starters
 _ASSIGN_EQ_START_RE = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_@])({_NAME_ANY})\s*=\s*"
+    rf"(?i)(?<![A-Za-z0-9_@$])({_NAME_ANY})\s*=\s*"
 )
 _ASSIGN_COLON_START_RE = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_@])([\"']?)({_NAME_ANY})\1\s*(?::=|：|:)\s*"
+    rf"(?i)(?<![A-Za-z0-9_@$])([\"']?)({_NAME_ANY})\1\s*{_COLON_SEPS}\s*"
 )
-# --name value / --name=value / -p value (short password flag)
+# --name value / --name=value / -p value / -pVALUE (glued short password flag).
+# Glued -p must not eat long flags (-plugin, -project, -port, …).
+_GLUED_P_NOT_FLAG = (
+    r"(?!(?:lugin|roject|ort|ath|rofile|roxy|refix|retty|ager|rompt|ython|"
+    r"arent|arse|ublish|ull|ush|rune|ackage|ositional|ager)\b)"
+)
 _ASSIGN_FLAG_RE = re.compile(
-    rf"(?i)(?:(--([A-Za-z][A-Za-z0-9_-]*))|(-p))(?:(=|\s+)({_VALUE_EQ}))"
+    rf"(?i)(?:(--([A-Za-z][A-Za-z0-9_-]*))(?:(=|\s+)({_VALUE_EQ}))|"
+    rf"(-p)(?:(=|\s+)|{_GLUED_P_NOT_FLAG})({_VALUE_EQ}))"
 )
 # URL query ?name=value &name=value
 _ASSIGN_QUERY_RE = re.compile(
@@ -335,19 +359,32 @@ def is_secret_name(name: str) -> bool:
     if not name:
         return False
     raw = name.strip()
-    # Spaced forms: "api key", "secret key"
+    # Spaced forms: "api key", "secret key", "access key", "private key", "pin code"
     low = re.sub(r"\s+", " ", raw.lower())
-    if low in {"api key", "secret key"}:
+    if low in {
+        "api key",
+        "secret key",
+        "access key",
+        "private key",
+        "pin code",
+    }:
         return True
-    if raw.lower() == "p@ssword" or low == "p@ssword":
+    if raw.lower() in {"p@ssword", "pa$$word"} or low in {"p@ssword", "pa$$word"}:
         return True
-    # Strip password[prod] → password for classification
+    # Strip password[prod] / password[] / password(prod) / password.prod → password
     bare = re.sub(r"\[.*?\]", "", raw)
+    bare = re.sub(r"\([^)]*\)", "", bare)
+    bare = re.sub(r"\.[A-Za-z0-9_-]+$", "", bare)
     n = _norm_name(bare)
     if n in _SECRET_NAME_EXACT:
         return True
+    # Compound names without underscore: DBPASS, mypwd, userpass (not compass/bypass)
+    if n in {"dbpass", "mypwd", "userpass", "mysqlpwd"} or (
+        len(n) >= 5 and n.endswith("pwd")
+    ):
+        return True
     if _SECRET_NAME_WORD_RE.search(n) or _SECRET_NAME_WORD_RE.search(
-        _norm_name(raw.replace("[", "_").replace("]", ""))
+        _norm_name(raw.replace("[", "_").replace("]", "").replace(".", "_"))
     ):
         return True
     if _SECRET_NAME_SUFFIX_RE.search(raw) or _SECRET_NAME_SUFFIX_RE.search(n):
@@ -361,10 +398,17 @@ def is_secret_name(name: str) -> bool:
 
 
 def _is_password_family(name: str) -> bool:
-    n = _norm_name(name)
+    bare = re.sub(r"\[.*?\]", "", name or "")
+    bare = re.sub(r"\([^)]*\)", "", bare)
+    bare = re.sub(r"\.[A-Za-z0-9_-]+$", "", bare)
+    n = _norm_name(bare)
     if n in _PASSWORD_FAMILY:
         return True
-    return bool(re.search(r"(?i)(?:PASSWORD|PASSWD|_PASS|_PWD)$", name or ""))
+    if n in {"dbpass", "mypwd", "userpass", "mysqlpwd"} or (
+        len(n) >= 5 and n.endswith("pwd")
+    ):
+        return True
+    return bool(re.search(r"(?i)(?:PASSWORD|PASSWD|_PASS|_PWD|DBPASS)$", name or ""))
 
 
 def _is_knob_name(name: str) -> bool:
@@ -661,18 +705,23 @@ def _collect_assignments(text: str) -> list[_AssignHit]:
             hits.append(hit)
 
     for m in _ASSIGN_FLAG_RE.finditer(text):
-        # Groups: (--long, name) | (-p) then sep then value
-        long_flag, long_name, short_p = m.group(1), m.group(2), m.group(3)
-        sep = m.group(4)
-        if m.group(5) is None:
-            continue
-        if short_p:
+        # Groups: (--long)(name)(sep)(value) | (-p)(sep)(value)
+        # Long: 1=--flag, 2=name, 3=sep, 4=value; short: 5=-p, 6=sep, 7=value
+        if m.group(5):  # -p / -pVALUE / -p VALUE
             name = "p"
-            flag = short_p
+            flag = m.group(5)
+            sep = m.group(6) or ""
+            if m.group(7) is None:
+                continue
+            vs = m.start(7)
         else:
+            long_flag, long_name = m.group(1), m.group(2)
+            sep = m.group(3) or ""
+            if m.group(4) is None:
+                continue
             name = long_name
             flag = long_flag
-        vs = m.start(5)
+            vs = m.start(4)
         hit = _hit_from_name_sep(text, m.start(), name, vs, "flag")
         if hit:
             hits.append(

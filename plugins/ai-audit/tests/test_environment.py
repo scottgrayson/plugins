@@ -31,13 +31,32 @@ def test_local_os() -> None:
 
 def test_cursor_cloud_markers() -> None:
     # Bare CURSOR_AGENT alone is not enough (local CLI also sets it).
+    # HOSTNAME overridden so this cloud VM does not add hostname=cursor.
     cloud, hits = is_cursor_cloud(
-        {"CURSOR_AGENT": "1"},
+        {"HOSTNAME": "scotts-macbook", "CURSOR_AGENT": "1"},
         path_exists=lambda p: False,
     )
     assert cloud is False
+    # Single marker is not enough (D4: need >=2)
+    cloud, hits = is_cursor_cloud(
+        {"HOSTNAME": "scotts-macbook", "CURSOR_AGENT_WORKER_ID": "w-1"},
+        path_exists=lambda p: False,
+    )
+    assert cloud is False
+    # Local ~/.cursor/agent.sock must not count (HOSTNAME overridden so this
+    # cloud VM's hostname=cursor does not add a second marker).
     cloud, hits = is_cursor_cloud(
         {
+            "HOSTNAME": "scotts-macbook",
+            "CURSOR_AGENT_SOCKET": "/Users/scott/.cursor/agent.sock",
+            "CURSOR_AGENT_WORKER_ID": "w-1",
+        },
+        path_exists=lambda p: False,
+    )
+    assert cloud is False, hits
+    cloud, hits = is_cursor_cloud(
+        {
+            "HOSTNAME": "scotts-macbook",
             "CURSOR_AGENT": "1",
             "CURSOR_AGENT_SOCKET": "/run/cursor/api.sock",
             "CLOUD_AGENT_ALL_SECRET_NAMES": "X",
@@ -50,9 +69,23 @@ def test_cursor_cloud_markers() -> None:
     # Local CLI mode wins
     cloud, hits = is_cursor_cloud(
         {
+            "HOSTNAME": "scotts-macbook",
             "CURSOR_AGENT": "1",
             "CURSOR_AGENT_CLI_LOCAL_MODE": "true",
             "CURSOR_AGENT_WORKER_ID": "w-1",
+        },
+        path_exists=lambda p: False,
+    )
+    assert cloud is False
+
+    # Falsy values (no/off/0/false) are not markers (D4)
+    cloud, hits = is_cursor_cloud(
+        {
+            "HOSTNAME": "scotts-macbook",
+            "CURSOR_AGENT_WORKER_ID": "no",
+            "CURSOR_WORKER_POOL_NAME": "false",
+            "CLOUD_AGENT_ALL_SECRET_NAMES": "0",
+            "CURSOR_WORKLOAD_CGROUP": "off",
         },
         path_exists=lambda p: False,
     )
@@ -64,6 +97,30 @@ def test_claude_cloud_markers() -> None:
     assert is_claude_cloud({"CLAUDE_CODE_ENTRYPOINT": "remote"})[0] is True
     assert is_claude_cloud({"CLAUDE_CODE_REMOTE_SESSION_ID": "rs"})[0] is True
     assert is_claude_cloud({"CLAUDE_CODE_ENTRYPOINT": "cli"})[0] is False
+    assert is_claude_cloud({"CLAUDE_CODE_REMOTE": "no"})[0] is False
+
+
+def test_grok_cloud_sand_data_alone() -> None:
+    from ai_audit.environment import is_grok_cloud
+
+    # sand-data path alone is not enough (fixture / local desktop)
+    cloud, hits = is_grok_cloud(
+        {},
+        sand_data=Path("/tmp/fixtures/grok/sand-data"),
+        path_exists=lambda p: False,
+    )
+    assert cloud is False
+    # GROK_BOT=no is falsy
+    cloud, hits = is_grok_cloud(
+        {"GROK_BOT": "no"},
+        path_exists=lambda p: p == "/home/box",
+    )
+    assert cloud is False
+    cloud, hits = is_grok_cloud(
+        {"GROK_BOT": "1"},
+        path_exists=lambda p: p == "/home/box",
+    )
+    assert cloud is True
 
 
 def test_override_and_heading() -> None:
@@ -73,6 +130,15 @@ def test_override_and_heading() -> None:
     assert info["heading"] == "Claude Code · Cloud"
     info = detect_environment("grok", override="Cloud")
     assert info["heading"] == "Grok Bot · Cloud"
+    # D4: --env text with secrets is sanitised / redacted
+    info = detect_environment("cursor", override="x · password=Hunter2Fake")
+    assert "Hunter2Fake" not in info["heading"]
+    assert "REDACTED" in info["heading"] or info["environment"] in {
+        "Mac",
+        "Linux",
+        "Windows",
+        "Cloud",
+    }
 
 
 def test_sort_groups_and_rows() -> None:
@@ -138,6 +204,7 @@ def main() -> int:
     test_local_os()
     test_cursor_cloud_markers()
     test_claude_cloud_markers()
+    test_grok_cloud_sand_data_alone()
     test_override_and_heading()
     test_sort_groups_and_rows()
     test_fixture_report_heading_and_sort()

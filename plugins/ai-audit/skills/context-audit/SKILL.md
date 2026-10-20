@@ -62,4 +62,4 @@ Do not invent token numbers. Do not edit files; suggestions only.
 | Grok connectors (not on disk) | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
 | Claude live breakdown | Paste `/context` output to calibrate |
 
-Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases. User Rules: the CLI reads only `aicontext.personalContext` from a temp copy of `state.vscdb` — never other keys.
+Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases. User Rules: the CLI reads only `aicontext.personalContext` from `state.vscdb` via SQLite `mode=ro` (no temp copy) — never other keys.

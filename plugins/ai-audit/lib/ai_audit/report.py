@@ -149,8 +149,8 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- Read-only: no files were changed; MCP servers were not launched.",
-            "- User Rules: only `aicontext.personalContext` is read from a temp "
-            "copy of `state.vscdb` (exact-key query).",
+            "- User Rules: only `aicontext.personalContext` is read from "
+            "`state.vscdb` via SQLite `mode=ro` (exact-key query; no copy).",
             "- Secret-shaped values in notes/meta were redacted.",
             "",
         ]

@@ -38,8 +38,16 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
-          # Offline o200k tokenizer (ranks vendored under plugins/ai-audit/vendor/)
-          python3 -m pip install --user -q 'tiktoken>=0.7'
+          # Offline o200k tokenizer (ranks vendored under plugins/ai-audit/vendor/).
+          # Pin + hash-check the tiktoken wheel (round-18 D5); deps install normally.
+          python3 -m pip download --dest /tmp/tiktoken-whl --no-deps -q 'tiktoken==0.14.0'
+          EXPECTED_TIKTOKEN_SHA256=7896eea257fe497a2b7134474d909156c6744ce8da35bce88011a960e008aa0d
+          GOT="$(sha256sum /tmp/tiktoken-whl/tiktoken-*.whl | awk '{print $1}')"
+          test "$GOT" = "$EXPECTED_TIKTOKEN_SHA256"
+          python3 -m pip install --user -q /tmp/tiktoken-whl/tiktoken-*.whl
+          # Vendored ranks integrity (must match vendor/README.md)
+          echo '446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d  plugins/ai-audit/vendor/o200k_base.tiktoken' \
+            | sha256sum -c -
       - name: Run unit tests (preview + ai-audit)
         run: bash dev/run-tests.sh
 

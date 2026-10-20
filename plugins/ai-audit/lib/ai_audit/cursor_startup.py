@@ -10,16 +10,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import sqlite3
-import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from .common import (
     load_json_safe,
     parse_front_matter,
+    redact_secrets,
     safe_read_text,
 )
 from .detect import Roots
@@ -41,13 +41,8 @@ _CODEX_BUILTIN_BLOCKLIST = frozenset(
     }
 )
 
-_MCP_PREAMBLE = (
-    "<mcp_file_system>\n"
-    "MCP servers expose tools as files under the project mcps folder. "
-    "Read a tool descriptor JSON only when you need that tool; schemas are "
-    "not loaded into the system prompt at startup.\n"
-    "</mcp_file_system>\n"
-)
+# Measured ~637 o200k on Scott's Mac (gaps-2026-10-20); vendored stand-in text.
+_MCP_PREAMBLE = (Path(__file__).with_name("mcp_preamble.txt").read_text(encoding="utf-8"))
 
 _USER_RULES_KEY = "aicontext.personalContext"
 
@@ -102,22 +97,46 @@ def _iter_skill_mds(root: Path) -> list[Path]:
     return out
 
 
-def _plugin_skill_roots(cursor_home: Path) -> list[tuple[Path, str]]:
-    """Return (skills_dir, source_label) for installed Cursor plugins."""
-    found: list[tuple[Path, str]] = []
-    for base in (cursor_home / "plugins" / "local", cursor_home / "plugins" / "cache"):
-        if not base.is_dir():
+def _active_plugin_roots(cursor_home: Path) -> list[Path]:
+    """
+    Plugin roots to scan: all of plugins/local, plus only the newest version
+    per plugin id under plugins/cache (skip stale cached versions — D7).
+    """
+    roots: list[Path] = []
+    local = cursor_home / "plugins" / "local"
+    if local.is_dir():
+        roots.extend(sorted(p for p in local.iterdir() if p.is_dir()))
+    cache = cursor_home / "plugins" / "cache"
+    if not cache.is_dir():
+        return roots
+    # cache layout: cache/<marketplace>/<plugin>/<version>/
+    by_plugin: dict[str, list[Path]] = {}
+    for market in cache.iterdir():
+        if not market.is_dir():
             continue
-        for skill_md in base.rglob("SKILL.md"):
-            # …/plugins/…/<plugin>/skills/<name>/SKILL.md
-            parent = skill_md.parent.parent  # skills/
-            if parent.name != "skills":
+        for plugin in market.iterdir():
+            if not plugin.is_dir():
                 continue
-            plugin_root = parent.parent
-            label = f"plugin:{plugin_root.name}"
-            pair = (parent, label)
-            if pair not in found:
-                found.append(pair)
+            versions = [v for v in plugin.iterdir() if v.is_dir()]
+            if not versions:
+                # flat plugin dir
+                by_plugin.setdefault(plugin.name, []).append(plugin)
+                continue
+            # Prefer newest by mtime, then name
+            newest = max(versions, key=lambda p: (p.stat().st_mtime, p.name))
+            by_plugin.setdefault(f"{market.name}/{plugin.name}", []).append(newest)
+    for paths in by_plugin.values():
+        roots.extend(paths)
+    return roots
+
+
+def _plugin_skill_roots(cursor_home: Path) -> list[tuple[Path, str]]:
+    """Return (skills_dir, source_label) for active Cursor plugins only."""
+    found: list[tuple[Path, str]] = []
+    for plugin_root in _active_plugin_roots(cursor_home):
+        skills = plugin_root / "skills"
+        if skills.is_dir():
+            found.append((skills, f"plugin:{plugin_root.name}"))
     return found
 
 
@@ -277,15 +296,13 @@ def _always_apply_rules(roots: Roots) -> list[ReportRow]:
             for path in sorted(rules_dir.rglob("*.mdc")):
                 add_rule(path, source)
 
-    # Plugin rules dirs
-    for base in (cursor_home / "plugins" / "local", cursor_home / "plugins" / "cache"):
-        if not base.is_dir():
+    # Plugin rules dirs (active versions only — D7)
+    for plugin_root in _active_plugin_roots(cursor_home):
+        rules_dir = plugin_root / "rules"
+        if not rules_dir.is_dir():
             continue
-        for rules_dir in base.rglob("rules"):
-            if not rules_dir.is_dir():
-                continue
-            for path in sorted(rules_dir.glob("*.mdc")):
-                add_rule(path, f"plugin:{rules_dir.parent.name}")
+        for path in sorted(rules_dir.glob("*.mdc")):
+            add_rule(path, f"plugin:{plugin_root.name}")
 
     return rows
 
@@ -317,10 +334,30 @@ def _find_state_vscdb(roots: Roots) -> Optional[Path]:
     return None
 
 
+def _open_vscdb_readonly(db_path: Path) -> sqlite3.Connection:
+    """
+    Open state.vscdb read-only without copying (round-18 D2).
+
+    Uses SQLite URI ``mode=ro&immutable=0``. ``immutable=0`` (explicit) lets
+    SQLite read a sibling ``-wal`` when present so recent Cursor writes are
+    visible, without taking a writer lock or creating a temp copy. If a future
+    SQLite build refused WAL under ``mode=ro``, keep ``immutable=0`` (never
+    ``immutable=1``, which ignores WAL). We never SELECT keys other than
+    aicontext.personalContext — no copies, no temp files.
+    """
+    # Absolute path as URI (quote special chars; keep /).
+    uri = (
+        "file:"
+        + quote(str(db_path.resolve()), safe="/:")
+        + "?mode=ro&immutable=0"
+    )
+    return sqlite3.connect(uri, uri=True)
+
+
 def _read_user_rules(roots: Roots) -> ReportRow:
     """
-    Read ONLY aicontext.personalContext from a temp COPY of state.vscdb.
-    Exact-key query. Never SELECT other keys.
+    Read ONLY aicontext.personalContext from state.vscdb (read-only URI).
+    No temp copies. Exact-key query. Never SELECT other keys.
     """
     db_path = _find_state_vscdb(roots)
     if db_path is None:
@@ -331,67 +368,81 @@ def _read_user_rules(roots: Roots) -> ReportRow:
             meta={"missing": True, "key": _USER_RULES_KEY},
         )
 
-    tmp: Optional[str] = None
+    conn = _open_vscdb_readonly(db_path)
     try:
-        fd, tmp = tempfile.mkstemp(prefix="ai-audit-state.", suffix=".vscdb")
-        os.close(fd)
-        shutil.copy2(db_path, tmp)
-        conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
-        try:
-            cur = conn.execute(
-                "SELECT value FROM ItemTable WHERE key = ?",
-                (_USER_RULES_KEY,),
-            )
-            row = cur.fetchone()
-        finally:
-            conn.close()
-        value = ""
-        if row and row[0] is not None:
-            raw = row[0]
-            if isinstance(raw, bytes):
-                value = raw.decode("utf-8", errors="replace")
-            else:
-                value = str(raw)
-        tokens = count_tokens(value) if value else 0
-        return ReportRow(
-            group="User Rules",
-            item="In-app User Rules",
-            tokens=tokens,
-            meta={
-                "key": _USER_RULES_KEY,
-                "bytes": len(value.encode("utf-8")),
-                "empty": not bool(value.strip()),
-                "db": str(db_path),
-            },
+        cur = conn.execute(
+            "SELECT value FROM ItemTable WHERE key = ?",
+            (_USER_RULES_KEY,),
         )
+        row = cur.fetchone()
     finally:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+        conn.close()
+    value = ""
+    if row and row[0] is not None:
+        raw = row[0]
+        if isinstance(raw, bytes):
+            value = raw.decode("utf-8", errors="replace")
+        else:
+            value = str(raw)
+    tokens = count_tokens(value) if value else 0
+    return ReportRow(
+        group="User Rules",
+        item="In-app User Rules",
+        tokens=tokens,
+        meta={
+            "key": _USER_RULES_KEY,
+            "bytes": len(value.encode("utf-8")),
+            "empty": not bool(value.strip()),
+            "db": str(db_path),
+            "open": "sqlite mode=ro (no copy)",
+        },
+    )
 
 
-def _mcp_project_dir(roots: Roots) -> Optional[Path]:
-    """~/.cursor/projects/<slug>/mcps — best-effort from project path."""
+def _cursor_project_slug(project: Path) -> str:
+    """Cursor encodes absolute paths as slugs (/, \\, : → -)."""
+    try:
+        raw = str(project.resolve())
+    except OSError:
+        raw = str(project)
+    return re.sub(r"[/\\:]+", "-", raw).strip("-")
+
+
+def _mcp_project_dir(roots: Roots) -> tuple[Optional[Path], str]:
+    """
+    Pick MCP tool descriptors deterministically (D7).
+    Prefer ~/.cursor/projects/<exact-slug>/mcps for cwd; else note user-level.
+    Returns (mcps_dir_or_None, selection_note).
+    """
     cursor_home = roots.cursor_home or (roots.home / ".cursor")
     projects = cursor_home / "projects"
-    if not projects.is_dir():
-        return None
-    # Prefer slug containing project name
-    proj_name = roots.project.name
-    candidates = sorted(projects.glob("*"))
-    for c in candidates:
-        if proj_name and proj_name.lower() in c.name.lower():
-            mcps = c / "mcps"
-            if mcps.is_dir():
-                return mcps
-    # Fixture: first mcps dir
-    for c in candidates:
-        mcps = c / "mcps"
-        if mcps.is_dir():
-            return mcps
-    return None
+    slug = _cursor_project_slug(roots.project)
+    if projects.is_dir():
+        exact = projects / slug / "mcps"
+        if exact.is_dir():
+            return exact, f"project mcps via slug {slug}"
+        # Fallback: unique directory whose name equals the project basename
+        # (fixtures use short names like fixture-proj).
+        basename = roots.project.name
+        matches = [
+            p / "mcps"
+            for p in projects.iterdir()
+            if p.is_dir() and (p / "mcps").is_dir() and p.name == basename
+        ]
+        if len(matches) == 1:
+            return matches[0], f"project mcps via basename {basename}"
+        # Contained slug match only when unique
+        contained = [
+            p / "mcps"
+            for p in projects.iterdir()
+            if p.is_dir()
+            and (p / "mcps").is_dir()
+            and basename
+            and basename.lower() in p.name.lower()
+        ]
+        if len(contained) == 1:
+            return contained[0], f"project mcps via unique name match {contained[0].parent.name}"
+    return None, "no project mcps dir; server lines from mcp.json only"
 
 
 def _mcp_server_names(roots: Roots) -> list[str]:
@@ -411,18 +462,25 @@ def _mcp_server_names(roots: Roots) -> list[str]:
                 if name not in seen:
                     seen.add(name)
                     names.append(str(name))
-    # Plugin mcp.json
-    for base in (cursor_home / "plugins" / "local", cursor_home / "plugins" / "cache"):
-        if not base.is_dir():
-            continue
-        for mcp_json in base.rglob("mcp.json"):
-            data = load_json_safe(mcp_json)
+    # Active plugin mcp.json only (skip stale cached versions — D7)
+    for plugin_root in _active_plugin_roots(cursor_home):
+        paths = [plugin_root / "mcp.json"]
+        if not paths[0].is_file():
+            paths = [p for p in plugin_root.glob("**/mcp.json") if p.is_file()]
+        for path in paths:
+            if not path.is_file():
+                continue
+            data = load_json_safe(path)
             if not isinstance(data, dict):
                 continue
             servers = data.get("mcpServers") or data.get("servers") or {}
             if isinstance(servers, dict):
                 for name in servers:
-                    label = f"plugin-{name}" if not str(name).startswith("plugin-") else str(name)
+                    label = (
+                        f"plugin-{name}"
+                        if not str(name).startswith("plugin-")
+                        else str(name)
+                    )
                     if label not in seen:
                         seen.add(label)
                         names.append(label)
@@ -435,10 +493,10 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
             group="MCP servers",
             item="MCP file-system preamble",
             tokens=count_tokens(_MCP_PREAMBLE),
-            meta={"fixed": True},
+            meta={"fixed": True, "measured_o200k": True},
         )
     ]
-    mcps_root = _mcp_project_dir(roots)
+    mcps_root, selection_note = _mcp_project_dir(roots)
     names = _mcp_server_names(roots)
     # Also discover descriptor folders even if not in mcp.json
     folder_names: list[str] = []
@@ -460,7 +518,9 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
         for tf in tool_files:
             schema_text += safe_read_text(tf) or ""
         schema_tokens = count_tokens(schema_text) if schema_text else 0
-        folder = str(tools_dir.parent) if tools_dir else f"(no descriptors)/{name}"
+        folder_raw = str(tools_dir.parent) if tools_dir else f"(no descriptors)/{name}"
+        # D8: redact credentials that may appear in folderPath (URL userinfo, etc.)
+        folder = redact_secrets(folder_raw)
         line = _mcp_server_line(name, folder)
         line_tokens = count_tokens(line)
         flags: list[str] = []
@@ -494,6 +554,7 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
                     "schema_tokens_on_demand": schema_tokens,
                     "flags": flags,
                     "folder": folder,
+                    "mcp_selection": selection_note,
                 },
             )
         )
@@ -536,13 +597,22 @@ def _mcp_rows(roots: Roots) -> list[ReportRow]:
 
 
 def _hooks_rows(roots: Roots) -> list[ReportRow]:
-    """Parse plugin hooks.json; count static additionalContext when present."""
+    """
+    Parse active-plugin hooks.json.
+
+    Static `additionalContext` is counted. Script/command hooks inject runtime
+    context that we cannot measure offline (measured ~156 on Scott's Mac) —
+    report tokens=0 with an explicit unmeasured reason (D7).
+    """
     rows: list[ReportRow] = []
     cursor_home = roots.cursor_home or (roots.home / ".cursor")
-    for base in (cursor_home / "plugins" / "local", cursor_home / "plugins" / "cache"):
-        if not base.is_dir():
-            continue
-        for hooks_path in base.rglob("hooks.json"):
+    for plugin_root in _active_plugin_roots(cursor_home):
+        hooks_paths = [plugin_root / "hooks.json"]
+        if not hooks_paths[0].is_file():
+            hooks_paths = [p for p in plugin_root.glob("**/hooks.json") if p.is_file()]
+        for hooks_path in hooks_paths:
+            if not hooks_path.is_file():
+                continue
             data = load_json_safe(hooks_path)
             if not isinstance(data, dict):
                 continue
@@ -570,13 +640,20 @@ def _hooks_rows(roots: Roots) -> list[ReportRow]:
                         rows.append(
                             ReportRow(
                                 group="Model/settings",
-                                item=f"Hook: {hooks_path.parent.name} {event}",
+                                item=(
+                                    f"Hook: {hooks_path.parent.name} {event} "
+                                    f"[unmeasured: script hook]"
+                                ),
                                 tokens=0,
                                 meta={
                                     "path": str(hooks_path),
                                     "event": event,
                                     "command": cmd[:200],
-                                    "note": "additionalContext not static; measure from logs if needed",
+                                    "unmeasured": True,
+                                    "unmeasured_reason": (
+                                        "script/command hooks inject runtime context; "
+                                        "not visible offline (Mac measured ~156 tokens)"
+                                    ),
                                 },
                             )
                         )

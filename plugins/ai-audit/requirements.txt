@@ -1,2 +1,2 @@
-# Runtime dependency for real token counts (encoding ranks are vendored offline).
-tiktoken>=0.7
+# Offline o200k tokenizer (ranks are vendored under vendor/; package loads them).
+tiktoken==0.14.0

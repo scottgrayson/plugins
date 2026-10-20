@@ -15,15 +15,25 @@ from .environment import detect_environment
 from .report import context_markdown, to_json
 
 
-def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
-    # Redact every user-sourced string leaf before any output.
+def _emit(payload: dict[str, Any], args: argparse.Namespace) -> int:
+    """Redact once at the data layer, then render JSON and markdown from that."""
     payload = redact_tree(payload)
+    if payload.get("audit") == "detect":
+        env = (payload.get("environment") or {}).get("heading") or "?"
+        host = payload.get("host") or "?"
+        md = f"# Detect\n\nHost: **{host}**\n\nEnvironment: **{env}**\n"
+        payload.pop("detect_markdown", None)
+    else:
+        md = context_markdown(payload)
+    # to_json also redacts; payload is already clean — safe either way.
     json_text = to_json(payload)
     if args.out_dir:
         out = Path(args.out_dir)
         out.mkdir(parents=True, exist_ok=True)
         (out / "report.json").write_text(json_text, encoding="utf-8")
-        (out / "report.md").write_text(md, encoding="utf-8")
+        (out / "report.md").write_text(
+            md if md.endswith("\n") else md + "\n", encoding="utf-8"
+        )
     if args.json_only:
         sys.stdout.write(json_text)
     elif args.md_only:
@@ -111,22 +121,31 @@ def main(argv: Optional[list[str]] = None) -> int:
             "version": __version__,
             "environment": env_info,
             "provider": env_info.get("provider"),
+            "host": roots.host,
             **roots.to_dict(),
         }
-        md = (
-            f"# Detect\n\nHost: **{roots.host}**\n\n"
-            f"Environment: **{env_info.get('heading')}**\n"
-        )
-        return _emit(payload, md, args)
+        return _emit(payload, args)
 
     if args.cmd == "context":
-        payload = run_context_audit(
-            roots,
-            env_override=getattr(args, "env_override", None),
-            context_window=getattr(args, "context_window", "200k"),
-            env_info=env_info,
-        )
-        return _emit(payload, context_markdown(payload), args)
+        try:
+            payload = run_context_audit(
+                roots,
+                env_override=getattr(args, "env_override", None),
+                context_window=getattr(args, "context_window", "200k"),
+                env_info=env_info,
+            )
+        except RuntimeError as exc:
+            # D3: one-line install hint — never dump a traceback for missing tiktoken.
+            msg = str(exc).strip() or "ai-audit failed"
+            if "tiktoken" in msg.lower() or "tokenizer" in msg.lower():
+                sys.stderr.write(
+                    "ai-audit: install the offline tokenizer with: "
+                    "python3 -m pip install --user 'tiktoken==0.14.0'\n"
+                )
+                return 1
+            sys.stderr.write(f"ai-audit: {msg}\n")
+            return 1
+        return _emit(payload, args)
 
     parser.error(f"unknown command {args.cmd}")
     return 2

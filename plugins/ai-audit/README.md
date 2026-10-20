@@ -6,7 +6,7 @@ Read-only inventory of what loads into an agent's context at startup: instructio
 | --- | --- |
 | `context-audit` | What loads into context; on Cursor, grouped startup table with real o200k tokens |
 
-**Tokenizer:** tiktoken `o200k_base` (ranks vendored under `vendor/`; install `tiktoken` once — no network at runtime).
+**Tokenizer:** tiktoken `o200k_base` (ranks vendored under `vendor/` — see `vendor/README.md` for source URL, sha256, MIT notice). Install once: `python3 -m pip install --user 'tiktoken==0.14.0'` (package still required; pure-Python BPE was not shipped because o200k’s pre-tokenizer needs fancy-regex). No network at runtime after install.
 
 **Later stages (not in this PR):** token usage attribution, facts/memory hygiene.
 

@@ -22,18 +22,20 @@ Sources (documented inline at each marker):
     CLAUDE_CODE_REMOTE / CLAUDE_CODE_REMOTE_SESSION_ID.
   - Claude Code binary cloud check (mirrored by argent): CLAUDE_CODE_ENVIRONMENT_KIND
     in {byoc, anthropic_cloud}; CLAUDE_CODE_ENTRYPOINT in remote_* / claude-in-teams.
-- Grok Bot cloud: sand-data layout / GROK-style box markers when present; otherwise
-  treat as Cloud when sand_data roots are used without a local desktop OS signal.
+- Grok Bot cloud: requires 2+ markers (env + /home/box); sand-data alone is not enough.
 - Local OS labels: platform.system() → Mac / Linux / Windows
-  (Darwin → Mac). Cloud markers win over local OS for the environment half.
+  (Darwin → Mac). Cloud requires >=2 independent markers (round-18 D4).
 """
 
 from __future__ import annotations
 
 import os
 import platform
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from .common import redact_secrets
 
 # Claude Code remote entrypoints (argent cloud-agent-detect.ts; Claude binary).
 _CLAUDE_REMOTE_ENTRYPOINTS = frozenset(
@@ -47,12 +49,15 @@ _CLAUDE_REMOTE_ENTRYPOINTS = frozenset(
     }
 )
 _CLAUDE_CLOUD_KINDS = frozenset({"byoc", "anthropic_cloud"})
+_FALSY = frozenset({"", "0", "false", "False", "no", "No", "NO", "off", "Off", "OFF", "none", "None"})
 
 PROVIDER_LABELS = {
     "cursor": "Cursor",
     "claude": "Claude Code",
     "grok": "Grok Bot",
 }
+
+_ENV_WHITELIST = frozenset({"Cloud", "Mac", "Linux", "Windows"})
 
 
 def local_os_label(system: Optional[str] = None) -> str:
@@ -68,7 +73,20 @@ def local_os_label(system: Optional[str] = None) -> str:
 
 
 def _truthy(val: Optional[str]) -> bool:
-    return bool(val) and val.strip() not in {"0", "false", "False", ""}
+    if val is None:
+        return False
+    s = val.strip()
+    if s in _FALSY:
+        return False
+    return bool(s)
+
+
+def _sanitize_env_override(text: str) -> str:
+    """Whitelist env labels; redact anything secret-shaped in --env text."""
+    cleaned = redact_secrets(text.strip())
+    # Drop control chars
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", "", cleaned)
+    return cleaned[:120]
 
 
 def is_cursor_cloud(
@@ -79,23 +97,29 @@ def is_cursor_cloud(
     """
     Return (is_cloud, matched_markers).
 
-    Prefer high-confidence cloud-only markers over bare CURSOR_AGENT (also local).
+    Round-18 D4: require two independent markers. Bare CURSOR_AGENT alone ≠ cloud.
     """
     e = env if env is not None else os.environ
     exists = path_exists or (lambda p: Path(p).exists())
+
+    # Explicit local CLI mode → not cloud.
+    if _truthy(e.get("CURSOR_AGENT_CLI_LOCAL_MODE")):
+        return False, ["CURSOR_AGENT_CLI_LOCAL_MODE"]
+
     hits: list[str] = []
 
-    # Worker / pool (argent; cursor-agent cloud workers).
     if _truthy(e.get("CURSOR_AGENT_WORKER_ID")):
         hits.append("CURSOR_AGENT_WORKER_ID")
     if _truthy(e.get("CURSOR_WORKER_POOL_NAME")):
         hits.append("CURSOR_WORKER_POOL_NAME")
 
-    # Managed Cloud Agent VM observables (verified on Cursor cloud pods).
-    if _truthy(e.get("CURSOR_AGENT_SOCKET")) and "cursor" in (
-        e.get("CURSOR_AGENT_SOCKET") or ""
-    ).lower():
+    # Socket must look like a cloud agent socket, not ~/.cursor/agent.sock
+    sock = e.get("CURSOR_AGENT_SOCKET") or ""
+    if _truthy(sock) and (
+        sock.startswith("/run/cursor/") or sock.startswith("/var/run/cursor/")
+    ):
         hits.append("CURSOR_AGENT_SOCKET")
+
     if _truthy(e.get("CLOUD_AGENT_ALL_SECRET_NAMES")) or _truthy(
         e.get("CLOUD_AGENT_INJECTED_SECRET_NAMES")
     ):
@@ -103,20 +127,16 @@ def is_cursor_cloud(
     if _truthy(e.get("CURSOR_WORKLOAD_CGROUP")):
         hits.append("CURSOR_WORKLOAD_CGROUP")
     if (e.get("HOSTNAME") or platform.node() or "").lower() == "cursor":
-        # Only count hostname with another cloud signal or agent socket/exec-daemon.
-        if hits or exists("/exec-daemon") or exists("/opt/cursor"):
-            hits.append("hostname=cursor")
-    if exists("/exec-daemon") and (
-        _truthy(e.get("CURSOR_AGENT")) or hits
-    ):
-        if "exec-daemon" not in " ".join(hits):
-            hits.append("/exec-daemon")
+        hits.append("hostname=cursor")
+    if exists("/exec-daemon"):
+        hits.append("/exec-daemon")
+    if exists("/opt/cursor/artifacts") or exists("/opt/cursor"):
+        # Weaker alone; counts toward the two-marker rule with others.
+        if "opt-cursor" not in hits:
+            hits.append("/opt/cursor")
 
-    # Explicit local CLI mode → not cloud even if CURSOR_AGENT is set.
-    if _truthy(e.get("CURSOR_AGENT_CLI_LOCAL_MODE")):
-        return False, ["CURSOR_AGENT_CLI_LOCAL_MODE"]
-
-    return (len(hits) > 0, hits)
+    # Need >= 2 independent markers.
+    return (len(hits) >= 2, hits)
 
 
 def is_claude_cloud(env: Mapping[str, str] | None = None) -> tuple[bool, list[str]]:
@@ -132,7 +152,7 @@ def is_claude_cloud(env: Mapping[str, str] | None = None) -> tuple[bool, list[st
         hits.append("CLAUDE_CODE_REMOTE_SESSION_ID")
     if _truthy(e.get("CLAUDE_CODE_REMOTE")):
         hits.append("CLAUDE_CODE_REMOTE")
-    return (len(hits) > 0, hits)
+    return (len(hits) >= 1, hits)  # Claude remote markers are each high-confidence
 
 
 def is_grok_cloud(
@@ -142,21 +162,21 @@ def is_grok_cloud(
     path_exists: Optional[Any] = None,
 ) -> tuple[bool, list[str]]:
     """
-    Grok Bot typically runs on a remote box with sand-data/.
-    Markers: GROK_BOT / XAI agent env, or sand-data layout without desktop Cursor.
+    Grok Bot cloud: require 2+ markers. sand-data alone (fixtures / local desktop)
+    is not enough (round-18 D4).
     """
     e = env if env is not None else os.environ
     exists = path_exists or (lambda p: Path(p).exists())
     hits: list[str] = []
-    for key in ("GROK_BOT", "GROK_AGENT", "XAI_GROK_BOT", "SAND_DATA"):
+    for key in ("GROK_BOT", "GROK_AGENT", "XAI_GROK_BOT"):
         if _truthy(e.get(key)):
             hits.append(key)
-    if sand_data and Path(sand_data).is_dir():
-        hits.append("sand_data/")
-    # Grok cloud boxes often use /home/box (observable on Grok agent VMs).
-    if exists("/home/box") and (hits or sand_data):
+    if _truthy(e.get("SAND_DATA")):
+        hits.append("SAND_DATA")
+    # sand_data path alone does NOT count toward cloud (fixture/local).
+    if exists("/home/box"):
         hits.append("/home/box")
-    return (len(hits) > 0, hits)
+    return (len(hits) >= 2, hits)
 
 
 def detect_environment(
@@ -171,7 +191,7 @@ def detect_environment(
     Return provider, environment, heading, and detection evidence.
 
     override: force environment half only ("Cloud", "Mac", "Linux", "Windows")
-    or a full "Provider · Env" string.
+    or a full "Provider · Env" string (sanitised / redacted).
     """
     provider_key = {
         "cursor": "cursor",
@@ -183,31 +203,42 @@ def detect_environment(
     provider_label = PROVIDER_LABELS.get(provider_key, provider_key.title())
 
     if override:
-        ov = override.strip()
-        # Accept "Provider · Env" or "Provider / Env" as a full heading override.
+        ov = _sanitize_env_override(override)
         for sep in (" · ", "·", " / ", "/"):
             if sep in ov:
                 parts = [p.strip() for p in ov.split(sep) if p.strip()]
                 if len(parts) >= 2:
+                    prov = parts[0]
+                    # Only allow known provider labels or current provider
+                    if prov not in PROVIDER_LABELS.values():
+                        prov = provider_label
+                    env_part = parts[1]
+                    if env_part not in _ENV_WHITELIST:
+                        # Redact unknown env half to a safe token
+                        env_part = "Cloud" if "cloud" in env_part.lower() else local_os_label()
+                        if "REDACTED" in parts[1]:
+                            env_part = local_os_label()
                     return {
-                        "provider": parts[0],
+                        "provider": prov,
                         "provider_key": provider_key,
-                        "environment": parts[1],
-                        "heading": f"{parts[0]} · {parts[1]}",
+                        "environment": env_part,
+                        "heading": f"{prov} · {env_part}",
                         "markers": ["--env override"],
-                        "cloud": parts[1].lower() == "cloud",
+                        "cloud": env_part == "Cloud",
                     }
                 break
-        # Environment-only override
-        env_label = ov[0].upper() + ov[1:] if ov else ov
-        if ov.lower() == "cloud":
+        # Environment-only override (whitelist)
+        low = ov.lower()
+        if low == "cloud":
             env_label = "Cloud"
-        elif ov.lower() in {"mac", "darwin"}:
+        elif low in {"mac", "darwin"}:
             env_label = "Mac"
-        elif ov.lower() == "linux":
+        elif low == "linux":
             env_label = "Linux"
-        elif ov.lower() in {"windows", "win"}:
+        elif low in {"windows", "win"}:
             env_label = "Windows"
+        else:
+            env_label = local_os_label()
         return {
             "provider": provider_label,
             "provider_key": provider_key,
