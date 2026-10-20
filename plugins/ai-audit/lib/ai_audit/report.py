@@ -5,22 +5,29 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .common import redact_secrets, redact_tree
+
 
 def to_json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    return json.dumps(redact_tree(payload), indent=2, sort_keys=True) + "\n"
 
 
 def _recon_lines(recon: dict[str, Any] | None) -> list[str]:
     if not recon:
         return []
-    ok = "yes" if recon.get("ok") else "NO"
+    if recon.get("no_data") or recon.get("status") == "no_data":
+        match = "no data"
+    elif recon.get("ok"):
+        match = "yes"
+    else:
+        match = "NO"
     return [
         "## Reconciliation",
         "",
         f"- Source total: **{int(recon.get('source_total_tokens') or 0)}**",
         f"- Sum by_model: **{int(recon.get('by_model_sum') or 0)}**",
         f"- Sum by_kind: **{int(recon.get('by_kind_sum') or 0)}**",
-        f"- Matches: **{ok}**",
+        f"- Matches: **{match}**",
         "",
     ]
 
@@ -39,16 +46,20 @@ def context_markdown(payload: dict[str, Any]) -> str:
         f"~{total_tokens} est. tokens total · "
         f"~{always_tokens} always-loaded (~{len(always)} items).",
         "",
-        "Sizes are approximate (chars ÷ 4) for inventory only — not savings estimates.",
+        "Sizes are approximate (chars ÷ 4) for inventory only.",
         "",
         "## Always-loaded",
         "",
     ]
-    for i in sorted(always, key=lambda x: -int(x.get("est_tokens") or 0))[:25]:
-        path = i.get("path") or "?"
+    limit = 25
+    ranked = sorted(always, key=lambda x: -int(x.get("est_tokens") or 0))
+    for i in ranked[:limit]:
+        path = redact_secrets(i.get("path") or "?")
         kind = i.get("kind") or ""
         tok = int(i.get("est_tokens") or 0)
         lines.append(f"- `{kind}` · ~{tok} tok · `{path}`")
+    if len(ranked) > limit:
+        lines.append(f"- … +{len(ranked) - limit} more (see JSON inventory)")
     if not always:
         lines.append("_None detected._")
     lines.append("")
@@ -57,8 +68,7 @@ def context_markdown(payload: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- Read-only: no files were changed.",
-            "- Secret-valued config keys were skipped or redacted.",
-            "- v0.1.0 does not rank savings estimates.",
+            "- Secret-valued config keys and secret-shaped values were skipped or redacted.",
             "",
         ]
     )
@@ -80,7 +90,7 @@ def token_markdown(payload: dict[str, Any]) -> str:
         for k, v in summary.items():
             if k == "reconciliation":
                 continue
-            lines.append(f"- {k}: {v}")
+            lines.append(f"- {k}: {redact_secrets(str(v))}")
         lines.append("")
     lines.extend(_recon_lines(summary.get("reconciliation") or data.get("reconciliation")))
 
@@ -109,12 +119,12 @@ def token_markdown(payload: dict[str, Any]) -> str:
     lines.append("")
     if notes:
         for n in notes:
-            lines.append(f"- {n}")
+            lines.append(f"- {redact_secrets(str(n))}")
     else:
         lines.append("- Prefer official auto sources; otherwise a user-downloaded usage file.")
         lines.append("- Never scrape login tokens or cookies.")
     lines.append("")
-    lines.append("- Read-only: no files were changed. v0.1.0 does not estimate savings.")
+    lines.append("- Read-only: no files were changed. Secret-shaped values are redacted.")
     lines.append("")
     return "\n".join(lines)
 
@@ -131,15 +141,15 @@ def facts_markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     for n in notes:
-        lines.append(f"> {n}")
+        lines.append(f"> {redact_secrets(str(n))}")
         lines.append("")
     if issues:
         lines.append("## Issues")
         lines.append("")
         for iss in issues[:40]:
             kind = iss.get("kind", "issue")
-            path = iss.get("path", "")
-            detail = iss.get("detail", "")
+            path = redact_secrets(iss.get("path", ""))
+            detail = redact_secrets(iss.get("detail", ""))
             when = iss.get("date") or ""
             extra = f" ({when})" if when else ""
             if len(detail) > 200:
@@ -156,8 +166,7 @@ def facts_markdown(payload: dict[str, Any]) -> str:
             "## Notes",
             "",
             "- Read-only: propose edits as a diff; do not edit memory without approval.",
-            "- Fact quotes are capped (~80 chars) for public-repo safety.",
-            "- v0.1.0 does not rank savings estimates.",
+            "- Fact quotes are capped (~80 chars); secret-shaped values are redacted.",
             "",
         ]
     )

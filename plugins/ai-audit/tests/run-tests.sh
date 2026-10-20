@@ -64,7 +64,7 @@ assert_not_contains() {
 py_get() {
   local file="$1"
   local expr="$2"
-  python3 - "$file" "$expr" <<'PY'
+  python3 -B - "$file" "$expr" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 print(eval(sys.argv[2], {"data": data}))
@@ -79,7 +79,8 @@ py_check() {
   # Read heredoc before spawning a subshell (command substitution would otherwise
   # leave python3 without the script on some shells).
   script="$(cat)"
-  out="$(python3 -c "$script" 2>&1)" || rc=$?
+  # -B: never write __pycache__ into the plugin lib during tests
+  out="$(python3 -B -c "$script" 2>&1)" || rc=$?
   if [[ $rc -eq 0 ]]; then
     echo "PASS $name"
     PASS=$((PASS + 1))
@@ -91,7 +92,13 @@ py_check() {
 }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+INSTALL_PARENT=""
+UNRELATED=""
+FAKE_CLAUDE_CACHE=""
+cleanup() {
+  rm -rf "$TMP" ${INSTALL_PARENT:+"$INSTALL_PARENT"} ${UNRELATED:+"$UNRELATED"} ${FAKE_CLAUDE_CACHE:+"$FAKE_CLAUDE_CACHE"}
+}
+trap cleanup EXIT
 
 echo "== 1. detect --root isolation =="
 "$BIN" detect --root "$FIX/claude" --json-only >"$TMP/detect-claude.json"
@@ -259,19 +266,23 @@ assert_contains "md shows usage total" "$md" "42"
 assert_contains "md reconciliation" "$md" "Reconciliation"
 assert_contains "md no official" "$md" "No official auto-download"
 
-echo "== 15. Admin API key auto; no CURSOR_API_KEY fallback =="
-# CSV still preferred when provided; admin attempted when key set
+echo "== 15. Admin API key auto; mocked offline; no CURSOR_API_KEY fallback =="
+# CSV still preferred when provided; Admin API must be skipped (no live HTTP)
 CURSOR_ADMIN_API_KEY="fake-key" \
   "$BIN" token --host cursor --root "$FIX/cursor" --csv "$FIX/cursor/usage.csv" --json-only >"$TMP/with-key-csv.json"
 assert_eq "csv still primary with key" \
   "$(py_get "$TMP/with-key-csv.json" 'data["data"]["source"]')" "usage_csv"
-assert_contains "notes mention Admin API key or fetch" \
-  "$(py_get "$TMP/with-key-csv.json" '" ".join(data["notes"])')" "Admin API"
+assert_contains "csv skips Admin API" \
+  "$(py_get "$TMP/with-key-csv.json" '" ".join(data["notes"])')" "CSV provided"
+assert_eq "admin flag false when csv used" \
+  "$(py_get "$TMP/with-key-csv.json" 'data["data"]["admin"]')" "False"
 
-py_check "admin key var only (no CURSOR_API_KEY)" <<PY
-import sys, os
+py_check "admin key var only + mocked pagination/epoch (offline)" <<PY
+import sys, os, json
+from unittest import mock
 sys.path.insert(0, "$LIB")
-from ai_audit.token_audit import fetch_cursor_admin_usage
+from ai_audit.token_audit import fetch_cursor_admin_usage, _to_epoch_ms
+
 assert fetch_cursor_admin_usage(api_key=None) is None
 os.environ["CURSOR_API_KEY"] = "should-not-be-used"
 os.environ.pop("CURSOR_ADMIN_API_KEY", None)
@@ -279,10 +290,47 @@ assert fetch_cursor_admin_usage(api_key=None) is None, "must not use CURSOR_API_
 src = open("$LIB/ai_audit/token_audit.py", encoding="utf-8").read()
 assert "CURSOR_ADMIN_API_KEY" in src
 assert "Basic" in src and "pageSize" in src
-# Ensure CURSOR_API_KEY is not used as fallback in fetch
-import re
 fn = src[src.index("def fetch_cursor_admin_usage"):src.index("def _usage_dedupe_key")]
 assert "CURSOR_API_KEY" not in fn
+
+ms = _to_epoch_ms("2026-10-01")
+assert isinstance(ms, int) and ms > 10_000_000_000, ms
+
+captured = []
+def fake_urlopen(req, timeout=20):
+    body = json.loads(req.data.decode())
+    captured.append(body)
+    page = body["page"]
+    class Resp:
+        def read(self):
+            if page == 1:
+                return json.dumps({
+                    "usageEvents": [{"model": "m", "tokenUsage": {
+                        "inputTokens": 1, "outputTokens": 2,
+                        "cacheReadTokens": 0, "cacheWriteTokens": 0,
+                    }}],
+                    "pagination": {"numPages": 2, "hasNextPage": True},
+                }).encode()
+            return json.dumps({
+                "usageEvents": [{"model": "m", "tokenUsage": {
+                    "inputTokens": 3, "outputTokens": 4,
+                    "cacheReadTokens": 0, "cacheWriteTokens": 0,
+                }}],
+                "pagination": {"numPages": 2, "hasNextPage": False},
+            }).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    return Resp()
+
+with mock.patch("urllib.request.urlopen", fake_urlopen):
+    os.environ["CURSOR_ADMIN_API_KEY"] = "test-key"
+    out = fetch_cursor_admin_usage(start_date="2026-10-01", end_date="2026-10-20")
+    del os.environ["CURSOR_ADMIN_API_KEY"]
+assert isinstance(captured[0]["startDate"], int), captured[0]
+assert isinstance(captured[0]["endDate"], int), captured[0]
+assert out["event_count"] == 2, out
+assert out["pages_fetched"] == 2, out
+assert out.get("truncated") is False
 PY
 
 echo "== 16. fact quote / sqlite wal / empty wins =="
@@ -467,10 +515,10 @@ else
 fi
 
 # Copy plugin outside the repo; run CLI from an unrelated cwd the way skills instruct
+# Temps are cleaned by the EXIT trap (RETURN never fires at top level).
 INSTALL_PARENT="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-install.XXXXXX")"
 UNRELATED="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-cwd.XXXXXX")"
 FAKE_CLAUDE_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-claude-cache.XXXXXX")"
-trap 'rm -rf "$INSTALL_PARENT" "$UNRELATED" "$FAKE_CLAUDE_CACHE"' RETURN
 cp -a "$PLUGIN" "$INSTALL_PARENT/ai-audit"
 # Simulate Claude cache layout: ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/
 # (we override HOME for this subshell)
@@ -553,6 +601,103 @@ rm -rf "$FRESH"
 
 assert_contains "bin sets PYTHONDONTWRITEBYTECODE" "$(cat "$PLUGIN/bin/ai-audit")" "PYTHONDONTWRITEBYTECODE=1"
 assert_contains "bin uses python3 -B" "$(cat "$PLUGIN/bin/ai-audit")" "python3 -B"
+
+echo "== round8 regressions =="
+# 1. secrets leak through facts + usage-file period
+SECRET_FIX="$(mktemp -d "${TMPDIR:-/tmp}/ai-audit-secret.XXXXXX")"
+cp -a "$FIX/grok" "$SECRET_FIX/grok"
+printf '%s\n' '- (2025-02-01) Old token sk-ant-FAKE1234567890abcdef' \
+  >>"$SECRET_FIX/grok/sand-data/user-memory/by-agent/agent-active/profile.md"
+"$BIN" facts --host grok --root "$SECRET_FIX/grok" --json-only >"$TMP/secret-facts.json"
+"$BIN" facts --host grok --root "$SECRET_FIX/grok" --md-only >"$TMP/secret-facts.md"
+assert_eq "facts json redacts planted sk-ant key" \
+  "$(grep -c 'FAKE1234567890abcdef' "$TMP/secret-facts.json" || true)" "0"
+assert_eq "facts md redacts planted sk-ant key" \
+  "$(grep -c 'FAKE1234567890abcdef' "$TMP/secret-facts.md" || true)" "0"
+assert_contains "facts shows REDACTED marker" "$(cat "$TMP/secret-facts.json")" "REDACTED"
+assert_eq "facts issues have no saving_est_tokens" \
+  "$(py_get "$TMP/secret-facts.json" 'all("saving_est_tokens" not in i for i in data["issues"])')" "True"
+printf '%s\n' '{"usage_total":9,"usage_period":"week sk-ant-FAKE1234567890abcdef","unit":"percent"}' \
+  >"$TMP/secret-usage.json"
+"$BIN" token --host grok --root "$FIX/grok" --usage-file "$TMP/secret-usage.json" --json-only \
+  >"$TMP/secret-usage-out.json"
+assert_eq "usage-file period redacts key" \
+  "$(grep -c 'FAKE1234567890abcdef' "$TMP/secret-usage-out.json" || true)" "0"
+rm -rf "$SECRET_FIX"
+
+# 2/3 Admin API epoch + pagination covered in section 15 mock
+# 3 missing --csv path errors clearly
+"$BIN" token --host cursor --root "$FIX/cursor" --csv /nonexistent/usage.csv --json-only \
+  >"$TMP/missing-csv.json" || true
+assert_contains "missing csv error" \
+  "$(py_get "$TMP/missing-csv.json" 'str(data.get("data",{}).get("error") or "") + " ".join(data.get("notes") or [])')" \
+  "not found"
+
+# 4 duplicate usage-file note
+printf '%s\n' '{"usage_total":3,"unit":"percent"}' >"$TMP/uf.json"
+"$BIN" token --host cursor --root "$FIX/cursor" --usage-file "$TMP/uf.json" --json-only \
+  >"$TMP/uf-out.json"
+assert_eq "usage-file Loaded note once" \
+  "$(py_get "$TMP/uf-out.json" 'sum(1 for n in data["notes"] if "Loaded user usage file" in n)')" "1"
+
+# 5 +N more in context md
+py_check "context md +N more when >25 always" <<PY
+import sys
+sys.path.insert(0, "$LIB")
+from ai_audit.report import context_markdown
+items = [{"load": "always", "path": f"/p/{i}", "kind": "k", "est_tokens": i} for i in range(30)]
+md = context_markdown({"host": "x", "inventory": items})
+assert "+5 more" in md, md
+PY
+
+# 6 Matches: no data for empty recon
+"$BIN" token --host cursor --root "$FIX/cursor" --json-only >"$TMP/nodata-token.json"
+assert_eq "empty cursor recon no_data" \
+  "$(py_get "$TMP/nodata-token.json" 'data["data"]["reconciliation"].get("status") or data["data"]["reconciliation"].get("no_data")')" \
+  "no_data"
+md_nd="$("$BIN" token --host cursor --root "$FIX/cursor" --md-only)"
+assert_contains "md says no data" "$md_nd" "no data"
+
+# 7 CLAUDE_CONFIG_DIR
+py_check "CLAUDE_CONFIG_DIR sets claude_home" <<PY
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "$LIB")
+from ai_audit.detect import detect_host
+td = Path(tempfile.mkdtemp())
+(td / "projects").mkdir()
+os.environ["CLAUDE_CONFIG_DIR"] = str(td)
+try:
+    r = detect_host("claude")
+    assert r.claude_home == td, r.claude_home
+finally:
+    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    import shutil
+    shutil.rmtree(td)
+PY
+
+# 8 no routines leftovers
+assert_not_contains "cli has no --routines-json" "$(cat "$PLUGIN/lib/ai_audit/cli.py")" "--routines-json"
+assert_eq "no routines.json fixture" \
+  "$(test -f "$FIX/grok/routines.json" && echo yes || echo no)" "no"
+assert_not_contains "token_audit has no SAVINGS_BUDGET" "$(cat "$PLUGIN/lib/ai_audit/token_audit.py")" "SAVINGS_BUDGET"
+assert_not_contains "skill omits Grok routines row" \
+  "$(cat "$PLUGIN/skills/context-audit/SKILL.md")" "Grok routines / connectors"
+"$BIN" token --host grok --root "$FIX/grok" --usage-total 1 --json-only >"$TMP/no-routines.json"
+assert_eq "token output has no routines field" \
+  "$(py_get "$TMP/no-routines.json" '"routines" in data["data"]')" "False"
+
+# 9 py_check uses -B; trap cleans install temps (assert cleanup function exists)
+assert_contains "py_check uses python3 -B" "$(grep -A2 'py_check()' "$PLUGIN/tests/run-tests.sh" | tr '\n' ' ')" "python3 -B"
+assert_contains "EXIT trap cleanup" "$(cat "$PLUGIN/tests/run-tests.sh")" "trap cleanup EXIT"
+assert_not_contains "no RETURN trap for install temps" "$(cat "$PLUGIN/tests/run-tests.sh")" "trap 'rm -rf \"\$INSTALL_PARENT\""
+
+# 10 HUMAN-TEST + Enterprise docs
+assert_contains "HUMAN-TEST has claude plugin install" "$(cat "$PLUGIN/HUMAN-TEST.md")" "claude plugin"
+assert_contains "HUMAN-TEST plants sk-ant" "$(cat "$PLUGIN/HUMAN-TEST.md")" "sk-ant-FAKE"
+assert_contains "HUMAN-TEST per-host --host claude" "$(cat "$PLUGIN/HUMAN-TEST.md")" "--host claude"
+assert_contains "README Enterprise team admin" "$(cat "$PLUGIN/README.md")" "Enterprise team admin"
+assert_contains "token skill Enterprise" "$(cat "$PLUGIN/skills/token-audit/SKILL.md")" "Enterprise"
 
 echo "== public-repo clean =="
 assert_contains "three skills present" "$(ls "$PLUGIN/skills")" "context-audit"

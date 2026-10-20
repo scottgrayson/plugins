@@ -36,7 +36,7 @@ bash "$AI_AUDIT" token --help
 | Host | Official auto | File fallback |
 | --- | --- | --- |
 | Claude Code | Local session JSONL under `~/.claude/projects/` ([Manage sessions](https://code.claude.com/docs/en/sessions)) | `--usage-file` JSON/CSV if JSONL is unavailable |
-| Cursor | Admin API when `CURSOR_ADMIN_API_KEY` is set ([Admin API](https://cursor.com/docs/account/teams/admin-api)) | Dashboard Usage CSV via `--csv` / `--usage-file` |
+| Cursor | **Enterprise team admin keys only** — Admin API when `CURSOR_ADMIN_API_KEY` is set ([Admin API](https://cursor.com/docs/account/teams/admin-api); dates as epoch ms). Individual / Pro: CSV only | Dashboard Usage CSV via `--csv` / `--usage-file` |
 | Grok Bot | **Not possible** — no documented Bot usage API/export (xAI Management API is for API keys, not Bot) | JSON from Usage & Billing UI via `--usage-file` or `--usage-total` |
 
 ## Run by host
@@ -51,17 +51,18 @@ Parses local JSONL (deduped by message.id/requestId). Tool cost is attributed to
 
 ### Cursor
 
-Auto (Enterprise key present):
+Auto (**Enterprise team admin key only** — individual / Pro accounts cannot use this):
 
 ```bash
-export CURSOR_ADMIN_API_KEY=…   # from Cursor team Admin API settings — never from cookies
+export CURSOR_ADMIN_API_KEY=…   # team Admin API key from Cursor — never from cookies
 bash "$AI_AUDIT" token --host cursor
 ```
 
-File fallback:
+File fallback (everyone; required on individual / Pro):
 
 ```bash
-bash "$AI_AUDIT" token --host cursor --csv ~/Downloads/usage.csv
+# Dashboard → Usage → download/export CSV, then pass the real filename:
+bash "$AI_AUDIT" token --host cursor --csv ~/Downloads/usage*.csv
 ```
 
 Never scrape `state.vscdb`.

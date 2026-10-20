@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__
+from .common import redact_tree
 from .context_audit import run_context_audit
 from .detect import detect_host
 from .facts_audit import run_facts_audit
@@ -17,6 +17,8 @@ from .token_audit import run_token_audit
 
 
 def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
+    # Redact every user-sourced string leaf before any output.
+    payload = redact_tree(payload)
     json_text = to_json(payload)
     if args.out_dir:
         out = Path(args.out_dir)
@@ -32,18 +34,6 @@ def _emit(payload: dict[str, Any], md: str, args: argparse.Namespace) -> int:
         sys.stdout.write("\n---\n\n")
         sys.stdout.write(json_text)
     return 0
-
-
-def _load_routines(path: Optional[str]) -> Optional[list]:
-    if not path:
-        return None
-    text = Path(path).read_text(encoding="utf-8")
-    data = json.loads(text)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and isinstance(data.get("routines"), list):
-        return data["routines"]
-    raise SystemExit(f"--routines-json must be a list or {{routines: [...]}}: {path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,10 +80,21 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument(
         "--cursor-admin-api",
         action="store_true",
-        help="Request Cursor Admin API (also used automatically when CURSOR_ADMIN_API_KEY is set).",
+        help=(
+            "Request Cursor Admin API (Enterprise team admin keys only; "
+            "also used automatically when CURSOR_ADMIN_API_KEY is set)."
+        ),
     )
-    t.add_argument("--admin-start", default=None, help="Admin API startDate (ISO)")
-    t.add_argument("--admin-end", default=None, help="Admin API endDate (ISO)")
+    t.add_argument(
+        "--admin-start",
+        default=None,
+        help="Admin API startDate (ISO date/datetime or epoch ms; sent as epoch ms)",
+    )
+    t.add_argument(
+        "--admin-end",
+        default=None,
+        help="Admin API endDate (ISO date/datetime or epoch ms; sent as epoch ms)",
+    )
     t.add_argument(
         "--usage-total",
         type=float,
@@ -104,11 +105,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--usage-period",
         default=None,
         help="Label for --usage-total (e.g. 'week of 2026-10-13')",
-    )
-    t.add_argument(
-        "--routines-json",
-        default=None,
-        help="Optional JSON file of routines [{name, cron}] (informational)",
     )
 
     f = sub.add_parser("facts", help="Audit memory/facts for stale/duplicate/conflict/orphan")
@@ -146,7 +142,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             admin_end=args.admin_end,
             usage_total=args.usage_total,
             usage_period=args.usage_period,
-            routines=_load_routines(args.routines_json),
             usage_file=Path(args.usage_file) if args.usage_file else None,
         )
         return _emit(payload, token_markdown(payload), args)

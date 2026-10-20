@@ -1,4 +1,0 @@
-[
-  {"name": "morning-digest", "cron": "0 9 * * *"},
-  {"name": "hourly-triage", "cron": "0 * * * *"}
-]

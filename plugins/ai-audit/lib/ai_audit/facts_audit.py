@@ -15,23 +15,24 @@ from .common import (
     fact_hash,
     parse_front_matter,
     parse_iso_date,
+    redact_secrets,
     safe_read_text,
     similarity,
-    today_utc,
+    today_utc
 )
 from .detect import Roots
 
 GROK_FACT_RE = re.compile(r"^\s*-\s*\((\d{4}-\d{2}-\d{2})\)\s*(.+?)\s*$")
 TIME_BOUND_WORDS = re.compile(
     r"\b(currently|this week|this month|today|yesterday|right now|asap|temporary|interim)\b",
-    re.I,
+    re.I
 )
 _IMPORT_RE = re.compile(r"@([^\s\]\)\"\'<>]+)")
 FACT_QUOTE_MAX = 80
 
 
 def _q(text: str, n: int = FACT_QUOTE_MAX) -> str:
-    t = text.strip()
+    t = redact_secrets(text.strip())
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
@@ -70,7 +71,7 @@ def _parse_grok_profile(path: Path, agent_id: str) -> list[Fact]:
                 text=m.group(2).strip(),
                 date=m.group(1),
                 source="profile.md",
-                agent_id=agent_id,
+                agent_id=agent_id
             )
         )
     return facts
@@ -148,8 +149,7 @@ def collect_grok_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], list[
                     kind="orphan",
                     path=str(profile_md),
                     detail=f"Memory for agent `{agent_id}` but no agents/{agent_id} directory",
-                    saving_est_tokens=0,  # cleanup/clutter only — not loaded, no token saving
-                    suggestion="Archive or delete orphaned profile.md after approval.",
+                    suggestion="Archive or delete orphaned profile.md after approval."
                 )
             )
         facts.extend(_parse_grok_profile(profile_md, agent_id))
@@ -163,8 +163,7 @@ def collect_grok_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], list[
                     path=f.path,
                     detail=f"Fact dated {f.date} is older than {stale_days} days: {_q(f.text)}",
                     date=f.date,
-                    saving_est_tokens=est_tokens(len(f.text)),
-                    suggestion="Confirm still true; delete or re-date if updated.",
+                    suggestion="Confirm still true; delete or re-date if updated."
                 )
             )
         elif TIME_BOUND_WORDS.search(f.text):
@@ -174,8 +173,7 @@ def collect_grok_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], list[
                     path=f.path,
                     detail=f"Time-bound wording may be outdated: {_q(f.text)}",
                     date=f.date,
-                    saving_est_tokens=est_tokens(len(f.text)),
-                    suggestion="Rewrite without relative time, or delete if obsolete.",
+                    suggestion="Rewrite without relative time, or delete if obsolete."
                 )
             )
 
@@ -212,7 +210,7 @@ def collect_claude_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], lis
                             path=str(topic),
                             text=body_text,
                             date=modified[:10] if modified else "",
-                            source=f"topic:{ftype}",
+                            source=f"topic:{ftype}"
                         )
                     )
                     d = parse_iso_date(modified)
@@ -223,8 +221,7 @@ def collect_claude_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], lis
                                 path=str(topic),
                                 detail=f"Topic modified {modified} older than {stale_days} days",
                                 date=modified[:10],
-                                saving_est_tokens=est_tokens(len(body_text)),
-                                suggestion="Update or delete the topic file after approval.",
+                                suggestion="Update or delete the topic file after approval."
                             )
                         )
             else:
@@ -259,7 +256,7 @@ def collect_claude_facts(roots: Roots, stale_days: int) -> tuple[list[Fact], lis
 def collect_cursor_facts(
     roots: Roots,
     memories_path: Optional[Path],
-    stale_days: int,
+    stale_days: int
 ) -> tuple[list[Fact], list[FactIssue], list[str]]:
     notes: list[str] = [
         "Cursor memories are server-side only (no local files). Export via the palette command if available.",
@@ -279,7 +276,7 @@ def collect_cursor_facts(
                         host="cursor",
                         path=str(memories_path),
                         text=s.lstrip("- ").strip(),
-                        source="memories_export",
+                        source="memories_export"
                     )
                 )
             elif s and not s.startswith("#") and len(s) > 8:
@@ -295,7 +292,7 @@ def collect_cursor_facts(
     for path in (
         roots.project / "AGENTS.md",
         roots.project / "CLAUDE.md",
-        roots.project / "CLAUDE.local.md",
+        roots.project / "CLAUDE.local.md"
     ):
         text = safe_read_text(path)
         if not text:
@@ -321,8 +318,7 @@ def collect_cursor_facts(
                     kind="stale",
                     path=f.path,
                     detail=f"Time-bound wording (no date available): {_q(f.text)}",
-                    saving_est_tokens=est_tokens(len(f.text)),
-                    suggestion="Check git history for rules; confirm or remove.",
+                    suggestion="Check git history for rules; confirm or remove."
                 )
             )
 
@@ -388,8 +384,7 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
                 path="; ".join(paths[:3]),
                 detail=detail,
                 date=max((g.date for g in group if g.date), default=""),
-                saving_est_tokens=est_tokens(sum(len(g.text) for g in group[1:])),
-                suggestion="Keep the newest dated copy; delete extras after approval.",
+                suggestion="Keep the newest dated copy; delete extras after approval."
             )
         )
 
@@ -424,11 +419,10 @@ def _add_duplicates_and_conflicts(facts: list[Fact], issues: list[FactIssue]) ->
                         path=f"{a.path} vs {b.path}",
                         detail=f"Possible conflict (sim={sim:.2f}): “{_q(a.text)}” vs “{_q(b.text)}”",
                         date=newer.date,
-                        saving_est_tokens=est_tokens(len(older.text)),
                         suggestion=(
                             f"Prefer the newer dated fact ({newer.date or 'undated'}); "
                             "remove the other after approval."
-                        ),
+                        )
                     )
                 )
 
@@ -442,7 +436,7 @@ def issues_to_wins(issues: list[FactIssue]) -> list[Win]:
 def run_facts_audit(
     roots: Roots,
     stale_days: int = 30,
-    memories_path: Optional[Path] = None,
+    memories_path: Optional[Path] = None
 ) -> dict[str, Any]:
     if roots.host == "claude":
         facts, issues, notes = collect_claude_facts(roots, stale_days)

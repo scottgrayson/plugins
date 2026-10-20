@@ -1,82 +1,148 @@
-# Human test steps (≤5 minutes)
+# Human test steps (≤5 minutes on a Mac)
 
-Run each audit once on a real setup. No AI tokens required for the CLI itself.
+Run each audit once on a real setup. The CLI uses zero AI tokens.
 
-## Prerequisites
+## 0. Install and confirm the 3 skills (~2 min)
 
-- This repo (or an installed copy of `plugins/ai-audit`)
-- `python3` on PATH
+### Claude Code
 
 ```bash
-PLUGIN=/path/to/plugins/ai-audit   # or your install root
-AI_AUDIT="$PLUGIN/bin/ai-audit"
+claude plugin marketplace add scottgrayson/plugins
+claude plugin install ai-audit@scottgrayson-plugins
+claude plugin details ai-audit@scottgrayson-plugins
 ```
 
-Confirm the three skills exist:
+Expect: `Skills (3)` listing `context-audit`, `facts-audit`, `token-audit`.
+
+Find the installed plugin root (newest cache):
 
 ```bash
+PLUGIN="$(ls -d ~/.claude/plugins/cache/*/ai-audit/*/ 2>/dev/null | sort | tail -1)"
+# strip trailing slash if present:
+PLUGIN="${PLUGIN%/}"
+test -f "$PLUGIN/bin/ai-audit"
+AI_AUDIT="$PLUGIN/bin/ai-audit"
 ls "$PLUGIN/skills/context-audit/SKILL.md" \
    "$PLUGIN/skills/token-audit/SKILL.md" \
    "$PLUGIN/skills/facts-audit/SKILL.md"
 ```
 
----
+### Cursor
 
-## 1. Context audit (~1 min)
+1. Dashboard → Plugins / Team Marketplaces → add `https://github.com/scottgrayson/plugins`
+2. Customize → Plugins → install **ai-audit**
+3. Or local copy:
 
 ```bash
-bash "$AI_AUDIT" context --host auto --md-only
-# Or force a host / fixture:
-bash "$AI_AUDIT" context --host claude --root "$PLUGIN/fixtures/claude" --md-only
+mkdir -p ~/.cursor/plugins/local
+# from a clone of scottgrayson/plugins:
+cp -R "$(pwd)/plugins/ai-audit" ~/.cursor/plugins/local/ai-audit
+# Reload Window, then confirm skills under the Plugins UI
 ```
 
-**Expect:** inventory of always-loaded items with paths that exist on disk under the scanned roots. No file changes.
+```bash
+PLUGIN="$HOME/.cursor/plugins/local/ai-audit"
+# or, if installed from marketplace cache, pick the newest:
+# PLUGIN="$(ls -d ~/.cursor/plugins/**/ai-audit 2>/dev/null | head -1)"
+AI_AUDIT="$PLUGIN/bin/ai-audit"
+ls "$PLUGIN/skills/context-audit/SKILL.md" \
+   "$PLUGIN/skills/token-audit/SKILL.md" \
+   "$PLUGIN/skills/facts-audit/SKILL.md"
+```
+
+Slash-invoke `/ai-audit:context-audit` (or the other two) once in each host if you want a UI check.
 
 ---
 
-## 2. Token audit (~2 min)
+## 1. Context audit (~30 s)
 
-**Claude Code (auto JSONL):**
+```bash
+bash "$AI_AUDIT" context --host claude --md-only | head -40
+bash "$AI_AUDIT" context --host cursor --md-only | head -40
+bash "$AI_AUDIT" context --host grok --md-only | head -40
+```
+
+Expect: always-loaded list with real paths. If more than 25 always-loaded items, a `+N more` line appears. No file changes.
+
+---
+
+## 2. Token audit (~1.5 min) — one host at a time
+
+**Claude Code** (reads local JSONL under `~/.claude/projects/` or `$CLAUDE_CONFIG_DIR/projects/`):
 
 ```bash
 bash "$AI_AUDIT" token --host claude --md-only
 ```
 
-**Cursor (file fallback — download Usage CSV from the dashboard first):**
+**Cursor — file fallback (everyone):**
+
+1. Open the Cursor dashboard → **Usage**
+2. Download / export the usage CSV (filename varies; often lands in `~/Downloads/`)
+3. Pass the real file (glob is fine if only one match):
 
 ```bash
-bash "$AI_AUDIT" token --host cursor --csv ~/Downloads/usage.csv --md-only
-# Optional auto: export CURSOR_ADMIN_API_KEY=… then omit --csv
+CSV="$(ls -t ~/Downloads/*usage*.csv ~/Downloads/usage*.csv 2>/dev/null | head -1)"
+echo "Using CSV: $CSV"
+test -f "$CSV"
+bash "$AI_AUDIT" token --host cursor --csv "$CSV" --md-only
 ```
 
-**Grok Bot (no official auto — provide a usage file):**
+Optional **Enterprise team admin only** (individual / Pro: skip):
+
+```bash
+export CURSOR_ADMIN_API_KEY=…   # team Admin API key — not a browser cookie
+bash "$AI_AUDIT" token --host cursor --md-only
+```
+
+**Grok Bot** (no official auto-download — provide a usage file):
 
 ```bash
 printf '%s\n' '{"usage_total":72,"usage_period":"this week","unit":"percent"}' >/tmp/grok-usage.json
 bash "$AI_AUDIT" token --host grok --usage-file /tmp/grok-usage.json --md-only
 ```
 
-**Expect:** summary + reconciliation (`Matches: yes`). Grok without a file should say official auto is not possible and ask for a file.
+Expect: summary + reconciliation. Empty/no CSV → clear error or “no data”, not a silent success with `Matches: yes`.
 
 ---
 
-## 3. Facts audit (~1 min)
+## 3. Facts audit (~30 s)
 
 ```bash
-bash "$AI_AUDIT" facts --host grok --root "$PLUGIN/fixtures/grok" --stale-days 30 --md-only
-# Or on a live Grok sand-data / Claude memory / Cursor --memories export:
-bash "$AI_AUDIT" facts --host auto --stale-days 30 --md-only
+bash "$AI_AUDIT" facts --host claude --stale-days 30 --md-only | head -40
+bash "$AI_AUDIT" facts --host cursor --stale-days 30 --md-only | head -40
+bash "$AI_AUDIT" facts --host grok --stale-days 30 --md-only | head -40
 ```
 
-**Expect:** issues listed with a kind (`stale` / `duplicate` / `conflict` / `orphan`) and a reason. No edits to memory files.
+Expect: issues with a kind and a reason. No edits to memory files.
 
 ---
 
-## 4. Read-only + secrets (~30 s)
+## 4. Secrets stay redacted (~30 s)
+
+Plant a realistic fake key in a throwaway copy, then confirm the raw value never appears (count must be **0**):
 
 ```bash
-bash "$AI_AUDIT" context --host claude --root "$PLUGIN/fixtures/claude" --json-only | grep -i secret || true
-# Confirm no SHOULD_NOT_APPEAR / credential values leak from fixtures
+SECRET_ROOT="$(mktemp -d)"
+# Prefer the plugin fixtures if present next to the install:
+FIX="$PLUGIN/fixtures/grok"
+cp -R "$FIX" "$SECRET_ROOT/grok"
+printf '%s\n' '- (2025-02-01) Old token sk-ant-FAKE1234567890abcdef' \
+  >>"$SECRET_ROOT/grok/sand-data/user-memory/by-agent/agent-active/profile.md"
+
+bash "$AI_AUDIT" facts --host grok --root "$SECRET_ROOT/grok" --json-only \
+  | tee /tmp/ai-audit-secret-facts.json >/dev/null
+bash "$AI_AUDIT" facts --host grok --root "$SECRET_ROOT/grok" --md-only \
+  | tee /tmp/ai-audit-secret-facts.md >/dev/null
+
+test "$(grep -c 'FAKE1234567890abcdef' /tmp/ai-audit-secret-facts.json || true)" -eq 0
+test "$(grep -c 'FAKE1234567890abcdef' /tmp/ai-audit-secret-facts.md || true)" -eq 0
+grep -q REDACTED /tmp/ai-audit-secret-facts.json
+
+rm -rf "$SECRET_ROOT"
 ```
 
-**Expect:** secrets redacted/skipped; working tree unchanged (`git status` clean if you only ran audits).
+Also confirm a bad CSV path is not silent:
+
+```bash
+bash "$AI_AUDIT" token --host cursor --csv /nonexistent/usage.csv --md-only | grep -i 'not found'
+```

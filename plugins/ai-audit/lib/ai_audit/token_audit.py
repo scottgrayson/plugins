@@ -22,14 +22,10 @@ from .common import (
     est_tokens,
     is_secret_path,
     load_json_safe,
+    redact_secrets,
     safe_read_text,
 )
 from .detect import Roots
-
-# v0.1.0: savings estimates / ranked wins are out of scope.
-CACHE_HIT_MIN_EVENTS = 5  # retained for tests that import the name
-TOOL_RESULT_TRIM_FRAC = 0.5
-SAVINGS_BUDGET_FRAC = 0.8
 
 
 def _norm_header(h: str) -> str:
@@ -95,6 +91,30 @@ def _classify_kind(kind_raw: str, row: dict[str, str]) -> str:
         # Fall through — still classify via IDs above; else local/IDE default for remaining
         pass
     return "local"
+
+
+
+def _to_epoch_ms(value: Optional[str]) -> Optional[int]:
+    """Convert ISO date/datetime or numeric string to epoch milliseconds (Admin API)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        n = int(s)
+        # Heuristic: seconds vs ms
+        return n if n > 10_000_000_000 else n * 1000
+    try:
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            dt = datetime(int(s[0:4]), int(s[5:7]), int(s[8:10]), tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return None
 
 
 def parse_cursor_usage_csv(path: Path) -> dict[str, Any]:
@@ -239,8 +259,9 @@ def fetch_cursor_admin_usage(
     end_date: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """
-    Team Admin API when CURSOR_ADMIN_API_KEY is set (or --cursor-admin-api).
-    Uses documented Basic auth. Supports date range + pagination.
+    Enterprise-team Admin API when CURSOR_ADMIN_API_KEY is set (or --cursor-admin-api).
+    Individual / Pro accounts: use a dashboard Usage CSV instead.
+    Dates are sent as epoch milliseconds. Uses documented Basic auth + pagination.
     Never scrapes IDE DBs.
     """
     # Explicit admin key only — never fall back to other API key env vars.
@@ -269,12 +290,16 @@ def fetch_cursor_admin_usage(
     page = 1
     page_size = 100
 
+    truncated = False
+    max_pages = 500  # safety; if hit, report truncated rather than silent stop
     while True:
         payload: dict[str, Any] = {"page": page, "pageSize": page_size}
-        if start_date:
-            payload["startDate"] = start_date
-        if end_date:
-            payload["endDate"] = end_date
+        start_ms = _to_epoch_ms(start_date)
+        end_ms = _to_epoch_ms(end_date)
+        if start_ms is not None:
+            payload["startDate"] = start_ms
+        if end_ms is not None:
+            payload["endDate"] = end_ms
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode(),
@@ -329,14 +354,24 @@ def fetch_cursor_admin_usage(
                     m["cloud_agents"] = m.get("cloud_agents", 0) + 1
             by_model_kind[model][kind] += row_total
 
-        # Stop when a short page arrives or pagination metadata says done.
-        total_pages = data.get("totalPages") or data.get("pageCount")
+        # Docs return pagination.numPages / hasNextPage (also accept legacy keys).
+        pagination = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+        total_pages = (
+            pagination.get("numPages")
+            or data.get("totalPages")
+            or data.get("pageCount")
+        )
+        has_next = pagination.get("hasNextPage")
+        if has_next is False:
+            break
         if total_pages is not None and page >= int(total_pages):
             break
-        if len(events) < page_size:
+        # Prefer explicit hasNextPage=True over a short final-ish page.
+        if has_next is not True and len(events) < page_size:
             break
         page += 1
-        if page > 50:  # hard safety cap
+        if page > max_pages:
+            truncated = True
             break
 
     clean_model = {
@@ -359,7 +394,16 @@ def fetch_cursor_admin_usage(
         "by_max_mode": {},
         "events": [],
         "pages_fetched": page,
+        "truncated": truncated,
         "reconciliation": _reconcile_token_buckets(events_total, clean_model, clean_kind),
+        "notes": (
+            [
+                f"Admin API results truncated after {max_pages} pages "
+                f"({len(all_events)} events). Narrow --admin-start/--admin-end or re-run."
+            ]
+            if truncated
+            else []
+        ),
     }
 
 
@@ -538,9 +582,20 @@ def collect_claude_tokens(roots: Roots) -> dict[str, Any]:
     projects = home / "projects"
     alt = roots.home / ".config" / "claude" / "projects"
     jsonl_files: list[Path] = []
-    for base in (projects, alt):
-        if base.is_dir():
-            jsonl_files.extend(sorted(base.rglob("*.jsonl")))
+    bases = [projects, alt]
+    env_cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_cfg:
+        bases.insert(0, Path(env_cfg).expanduser() / "projects")
+    seen: set[Path] = set()
+    for base in bases:
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.jsonl")):
+            rp = path.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            jsonl_files.append(path)
 
     by_model: dict[str, dict[str, float]] = defaultdict(
         lambda: {
@@ -617,35 +672,66 @@ def collect_cursor_tokens(
 ) -> dict[str, Any]:
     """
     Official auto: Cursor Admin API when CURSOR_ADMIN_API_KEY is set
-    (https://cursor.com/docs/account/teams/admin-api — filtered-usage-events).
-    File fallback: dashboard Usage CSV (--csv / --usage-file).
+    (Enterprise team admin keys only — https://cursor.com/docs/account/teams/admin-api).
+    Individual / Pro accounts: download Usage CSV (--csv / --usage-file).
     Never scrape state.vscdb or cookies.
     """
     notes = [
-        "Official auto: Admin API POST /teams/filtered-usage-events when "
-        "CURSOR_ADMIN_API_KEY is set (Enterprise). Docs: "
-        "https://cursor.com/docs/account/teams/admin-api",
-        "File fallback: download Usage CSV from the Cursor dashboard "
-        "(Settings → Usage / team dashboard) and pass --csv PATH.",
+        "Official auto (Enterprise team admin keys only): Admin API "
+        "POST /teams/filtered-usage-events when CURSOR_ADMIN_API_KEY is set. "
+        "Docs: https://cursor.com/docs/account/teams/admin-api. "
+        "Individual / Pro accounts must use a dashboard Usage CSV instead.",
+        "File fallback: Cursor dashboard → Usage → export/download CSV, then --csv PATH.",
         "Never scrape session tokens from state.vscdb or browser cookies.",
     ]
     csv_data = None
+    explicit_csv = csv_path is not None
+
     if usage_file and Path(usage_file).suffix.lower() == ".csv":
         csv_path = Path(usage_file)
+        explicit_csv = True
     if usage_file and Path(usage_file).suffix.lower() != ".csv":
         file_data = parse_usage_file(Path(usage_file))
         if not file_data.get("error"):
-            notes.extend(file_data.get("notes") or [])
             return {
                 **file_data,
                 "official_auto": False,
                 "estimate": False,
-                "notes": notes + (file_data.get("notes") or []),
+                "notes": notes + list(file_data.get("notes") or []),
             }
         notes.append(f"usage-file failed: {file_data.get('error')}")
 
     if csv_path:
-        csv_data = parse_cursor_usage_csv(Path(csv_path))
+        csv_path = Path(csv_path)
+        if not csv_path.is_file():
+            return {
+                "source": "none",
+                "official_auto": False,
+                "estimate": False,
+                "by_model": {},
+                "by_kind": {},
+                "by_max_mode": {},
+                "by_tool": {},
+                "error": f"CSV not found: {csv_path}",
+                "reconciliation": _reconcile_token_buckets(0, {}, {}),
+                "notes": notes + [f"CSV path does not exist: {csv_path}"],
+                "missing_csv": True,
+            }
+        csv_data = parse_cursor_usage_csv(csv_path)
+        if csv_data.get("error"):
+            return {
+                "source": "none",
+                "official_auto": False,
+                "estimate": False,
+                "by_model": {},
+                "by_kind": {},
+                "by_max_mode": {},
+                "by_tool": {},
+                "error": csv_data["error"],
+                "reconciliation": _reconcile_token_buckets(0, {}, {}),
+                "notes": notes + [str(csv_data["error"])],
+                "missing_csv": True,
+            }
     else:
         for candidate in (
             roots.project / "usage.csv",
@@ -656,9 +742,11 @@ def collect_cursor_tokens(
                 csv_data = parse_cursor_usage_csv(candidate)
                 break
 
-    # Auto-fetch when the official Admin API key is present.
+    have_csv = bool(csv_data and not csv_data.get("error"))
+
+    # Skip Admin API when a usable CSV is already loaded (avoid discarded live calls).
     key_present = bool(os.environ.get("CURSOR_ADMIN_API_KEY"))
-    want_admin = use_admin_api or key_present
+    want_admin = (use_admin_api or key_present) and not have_csv
     admin = None
     if want_admin:
         admin = fetch_cursor_admin_usage(start_date=admin_start, end_date=admin_end)
@@ -667,19 +755,25 @@ def collect_cursor_tokens(
             admin = None
         elif admin:
             notes.append(
-                "Fetched usage via official Admin API (CURSOR_ADMIN_API_KEY)."
+                "Fetched usage via Enterprise Admin API (CURSOR_ADMIN_API_KEY)."
             )
+            for n in admin.get("notes") or []:
+                notes.append(n)
         elif use_admin_api and not key_present:
             notes.append(
                 "Admin API requested (--cursor-admin-api) but CURSOR_ADMIN_API_KEY is unset."
             )
+    elif have_csv and (use_admin_api or key_present):
+        notes.append(
+            "CSV provided — Admin API skipped (CSV is the usage source)."
+        )
     else:
         notes.append(
-            "Admin API not used (set CURSOR_ADMIN_API_KEY to auto-fetch, "
-            "or pass --cursor-admin-api)."
+            "Admin API not used (Enterprise: set CURSOR_ADMIN_API_KEY; "
+            "otherwise pass --csv for a dashboard export)."
         )
 
-    if csv_data and not csv_data.get("error"):
+    if have_csv:
         primary = csv_data
         source = "usage_csv"
         official_auto = False
@@ -696,16 +790,12 @@ def collect_cursor_tokens(
             "by_kind": {},
             "by_max_mode": {},
             "by_tool": {},
-            "reconciliation": {
-                "source_total_tokens": 0,
-                "by_model_sum": 0,
-                "by_kind_sum": 0,
-                "ok": True,
-            },
+            "reconciliation": _reconcile_token_buckets(0, {}, {}),
             "notes": notes
             + [
                 "No usage data yet. Download the Usage CSV from the Cursor dashboard "
-                "and re-run with --csv PATH (or set CURSOR_ADMIN_API_KEY for Admin API).",
+                "(Usage page → export) and re-run with --csv PATH. "
+                "Enterprise team admins may set CURSOR_ADMIN_API_KEY instead.",
             ],
             "missing_csv": True,
         }
@@ -721,7 +811,7 @@ def collect_cursor_tokens(
         "source": source,
         "official_auto": official_auto,
         "official_source": (
-            "https://cursor.com/docs/account/teams/admin-api"
+            "https://cursor.com/docs/account/teams/admin-api (Enterprise)"
             if source == "admin_api"
             else "Cursor dashboard Usage CSV export"
         ),
@@ -734,16 +824,17 @@ def collect_cursor_tokens(
         "event_count": primary.get("event_count", 0),
         "csv": csv_data.get("source") if csv_data else None,
         "admin": bool(admin),
+        "truncated": bool(primary.get("truncated")),
         "reconciliation": recon,
         "notes": notes,
     }
+
 
 
 def collect_grok_tokens(
     roots: Roots,
     usage_total: Optional[float] = None,
     usage_period: Optional[str] = None,
-    routines: Optional[list[dict[str, Any]]] = None,
     usage_file: Optional[Path] = None,
 ) -> dict[str, Any]:
     """
@@ -769,7 +860,6 @@ def collect_grok_tokens(
         if file_data.get("error"):
             notes.append(f"usage-file failed: {file_data['error']}")
         else:
-            notes.extend(file_data.get("notes") or [])
             return {
                 "source": "usage_file",
                 "official_auto": False,
@@ -779,21 +869,14 @@ def collect_grok_tokens(
                 "by_model": file_data.get("by_model") or {},
                 "by_kind": {},
                 "by_tool": {},
-                "routines": routines or [],
                 "usage_total": file_data.get("usage_total"),
                 "usage_period": file_data.get("usage_period"),
                 "unit": file_data.get("unit"),
                 "reconciliation": file_data.get("reconciliation")
-                or {
-                    "source_total_tokens": float(file_data.get("usage_total") or 0),
-                    "by_model_sum": float(file_data.get("usage_total") or 0),
-                    "by_kind_sum": float(file_data.get("usage_total") or 0),
-                    "ok": True,
-                },
-                "notes": notes,
+                or _reconcile_token_buckets(float(file_data.get("usage_total") or 0), {}),
+                "notes": notes + list(file_data.get("notes") or []),
             }
 
-    # Optional local activity (message counts) — not official usage tokens.
     sand = roots.sand_data
     by_bot: dict[str, dict[str, float]] = {}
     if sand and (sand / "search-index.db").is_file():
@@ -826,17 +909,23 @@ def collect_grok_tokens(
             if tmp_dir is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    routines = routines or []
+    safe_period = redact_secrets(str(usage_period)) if usage_period else usage_period
     if usage_total is not None:
+        recon = _reconcile_token_buckets(float(usage_total), {})
+        # For a scalar total with no buckets, treat as reconciled self-check.
         recon = {
             "source_total_tokens": float(usage_total),
             "by_model_sum": float(usage_total),
             "by_kind_sum": float(usage_total),
             "ok": True,
+            "no_data": False,
+            "status": "ok",
         }
         notes.append(
-            f"User-provided usage total: {usage_total}"
-            + (f" ({usage_period})" if usage_period else "")
+            redact_secrets(
+                f"User-provided usage total: {usage_total}"
+                + (f" ({safe_period})" if safe_period else "")
+            )
         )
         return {
             "source": "usage_file",
@@ -847,9 +936,8 @@ def collect_grok_tokens(
             "by_model": {},
             "by_kind": {},
             "by_tool": {},
-            "routines": routines,
             "usage_total": usage_total,
-            "usage_period": usage_period,
+            "usage_period": safe_period,
             "reconciliation": recon,
             "notes": notes,
             "local_activity": by_bot,
@@ -864,15 +952,9 @@ def collect_grok_tokens(
         "by_model": {},
         "by_kind": {},
         "by_tool": {},
-        "routines": routines,
         "usage_total": None,
         "usage_period": None,
-        "reconciliation": {
-            "source_total_tokens": 0,
-            "by_model_sum": 0,
-            "by_kind_sum": 0,
-            "ok": True,
-        },
+        "reconciliation": _reconcile_token_buckets(0, {}),
         "notes": notes
         + [
             "Provide a usage file (--usage-file) or --usage-total from the Bot "
@@ -898,12 +980,19 @@ def _reconcile_token_buckets(
         else model_sum
     )
     src = float(events_total)
+    matches = abs(src - model_sum) < 0.01 and (
+        by_kind is None or abs(src - kind_sum) < 0.01
+    )
+    no_data = src == 0 and model_sum == 0 and (
+        by_kind is None or kind_sum == 0
+    )
     return {
         "source_total_tokens": src,
         "by_model_sum": model_sum,
         "by_kind_sum": kind_sum,
-        "ok": abs(src - model_sum) < 0.01
-        and (by_kind is None or abs(src - kind_sum) < 0.01),
+        "ok": matches,
+        "no_data": no_data,
+        "status": "no_data" if no_data else ("ok" if matches else "mismatch"),
     }
 
 
@@ -953,11 +1042,12 @@ def parse_usage_file(path: Path) -> dict[str, Any]:
             "by_kind_sum": recon_total,
             "ok": True,
         }
+    safe_period = redact_secrets(str(period)) if period else period
     return {
         "source": "usage_file",
         "path": str(path),
         "usage_total": usage_total,
-        "usage_period": period,
+        "usage_period": safe_period,
         "unit": unit,
         "by_model": by_model,
         "by_kind": {},
@@ -965,9 +1055,11 @@ def parse_usage_file(path: Path) -> dict[str, Any]:
         "estimate": False,
         "reconciliation": recon,
         "notes": [
-            f"Loaded user usage file ({unit})"
-            + (f" for {period}" if period else "")
-            + "."
+            redact_secrets(
+                f"Loaded user usage file ({unit})"
+                + (f" for {safe_period}" if safe_period else "")
+                + "."
+            )
         ],
     }
 
@@ -986,7 +1078,6 @@ def run_token_audit(
     admin_end: Optional[str] = None,
     usage_total: Optional[float] = None,
     usage_period: Optional[str] = None,
-    routines: Optional[list[dict[str, Any]]] = None,
     usage_file: Optional[Path] = None,
 ) -> dict[str, Any]:
     if roots.host == "claude":
@@ -1019,7 +1110,6 @@ def run_token_audit(
             roots,
             usage_total=usage_total,
             usage_period=usage_period,
-            routines=routines,
             usage_file=usage_file,
         )
 

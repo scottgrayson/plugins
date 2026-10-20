@@ -88,7 +88,12 @@ def detect_host(
                 home_path / "sand-data",
             )
 
-    claude_home = home_path / ".claude"
+    # CLAUDE_CONFIG_DIR relocates Claude Code storage (docs: Manage sessions / .claude directory).
+    # Honored only outside --root isolation so fixtures stay hermetic.
+    if not isolated and os.environ.get("CLAUDE_CONFIG_DIR"):
+        claude_home = Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser()
+    else:
+        claude_home = home_path / ".claude"
     cursor_home = home_path / ".cursor"
 
     forced = (host or "auto").lower().strip()

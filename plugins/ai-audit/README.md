@@ -106,8 +106,8 @@ Useful flags:
 
 | Host | Official auto-download | Link / note |
 | --- | --- | --- |
-| Claude Code | Yes — local session JSONL | [Manage sessions](https://code.claude.com/docs/en/sessions) (`~/.claude/projects/<cwd-slug>/*.jsonl`) |
-| Cursor | Yes — Admin API when `CURSOR_ADMIN_API_KEY` is set | [Admin API](https://cursor.com/docs/account/teams/admin-api) (`POST /teams/filtered-usage-events`). File fallback: dashboard Usage CSV |
+| Claude Code | Local session JSONL (format is internal; may change) | [Manage sessions](https://code.claude.com/docs/en/sessions) — `~/.claude/projects/` or `$CLAUDE_CONFIG_DIR/projects/` |
+| Cursor | **Enterprise team admin keys only** — Admin API when `CURSOR_ADMIN_API_KEY` is set | [Admin API](https://cursor.com/docs/account/teams/admin-api) (`POST /teams/filtered-usage-events`, dates as epoch ms). Individual / Pro: dashboard Usage CSV |
 | Grok Bot | **Not possible** | No documented Bot usage API/export. xAI Management API covers API-key spend, not Bot. Ask for a Usage & Billing JSON file (`--usage-file`) |
 
 Never scraping. Never copied cookies/keys. Totals in the report include a **reconciliation** block (source total vs sum of buckets).

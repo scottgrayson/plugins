@@ -47,7 +47,7 @@ Show the markdown report to the user. Proposed fixes are **suggestions only** â€
 | Gap | Ask for |
 | --- | --- |
 | Cursor user / team rules | Paste from Customize â†’ Rules (not on disk) |
-| Grok routines / connectors | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
+| Grok connectors (not on disk) | Ask the bot in chat, or open the info pane (click the bot name in the chat header) |
 | Claude live breakdown | Paste `/context` output to calibrate |
 
 Never read secret files (`host-secrets.json`, `gateway.json`, MCP `env`/`headers` values, `~/.ai/secrets/`). Never lift login tokens from app databases.

@@ -48,6 +48,43 @@ SECRET_JSON_KEYS = frozenset(
     }
 )
 
+# Value-pattern redaction for secrets that appear inside free-text (facts, notes, periods).
+# Matches common provider key shapes; replacements keep enough prefix to show a key was present.
+_SECRET_VALUE_RES = (
+    re.compile(r"(?i)\b(sk-ant-)[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"(?i)\b(sk-|sk-proj-|sk-or-)[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"(?i)\b(xai-)[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"(?i)\b(ghp_|gho_|github_pat_)[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"(?i)\b(xox[baprs]-)[A-Za-z0-9_\-]{10,}"),
+    re.compile(r"(?i)\b(AIza)[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"(?i)\b(AKIA)[A-Z0-9]{12,}"),
+    re.compile(r"(?i)\b(key-|api[_-]?key[_\-=:\s]+)[A-Za-z0-9_\-]{16,}"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace secret-shaped values in user-sourced strings. Safe on non-strings via str()."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    out = text
+    for rx in _SECRET_VALUE_RES:
+        out = rx.sub(lambda m: (m.group(1) if m.lastindex else "***") + "…REDACTED", out)
+    return out
+
+
+def redact_tree(obj: Any) -> Any:
+    """Deep-copy-ish walk: redact every string leaf in dict/list structures."""
+    if isinstance(obj, str):
+        return redact_secrets(obj)
+    if isinstance(obj, list):
+        return [redact_tree(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: redact_tree(v) for k, v in obj.items()}
+    return obj
+
+
 
 @dataclass
 class InventoryItem:
@@ -68,7 +105,6 @@ class InventoryItem:
 @dataclass
 class Win:
     title: str
-    saving_est_tokens: int  # 0 = ask/check or saving unknown
     measured: str
     rationale: str
     suggestion: str = ""
@@ -87,11 +123,13 @@ class FactIssue:
     path: str
     detail: str
     date: str = ""
-    saving_est_tokens: int = 0
     suggestion: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["detail"] = redact_secrets(d.get("detail") or "")
+        d["suggestion"] = redact_secrets(d.get("suggestion") or "")
+        return d
 
 
 def est_tokens(n_bytes_or_chars: int) -> int:
@@ -299,18 +337,6 @@ def similarity(a: str, b: str) -> float:
     if not wa or not wb:
         return 0.0
     return len(wa & wb) / len(wa | wb)
-
-
-def rank_wins(wins: Iterable[Win], limit: int = 5) -> list[Win]:
-    wins_list = list(wins)
-    measured = [w for w in wins_list if not w.ask and w.saving_est_tokens > 0]
-    asks = [w for w in wins_list if w.ask or w.saving_est_tokens <= 0]
-    measured_sorted = sorted(measured, key=lambda w: (-w.saving_est_tokens, w.title))
-    # Preserve insertion order for ask/check items (callers put higher-priority asks first).
-    ordered = measured_sorted + asks
-    if not ordered:
-        return []
-    return ordered[: min(limit, len(ordered))]
 
 
 def today_utc() -> date:
