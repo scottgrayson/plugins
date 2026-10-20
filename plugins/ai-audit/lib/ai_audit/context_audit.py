@@ -1184,13 +1184,27 @@ COLLECTORS = {
 }
 
 
-def run_context_audit(roots: Roots) -> dict[str, Any]:
+def run_context_audit(
+    roots: Roots,
+    *,
+    env_override: str | None = None,
+    context_window: str = "200k",
+    env_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from .environment import detect_environment
+
     collector = COLLECTORS[roots.host]
     items = _dedupe_items(collector(roots))
     wins = rank_context_wins(items)
+    if env_info is None:
+        env_info = detect_environment(
+            roots.host, override=env_override, sand_data=roots.sand_data
+        )
     payload: dict[str, Any] = {
         "audit": "context",
         "host": roots.host,
+        "provider": env_info.get("provider"),
+        "environment": env_info,
         "roots": roots.to_dict(),
         "inventory": [i.to_dict() for i in items],
         "wins": [w.to_dict() for w in wins],
@@ -1207,9 +1221,32 @@ def run_context_audit(roots: Roots) -> dict[str, Any]:
     if roots.host == "cursor":
         from .cursor_startup import build_cursor_startup_report
 
-        grouped = build_cursor_startup_report(roots)
+        grouped = build_cursor_startup_report(
+            roots, context_window=context_window
+        )
         # Keep inventory for tests; prefer grouped fields for markdown/JSON consumers.
         payload.update({k: v for k, v in grouped.items() if k not in ("audit", "host")})
         payload["audit"] = "context"
         payload["host"] = "cursor"
+        payload["provider"] = env_info.get("provider")
+        payload["environment"] = env_info
+        # One section per provider·environment (extensible to multi-host runs).
+        section = {
+            k: payload[k]
+            for k in (
+                "host",
+                "provider",
+                "environment",
+                "tokenizer",
+                "context_window",
+                "total_tokens_200k",
+                "total_tokens_1m",
+                "subtotals",
+                "groups",
+                "rows",
+                "skill_budget",
+            )
+            if k in payload
+        }
+        payload["sections"] = [section]
     return payload

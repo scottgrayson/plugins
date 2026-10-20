@@ -583,8 +583,57 @@ def _hooks_rows(roots: Roots) -> list[ReportRow]:
     return rows
 
 
-def build_cursor_startup_report(roots: Roots) -> dict[str, Any]:
+def _row_sort_key(row: dict[str, Any] | ReportRow, *, window: str) -> tuple[int, str]:
+    """Tokens desc (active window for skills), then name asc."""
+    if isinstance(row, ReportRow):
+        item = row.item
+        t200 = row.tokens
+        t1m = row.tokens_1m if row.tokens_1m is not None else row.tokens
+        group = row.group
+    else:
+        item = str(row.get("item") or "")
+        t200 = int(row.get("tokens") or 0)
+        t1m = row.get("tokens_1m")
+        t1m = int(t1m) if t1m is not None else t200
+        group = str(row.get("group") or "")
+    if group == "Skill descriptions" and window == "1m":
+        tok = t1m
+    else:
+        tok = t200
+    return (-tok, item.lower())
+
+
+def sort_grouped_rows(
+    rows: list[dict[str, Any]],
+    subtotals: dict[str, dict[str, int]],
+    *,
+    window: str = "200k",
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Groups by subtotal desc; rows within group by tokens desc, name asc."""
+
+    def group_subtotal(g: str) -> int:
+        s = subtotals.get(g) or {}
+        if window == "1m":
+            return int(s.get("tokens_1m") or 0)
+        return int(s.get("tokens_200k") or 0)
+
+    groups_present = list(dict.fromkeys(r.get("group") for r in rows if r.get("group")))
+    groups_order = sorted(groups_present, key=lambda g: (-group_subtotal(str(g)), str(g)))
+    sorted_rows: list[dict[str, Any]] = []
+    for g in groups_order:
+        grow = [r for r in rows if r.get("group") == g]
+        grow.sort(key=lambda r: _row_sort_key(r, window=window))
+        sorted_rows.extend(grow)
+    return [str(g) for g in groups_order], sorted_rows
+
+
+def build_cursor_startup_report(
+    roots: Roots,
+    *,
+    context_window: str = "200k",
+) -> dict[str, Any]:
     """Build grouped startup report for Cursor host."""
+    window = "1m" if str(context_window).lower() in {"1m", "1000000", "1M"} else "200k"
     skill_entries = _collect_skill_entries(roots)
     rows_200k, total_200k, mode_200k = _budget_render(skill_entries, _AGENT_LIMIT_200K)
     rows_1m, total_1m, mode_1m = _budget_render(skill_entries, _AGENT_LIMIT_1M)
@@ -598,7 +647,7 @@ def build_cursor_startup_report(roots: Roots) -> dict[str, Any]:
     for r in rows_200k:
         by_name.setdefault(r["name"], []).append(r)
 
-    for name, group in sorted(by_name.items()):
+    for name, group in by_name.items():
         paths = [g["path"] for g in group]
         sources = sorted({g["source"] for g in group})
         t200 = sum(g["tokens"] for g in group)
@@ -662,22 +711,22 @@ def build_cursor_startup_report(roots: Roots) -> dict[str, Any]:
         ]
     )
 
-    groups_order = [
-        "Always-apply rules",
-        "User Rules",
-        "Skill descriptions",
-        "MCP servers",
-        "Model/settings",
-    ]
     all_rows = [*rule_rows, user_row, *skill_rows, *mcp_rows, *settings_rows]
+    row_dicts = [r.to_dict() for r in all_rows]
 
     subtotals: dict[str, dict[str, int]] = {}
-    for g in groups_order:
+    for g in {r.group for r in all_rows}:
         grow = [r for r in all_rows if r.group == g]
         subtotals[g] = {
             "tokens_200k": sum(r.tokens for r in grow),
-            "tokens_1m": sum(r.tokens_1m if r.tokens_1m is not None else r.tokens for r in grow),
+            "tokens_1m": sum(
+                r.tokens_1m if r.tokens_1m is not None else r.tokens for r in grow
+            ),
         }
+
+    groups_order, sorted_rows = sort_grouped_rows(
+        row_dicts, subtotals, window=window
+    )
 
     total_200k_all = sum(s["tokens_200k"] for s in subtotals.values())
     total_1m_all = sum(s["tokens_1m"] for s in subtotals.values())
@@ -686,11 +735,12 @@ def build_cursor_startup_report(roots: Roots) -> dict[str, Any]:
         "host": "cursor",
         "audit": "context",
         "tokenizer": tokenizer_label(),
+        "context_window": window,
         "total_tokens_200k": total_200k_all,
         "total_tokens_1m": total_1m_all,
         "subtotals": subtotals,
         "groups": groups_order,
-        "rows": [r.to_dict() for r in all_rows],
+        "rows": sorted_rows,
         "skill_budget": {
             "limit_200k": _AGENT_LIMIT_200K,
             "budget_200k": int(_AGENT_LIMIT_200K * 0.02),

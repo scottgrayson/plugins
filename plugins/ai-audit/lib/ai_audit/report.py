@@ -12,8 +12,18 @@ def to_json(payload: dict[str, Any]) -> str:
     return json.dumps(redact_tree(payload), indent=2, sort_keys=True) + "\n"
 
 
+def _env_heading(payload: dict[str, Any]) -> str:
+    info = payload.get("environment") or {}
+    if isinstance(info, dict) and info.get("heading"):
+        return str(info["heading"])
+    host = payload.get("host", "unknown")
+    labels = {"cursor": "Cursor", "claude": "Claude Code", "grok": "Grok Bot"}
+    return f"{labels.get(host, host)} · Unknown"
+
+
 def _legacy_context_markdown(payload: dict[str, Any]) -> str:
     host = payload.get("host", "unknown")
+    heading = _env_heading(payload)
     items = payload.get("inventory") or []
     always = [i for i in items if i.get("load") == "always"]
     always_tokens = sum(int(i.get("est_tokens") or 0) for i in always)
@@ -21,7 +31,9 @@ def _legacy_context_markdown(payload: dict[str, Any]) -> str:
     tok = payload.get("tokenizer") or "chars÷4 estimate"
 
     lines = [
-        f"# Context audit ({host})",
+        f"# Context audit — {heading}",
+        "",
+        f"Provider · environment: **{heading}**",
         "",
         f"Inventory: **{len(items)}** items · "
         f"~{total_tokens} est. tokens total · "
@@ -33,7 +45,10 @@ def _legacy_context_markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     limit = 25
-    ranked = sorted(always, key=lambda x: -int(x.get("est_tokens") or 0))
+    ranked = sorted(
+        always,
+        key=lambda x: (-int(x.get("est_tokens") or 0), str(x.get("path") or "")),
+    )
     for i in ranked[:limit]:
         path = i.get("path") or "?"
         kind = i.get("kind") or ""
@@ -56,28 +71,29 @@ def _legacy_context_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def grouped_context_markdown(payload: dict[str, Any]) -> str:
-    """Grouped table report (Cursor startup measurements)."""
-    host = payload.get("host", "cursor")
+def _one_section_markdown(payload: dict[str, Any]) -> list[str]:
+    heading = _env_heading(payload)
     tokenizer = payload.get("tokenizer") or "tiktoken o200k_base"
     total_200k = int(payload.get("total_tokens_200k") or 0)
     total_1m = int(payload.get("total_tokens_1m") or 0)
+    window = payload.get("context_window") or "200k"
     groups = payload.get("groups") or []
     rows = payload.get("rows") or []
     subtotals = payload.get("subtotals") or {}
 
     lines = [
-        f"# Startup context report ({host})",
+        f"## {heading}",
         "",
         f"**Total at startup: {total_200k:,} tokens** (200k-context model). "
-        f"**{total_1m:,}** on a 1M model.",
+        f"**{total_1m:,}** on a 1M model. "
+        f"Sort window: **{window}**.",
         "",
         f"Tokenizer: **{tokenizer}** (offline, vendored).",
         "",
         "Legend: **Item** and **Tokens** are scripted. "
         "**Purpose** and **AI suggestion** are blank for the agent to fill "
         "(see context-audit skill). Skill rows show `200k (1M)` when descriptions "
-        "differ by budget.",
+        "differ by budget. Groups and rows are sorted by tokens descending.",
         "",
     ]
 
@@ -87,9 +103,9 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
         sub_200 = int(sub.get("tokens_200k") or 0)
         sub_1m = int(sub.get("tokens_1m") or 0)
         if group == "Skill descriptions":
-            lines.append(f"## {group} · subtotal {sub_200:,} ({sub_1m:,})")
+            lines.append(f"### {group} · subtotal {sub_200:,} ({sub_1m:,})")
         else:
-            lines.append(f"## {group} · subtotal {sub_200:,}")
+            lines.append(f"### {group} · subtotal {sub_200:,}")
         lines.append("")
         lines.append("| Item | Tokens | Purpose | AI suggestion |")
         lines.append("|---|---:|---|---|")
@@ -107,6 +123,26 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
         if not grow:
             lines.append("| _(none)_ | 0 |  |  |")
         lines.append("")
+    return lines
+
+
+def grouped_context_markdown(payload: dict[str, Any]) -> str:
+    """Grouped table report; one section per provider·environment."""
+    sections = payload.get("sections")
+    if isinstance(sections, list) and sections:
+        lines = [
+            "# Startup context report",
+            "",
+        ]
+        for sec in sections:
+            lines.extend(_one_section_markdown(sec))
+            lines.append("")
+    else:
+        lines = [
+            "# Startup context report",
+            "",
+        ]
+        lines.extend(_one_section_markdown(payload))
 
     lines.extend(
         [
@@ -124,5 +160,7 @@ def grouped_context_markdown(payload: dict[str, Any]) -> str:
 
 def context_markdown(payload: dict[str, Any]) -> str:
     if payload.get("rows") and payload.get("groups"):
+        return grouped_context_markdown(payload)
+    if payload.get("sections"):
         return grouped_context_markdown(payload)
     return _legacy_context_markdown(payload)

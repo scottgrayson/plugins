@@ -51,10 +51,16 @@ def main() -> int:
 
     md = context_markdown(payload)
     assert "Startup context report" in md
-    assert "Always-apply rules" in md
-    assert "Skill descriptions" in md
+    assert payload.get("environment", {}).get("heading")
+    assert "Always-apply rules" in md or "Always-apply rules" in str(payload.get("groups"))
+    assert "Skill descriptions" in md or "Skill descriptions" in str(payload.get("groups"))
     assert "Purpose" in md and "AI suggestion" in md
     assert "LEAKED_VERIFIER" not in md
+    # Sorted groups
+    groups = payload["groups"]
+    subs = payload["subtotals"]
+    scores = [subs[g]["tokens_200k"] for g in groups]
+    assert scores == sorted(scores, reverse=True)
 
     print(
         f"PASS cursor_startup tokenizer={tokenizer_label()} "

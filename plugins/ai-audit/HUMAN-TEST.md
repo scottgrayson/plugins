@@ -84,12 +84,17 @@ cd /path/to/your/project
 if [ -z "${AI_AUDIT:-}" ] || [ ! -f "$AI_AUDIT" ]; then
   echo "FAIL AI_AUDIT unset or missing"
 else
-  OUT="$(bash "$AI_AUDIT" context --host auto --md-only | head -60)"
+  OUT="$(bash "$AI_AUDIT" context --host auto --md-only | head -80)"
   printf '%s\n' "$OUT"
   if printf '%s\n' "$OUT" | grep -qE 'Context audit|Startup context report'; then
     echo "PASS context audit ran"
   else
     echo "FAIL context audit output missing"
+  fi
+  if printf '%s\n' "$OUT" | grep -qE 'Cursor · |Claude Code · |Grok Bot · '; then
+    echo "PASS provider · environment heading"
+  else
+    echo "FAIL missing provider · environment heading"
   fi
   if printf '%s\n' "$OUT" | grep -qE 'tiktoken o200k|Tokenizer:'; then
     echo "PASS tokenizer labeled"
@@ -101,10 +106,19 @@ else
   else
     echo "FAIL missing report sections"
   fi
+  if printf '%s\n' "$OUT" | grep -q 'Startup context report'; then
+    if printf '%s\n' "$OUT" | grep -qiE 'sorted by tokens|Sort window'; then
+      echo "PASS sort order noted"
+    else
+      echo "FAIL sort legend missing"
+    fi
+  else
+    echo "PASS sort check skipped (non-Cursor inventory report)"
+  fi
 fi
 ```
 
-On Cursor, expect columns `Item | Tokens | Purpose | AI suggestion` with Purpose/suggestion blank for the agent to fill.
+On Cursor, expect a heading like `Cursor · Mac` or `Cursor · Cloud`, columns `Item | Tokens | Purpose | AI suggestion` (Purpose/suggestion blank for the agent), groups ordered by subtotal descending, and rows within each group by tokens descending.
 
 ---
 

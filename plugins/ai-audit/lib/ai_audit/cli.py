@@ -11,6 +11,7 @@ from . import __version__
 from .common import redact_tree
 from .context_audit import run_context_audit
 from .detect import detect_host
+from .environment import detect_environment
 from .report import context_markdown, to_json
 
 
@@ -60,6 +61,21 @@ def build_parser() -> argparse.ArgumentParser:
             help="Fixture/root dir containing home/, project/, and/or sand-data/ "
             "(fully isolates detection — no /home/box fallback)",
         )
+        sp.add_argument(
+            "--env",
+            default=None,
+            dest="env_override",
+            help=(
+                "Override environment half (Cloud|Mac|Linux|Windows) or a full "
+                "heading like 'Cursor · Cloud'"
+            ),
+        )
+        sp.add_argument(
+            "--context-window",
+            default="200k",
+            choices=["200k", "1m"],
+            help="Active context window for skill-row sorting (default: 200k)",
+        )
         sp.add_argument("--json-only", action="store_true")
         sp.add_argument("--md-only", action="store_true")
         sp.add_argument("--out-dir", default=None, help="Write report.json and report.md here")
@@ -83,12 +99,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         root=Path(args.root) if args.root else None,
     )
 
+    env_info = detect_environment(
+        roots.host,
+        override=getattr(args, "env_override", None),
+        sand_data=roots.sand_data,
+    )
+
     if args.cmd == "detect":
-        payload = {"audit": "detect", "version": __version__, **roots.to_dict()}
-        return _emit(payload, f"# Detect\n\nHost: **{roots.host}**\n", args)
+        payload = {
+            "audit": "detect",
+            "version": __version__,
+            "environment": env_info,
+            "provider": env_info.get("provider"),
+            **roots.to_dict(),
+        }
+        md = (
+            f"# Detect\n\nHost: **{roots.host}**\n\n"
+            f"Environment: **{env_info.get('heading')}**\n"
+        )
+        return _emit(payload, md, args)
 
     if args.cmd == "context":
-        payload = run_context_audit(roots)
+        payload = run_context_audit(
+            roots,
+            env_override=getattr(args, "env_override", None),
+            context_window=getattr(args, "context_window", "200k"),
+            env_info=env_info,
+        )
         return _emit(payload, context_markdown(payload), args)
 
     parser.error(f"unknown command {args.cmd}")

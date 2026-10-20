@@ -480,6 +480,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== environment heading + sort =="
+ENV_OUT="$(python3 -B "$PLUGIN/tests/test_environment.py" 2>&1)" && ENV_RC=0 || ENV_RC=$?
+if [[ $ENV_RC -eq 0 ]]; then
+  echo "PASS $ENV_OUT"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL environment (rc=$ENV_RC)"
+  echo "  $ENV_OUT"
+  FAIL=$((FAIL + 1))
+fi
+
 py_check "HUMAN-TEST secret check FAIL when AI_AUDIT unset" <<PY
 import pathlib, re, subprocess
 ht = pathlib.Path("$PLUGIN/HUMAN-TEST.md").read_text(encoding="utf-8")
